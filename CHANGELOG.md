@@ -1,3 +1,6 @@
+#### Changelog 1.3.0 - 22-11-2026
+- feat: manage mihomo subscriptions from subscriptions.list (9dc5a59)
+
 #### Changelog 1.2.8 - 13-06-2026
 - fix(log): 统一脚本日志输出 (dfa2661)
 - fix(net): 修复 TUN 模式下黑白名单与 fake-ip 连接异常 (ec78ef8)
