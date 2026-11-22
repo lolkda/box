@@ -56,6 +56,23 @@ su -c "/data/adb/box/scripts/box.tool sub update"
 - 下载或解析失败时保留上一个可用节点文件，不会清空。
 - `settings.ini` 的 `ruleset_prefix` 可给规则集地址加镜像前缀，留空使用官方地址。
 
+## 管理页面（KernelSU WebUI）
+
+模块自带管理页，入口是 KernelSU → 模块 → `Box for Root` 的 WebUI 按钮（`< >` 图标）。页面通过 KernelSU 的 `kernelsu.exec()` 以 root 调用 `box.tool`，无需额外服务。
+
+- 概览：运行状态、启动/停止/重启/重载、打开 mihomo 面板
+- 订阅：增删改查、立即更新
+- 策略组、规则、规则集：可视化增删改
+- 设置：网络模式、代理模式、DNS/分流、性能与更新选项
+- 日志：最近 200 行
+- 危险操作：删除配置、清空日志、重置订阅、更新核心（需二次确认）
+
+源码在 `webui/`，构建：
+
+```bash
+cd webui && npm install && npm run build
+```
+
 ## 文档与社区
 
 - Wiki: <https://github.com/boxproxy/box/wiki>

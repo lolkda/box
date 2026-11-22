@@ -5,6 +5,10 @@ scripts_dir="${0%/*}"
 user_agent="box_for_root"
 source "${BOX_HOME:-/data/adb/box}/settings.ini"
 
+for _arg in "$@"; do
+  [ "${_arg}" = "--json" ] && export BOX_JSON_MODE=1
+done
+
 # 使用 settings.ini 中提供的 log()
 TOOL_LOG="${box_run}/tool.log"
 busybox mkdir -p "$(dirname "$TOOL_LOG")"
@@ -932,6 +936,282 @@ sub_update() {
   return "${status}"
 }
 
+# ---------------------------------------------------------------------------
+# 管理页面 JSON 接口
+# ---------------------------------------------------------------------------
+
+json_quote() {
+  local escaped
+  escaped="$(printf '%s' "$1" | busybox sed 's/\\/\\\\/g; s/"/\\"/g' | busybox awk 'BEGIN { ORS = "" } { if (NR > 1) printf "\\n"; printf "%s", $0 }')"
+  printf '"%s"' "${escaped}"
+}
+
+json_bool() {
+  if [ "$1" = "true" ]; then printf 'true'; else printf 'false'; fi
+}
+
+ensure_yq() {
+  yq="yq"
+  if ! command -v yq &>/dev/null; then
+    if [ ! -e "${box_dir}/bin/yq" ]; then
+      ${scripts_dir}/box.tool upyq
+    fi
+    yq="${box_dir}/bin/yq"
+  fi
+}
+
+status_json() {
+  local running=false
+  local pid="null"
+  if [ -f "${box_pid}" ]; then
+    local current_pid
+    current_pid="$(cat "${box_pid}" 2>/dev/null)"
+    if [ -n "${current_pid}" ] && kill -0 "${current_pid}" 2>/dev/null; then
+      running=true
+      pid="${current_pid}"
+    fi
+  fi
+
+  printf '{"running":%s,"pid":%s,"core":%s,"mode":%s,"config":%s,"subscriptions":%s}\n' \
+    "$(json_bool "${running}")" \
+    "${pid}" \
+    "$(json_quote "${bin_name}")" \
+    "$(json_quote "${network_mode}")" \
+    "$(json_quote "${name_mihomo_config}")" \
+    "$(subscription_count)"
+}
+
+subscription_count() {
+  if [ ! -s "${subscriptions_file}" ]; then
+    printf '0'
+    return 0
+  fi
+  busybox awk -F'|' '!/^[[:space:]]*#/ && NF >= 2 && $1 != "" { count++ } END { print count + 0 }' "${subscriptions_file}"
+}
+
+logs_json() {
+  local line_count="${1:-200}"
+  case "${line_count}" in
+    ''|*[!0-9]*) line_count=200 ;;
+  esac
+
+  local file="${box_run}/runs.log"
+  [ -f "${file}" ] || file="${box_log}"
+
+  if [ ! -f "${file}" ]; then
+    printf '{"file":%s,"lines":[]}\n' "$(json_quote "${file}")"
+    return 0
+  fi
+
+  printf '{"file":%s,"lines":[' "$(json_quote "${file}")"
+  tail -n "${line_count}" "${file}" 2>/dev/null | busybox awk '
+    BEGIN { first = 1 }
+    {
+      line = $0
+      gsub(/\\/, "\\\\", line)
+      gsub(/"/, "\\\"", line)
+      gsub(/\t/, "\\t", line)
+      gsub(/\r/, "", line)
+      if (!first) printf ","
+      printf "\"%s\"", line
+      first = 0
+    }
+    END { print "]}" }
+  '
+}
+
+sub_list_json() {
+  printf '{"items":['
+  local first=1
+  if [ -s "${subscriptions_file}" ]; then
+    while IFS='|' read -r name url; do
+      case "${name}" in
+        ''|\#*) continue ;;
+      esac
+      local safe_name provider_file state
+      safe_name="$(sub_provider_file_name "${name}")"
+      provider_file="${mihomo_provide_path}/${safe_name}.yaml"
+      if [ -s "${provider_file}" ]; then state="已下载"; else state="未下载"; fi
+      [ "${first}" -eq 1 ] || printf ','
+      printf '{"name":%s,"url":%s,"provider":%s}' \
+        "$(json_quote "${name}")" "$(json_quote "${url}")" "$(json_quote "${state}")"
+      first=0
+    done < "${subscriptions_file}"
+  fi
+  printf ']}\n'
+}
+
+settings_keys() {
+  cat <<'EOF'
+boot_auto_start bin_name network_mode tproxy_port redir_port ipv6 performance_mode quic mihomo_dns_forward proxy_tcp proxy_udp dns_hijack_tcp dns_hijack_udp dns_hijack_mode bypass_cn_ip bypass_cn_ip_v4 bypass_cn_ip_v6 cnip_mode proxy_mode update_subscription update_geo use_ghproxy url_ghproxy mihomo_stable singbox_stable run_crontab interva_update cgroup_memcg memcg_limit taskset_cpu allow_cpu cgroup_blkio weight mac_filter mac_mode ruleset_prefix
+EOF
+}
+
+settings_array_keys() {
+  cat <<'EOF'
+cnip_force_proxy_apps force_proxy_cidrs force_proxy_cidrs6 macs_list wifi_ssids_list wifi_bssids_list
+EOF
+}
+
+settings_value() {
+  local key="$1"
+  eval "printf '%s' \"\${${key}}\""
+}
+
+settings_get_json() {
+  printf '{"settings":{'
+  local first=1
+  for key in $(settings_keys); do
+    local value
+    value="$(settings_value "${key}")"
+    [ "${first}" -eq 1 ] || printf ','
+    printf '%s:%s' "$(json_quote "${key}")" "$(json_quote "${value}")"
+    first=0
+  done
+  printf '},"arrays":{'
+  first=1
+  for key in $(settings_array_keys); do
+    [ "${first}" -eq 1 ] || printf ','
+    printf '%s:[' "$(json_quote "${key}")"
+    eval "items=\"\${${key}[*]}\""
+    local array_first=1
+    for item in ${items}; do
+      [ "${array_first}" -eq 1 ] || printf ','
+      printf '%s' "$(json_quote "${item}")"
+      array_first=0
+    done
+    printf ']'
+    first=0
+  done
+  printf '}}\n'
+}
+
+settings_apply_json() {
+  local file="$1"
+  if [ ! -s "${file}" ]; then
+    log Error "settings apply: 缺少 JSON 文件"
+    return 1
+  fi
+
+  ensure_yq
+
+  local changed=""
+  local key
+
+  for key in $(settings_keys); do
+    if ${yq} -e "has(\"${key}\")" "${file}" >/dev/null 2>&1; then
+      local value
+      value="$(${yq} -r ".${key} // \"\"" "${file}" 2>/dev/null)"
+      value="$(printf '%s' "${value}" | busybox sed 's/[&\\#]/\\&/g')"
+      busybox sed -i "s#^${key}=.*#${key}=\"${value}\"#" "${settings_file}"
+      changed="${changed}${changed:+,}$(json_quote "${key}")"
+    fi
+  done
+
+  for key in $(settings_array_keys); do
+    if ${yq} -e "has(\"${key}\")" "${file}" >/dev/null 2>&1; then
+      local joined
+      joined="$(${yq} -r ".${key} | join(\" \")" "${file}" 2>/dev/null)"
+      busybox sed -i "s#^${key}=.*#${key}=(${joined})#" "${settings_file}"
+      changed="${changed}${changed:+,}$(json_quote "${key}")"
+    fi
+  done
+
+  local sh_bin="/system/bin/sh"
+  if [ ! -x "${sh_bin}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+      sh_bin="bash"
+    elif command -v mksh >/dev/null 2>&1; then
+      sh_bin="mksh"
+    else
+      sh_bin=""
+    fi
+  fi
+  if [ -n "${sh_bin}" ] && ! ${sh_bin} -n "${settings_file}" 2>/dev/null; then
+    log Error "settings.ini 语法校验失败，已放弃本次修改"
+    return 1
+  fi
+
+  printf '{"ok":true,"changed":[%s]}\n' "${changed}"
+}
+
+config_get_json() {
+  ensure_yq
+  if [ ! -f "${mihomo_config}" ]; then
+    log Error "配置文件不存在: ${mihomo_config}"
+    return 1
+  fi
+  ${yq} -o=json '{ "proxy-groups": ."proxy-groups", "rule-providers": ."rule-providers", "rules": .rules }' "${mihomo_config}"
+}
+
+config_apply_json() {
+  local file="$1"
+  if [ ! -s "${file}" ]; then
+    log Error "config apply: 缺少 JSON 文件"
+    return 1
+  fi
+  if [ ! -f "${mihomo_config}" ]; then
+    log Error "配置文件不存在: ${mihomo_config}"
+    return 1
+  fi
+
+  ensure_yq
+
+  if ! ${yq} -e 'has("proxy-groups") and has("rule-providers") and has("rules")' "${file}" >/dev/null 2>&1; then
+    log Error "config apply: JSON 必须包含 proxy-groups、rule-providers、rules"
+    return 1
+  fi
+  if ! ${yq} -e '."proxy-groups" | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
+    log Error "config apply: proxy-groups 必须是数组"
+    return 1
+  fi
+  if ! ${yq} -e '.rules | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
+    log Error "config apply: rules 必须是数组"
+    return 1
+  fi
+
+  local backup="${mihomo_config}.bak"
+  cp -f "${mihomo_config}" "${backup}" 2>/dev/null
+
+  if ! ${yq} -i '."proxy-groups" = (load("'"${file}"'") | ."proxy-groups") | ."rule-providers" = (load("'"${file}"'") | ."rule-providers") | .rules = (load("'"${file}"'") | .rules)' "${mihomo_config}" 2>/dev/null; then
+    cp -f "${backup}" "${mihomo_config}" 2>/dev/null
+    log Error "config apply: 写入失败，已还原"
+    return 1
+  fi
+
+  if ! ${yq} '.' "${mihomo_config}" >/dev/null 2>&1; then
+    cp -f "${backup}" "${mihomo_config}" 2>/dev/null
+    log Error "config apply: YAML 校验失败，已还原"
+    return 1
+  fi
+
+  printf '{"ok":true}\n'
+}
+
+config_delete_json() {
+  if [ ! -f "${mihomo_config}" ]; then
+    log Error "配置文件不存在: ${mihomo_config}"
+    return 1
+  fi
+  local deleted="${mihomo_config}.deleted.$(date +%Y%m%d%H%M%S)"
+  mv "${mihomo_config}" "${deleted}"
+  printf '{"ok":true,"path":%s}\n' "$(json_quote "${deleted}")"
+}
+
+logs_clear_json() {
+  local file
+  for file in "${box_run}/runs.log" "${box_run}/tool.log" "${box_run}/${bin_name}.log"; do
+    [ -f "${file}" ] && : > "${file}"
+  done
+  printf '{"ok":true}\n'
+}
+
+reset_subscriptions_json() {
+  : > "${subscriptions_file}"
+  rm -f "${mihomo_provide_path}"/*.yaml 2>/dev/null
+  printf '{"ok":true}\n'
+}
+
 upkernel() {
   setup_github_api
   
@@ -1490,9 +1770,13 @@ cgroup_memcg() {
 }
 
 webroot() {
+  path_webroot="/data/adb/modules/box_for_root/webroot/index.html"
+  if [ -s "$path_webroot" ] && grep -q 'box-managed-ui' "$path_webroot" 2>/dev/null; then
+    return 0
+  fi
+
   ip_port=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/external-controller:/ {print $2}' "${mihomo_config}"; else busybox awk -F'[:,]' '/"external_controller"/ {print $2":"$3}' "${sing_config}" | sed 's/^[ \t]*//;s/"//g'; fi;)
   secret=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/^secret:/ {print $2}' "${mihomo_config}" | sed 's/"//g'; else busybox awk -F'"' '/"secret"/ {print $4}' "${sing_config}" | head -n 1; fi;)
-  path_webroot="/data/adb/modules/box_for_root/webroot/index.html"
   touch "$path_webroot"
   if [[ "${bin_name}" = @(mihomo|sing-box) ]]; then
     echo -e '
@@ -1598,13 +1882,74 @@ case "$1" in
     reload_if_running
     exit "${sub_status}"
     ;;
+  status)
+    if [ "$2" = "--json" ]; then
+      status_json
+    else
+      "${scripts_dir}/box.service" status
+    fi
+    ;;
+  logs)
+    if [ "$2" = "clear" ]; then
+      logs_clear_json
+    elif [ "$2" = "--json" ]; then
+      logs_json 200
+    elif [ "$3" = "--json" ]; then
+      logs_json "${2:-200}"
+    else
+      tail -n "${2:-200}" "${box_run}/runs.log" 2>/dev/null || true
+    fi
+    ;;
+  settings)
+    case "$2" in
+      get)
+        settings_get_json
+        ;;
+      apply)
+        settings_apply_json "$3"
+        ;;
+      *)
+        log Info "用法: $0 settings {get|apply <json文件>}"
+        ;;
+    esac
+    ;;
+  reset)
+    case "$2" in
+      subscriptions)
+        reset_subscriptions_json
+        ;;
+      *)
+        log Info "用法: $0 reset subscriptions"
+        ;;
+    esac
+    ;;
+  config)
+    case "$2" in
+      get)
+        config_get_json
+        ;;
+      apply)
+        config_apply_json "$3"
+        ;;
+      delete)
+        config_delete_json
+        ;;
+      *)
+        log Info "用法: $0 config {get|apply <json文件>|delete}"
+        ;;
+    esac
+    ;;
   sub)
     case "$2" in
       add)
         sub_add "$3" "$4"
         ;;
       list|ls)
-        sub_list
+        if [ "$3" = "--json" ]; then
+          sub_list_json
+        else
+          sub_list
+        fi
         ;;
       rm|remove|del)
         sub_rm "$3"
