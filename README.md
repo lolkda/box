@@ -41,6 +41,21 @@
 - `box.iptables`: 透明代理规则启用、重建、清理
 - `box.tool`: 订阅更新、Geo 更新、核心更新、配置检查、WebUI 相关维护
 
+## 订阅管理（Mihomo）
+
+订阅清单位于 `/data/adb/box/mihomo/subscriptions.list`，每行 `名字|订阅地址`。推荐通过命令维护：
+
+```bash
+su -c "/data/adb/box/scripts/box.tool sub add <订阅地址> [名字]"
+su -c "/data/adb/box/scripts/box.tool sub list"
+su -c "/data/adb/box/scripts/box.tool sub rm <名字>"
+su -c "/data/adb/box/scripts/box.tool sub update"
+```
+
+- 更新订阅会重建 `proxy-providers` 并重载核心。
+- 下载或解析失败时保留上一个可用节点文件，不会清空。
+- `settings.ini` 的 `ruleset_prefix` 可给规则集地址加镜像前缀，留空使用官方地址。
+
 ## 文档与社区
 
 - Wiki: <https://github.com/boxproxy/box/wiki>

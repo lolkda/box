@@ -3,7 +3,7 @@
 scripts_dir="${0%/*}"
 
 user_agent="box_for_root"
-source /data/adb/box/settings.ini
+source "${BOX_HOME:-/data/adb/box}/settings.ini"
 
 # 使用 settings.ini 中提供的 log()
 TOOL_LOG="${box_run}/tool.log"
@@ -472,59 +472,55 @@ upgeox_all() {
   bin_name=$original_bin_name
 }
 
+# 订阅清单：每行 名字|URL
+subscriptions_file="${subscriptions_file:-${box_dir}/mihomo/subscriptions.list}"
+
+# 把订阅名字转换成安全的 provider 文件名
+sub_provider_file_name() {
+  local safe
+  safe="$(printf '%s' "$1" | busybox sed 's#[/\\|[:space:]]#_#g; s/^\.*//')"
+  [ -n "${safe}" ] || safe="sub"
+  printf '%s' "${safe}"
+}
+
+# 订阅名字是否已存在
+subscription_exists() {
+  local wanted="$1"
+  [ -f "${subscriptions_file}" ] || return 1
+  busybox awk -F'|' -v wanted="${wanted}" '$1 == wanted { found = 1 } END { exit(found ? 0 : 1) }' "${subscriptions_file}"
+}
+
 # 更新 mihomo 配置的 proxy-providers
 update_mihomo_providers() {
-  yq="yq"
-  if ! command -v yq &>/dev/null; then
-    if [ ! -e "${box_dir}/bin/yq" ]; then
-      log Debug "yq 文件未找到, 开始从 GitHub 下载"
-      ${scripts_dir}/box.tool upyq
-    fi
-    yq="${box_dir}/bin/yq"
-  fi
-
   if [ ! -f "${mihomo_config}" ]; then
     log Error "配置文件不存在: ${mihomo_config}"
     return 1
   fi
-  cp "${mihomo_config}" "${mihomo_config}.bak" 2>/dev/null
-  local file_count=${#name_provide_mihomo_config[@]}
-  if [ "$file_count" -eq 0 ]; then
-    log Warning "没有配置的订阅文件"
-    return 1
-  fi
 
   log Debug "开始更新 proxy-providers 配置项..."
-  local config_dir="$(dirname "${mihomo_config}")"  
-  
   local temp_providers="${mihomo_config}.providers.tmp"
+  local provider_count=0
+
   echo "proxy-providers:" > "${temp_providers}"
-  
-  for i in $(seq 0 $((file_count - 1))); do
-    local file_name="${name_provide_mihomo_config[$i]}"
-    local provider_file="${mihomo_provide_path}/${file_name}"
-    local provider_name="${file_name%.yaml}"
-    local provider_url="${subscription_url_mihomo[$i]}"
-    local escaped_url
 
-    if [ -z "${provider_url}" ]; then
-      log Warning "订阅链接为空，跳过: ${provider_name}"
-      continue
-    fi
-    escaped_url="$(echo "${provider_url}" | busybox sed 's/\\/\\\\/g; s/\"/\\"/g')"
-    
-    local relative_path
-    if command -v realpath >/dev/null 2>&1 && [ -e "${provider_file}" ]; then
-      relative_path="$(realpath --relative-to="${config_dir}" "${provider_file}")"
-      [ -z "${relative_path}" ] && relative_path="./$(basename "${mihomo_provide_path}")/${file_name}"
-    else
-      relative_path="./$(basename "${mihomo_provide_path}")/${file_name}"
-    fi
+  if [ -s "${subscriptions_file}" ]; then
+    while IFS='|' read -r provider_name provider_url; do
+      case "${provider_name}" in
+        ''|\#*) continue ;;
+      esac
+      [ -n "${provider_url}" ] || continue
 
-    log Debug "添加 provider: ${provider_name} -> ${relative_path} (http)"
-    
-    cat >> "${temp_providers}" <<EOF
-  ${provider_name}:
+      local safe_name
+      safe_name="$(sub_provider_file_name "${provider_name}")"
+      local relative_path="./$(basename "${mihomo_provide_path}")/${safe_name}.yaml"
+      local escaped_url
+
+      escaped_url="$(printf '%s' "${provider_url}" | busybox sed 's/\\/\\\\/g; s/"/\\"/g')"
+
+      log Debug "添加 provider: ${provider_name} -> ${relative_path} (http)"
+
+      cat >> "${temp_providers}" <<EOF
+  "${provider_name}":
     type: http
     url: "${escaped_url}"
     path: ${relative_path}
@@ -536,11 +532,17 @@ update_mihomo_providers() {
       timeout: 1000
       tolerance: 100
 EOF
-  done
-  
+      provider_count=$((provider_count + 1))
+    done < "${subscriptions_file}"
+  fi
+
+  if [ "${provider_count}" -eq 0 ]; then
+    echo "proxy-providers: {}" > "${temp_providers}"
+  fi
+
   local temp_output="${mihomo_config}.output.tmp"
-  
-  awk -v new_providers="${temp_providers}" '
+
+  busybox awk -v new_providers="${temp_providers}" '
     BEGIN {
       in_providers = 0
       providers_done = 0
@@ -576,18 +578,60 @@ EOF
       }
     }
   ' "${mihomo_config}" > "${temp_output}"
-  
+
   mv "${temp_output}" "${mihomo_config}"
-  
   rm -f "${temp_providers}"
-  
-  log Debug "proxy-providers 配置构建完成"
+
+  log Debug "proxy-providers 配置构建完成（${provider_count} 个）"
+  return 0
+}
+
+# 按 ruleset_prefix 重写 rule-providers 的 url，重复执行不会叠加前缀
+update_mihomo_rulesets() {
+  [ -f "${mihomo_config}" ] || return 1
+
+  local state_file="${box_run_state}/ruleset_prefix"
+  local old_prefix=""
+  [ -f "${state_file}" ] && old_prefix="$(cat "${state_file}" 2>/dev/null)"
+
+  if [ -z "${ruleset_prefix}" ] && [ -z "${old_prefix}" ]; then
+    return 0
+  fi
+
+  local temp_output="${mihomo_config}.rulesets.tmp"
+
+  busybox awk -v old_prefix="${old_prefix}" -v new_prefix="${ruleset_prefix}" '
+    /^rule-providers:/ { in_rulesets = 1; print; next }
+    in_rulesets == 1 && /^[a-zA-Z-]+:/ { in_rulesets = 0 }
+    in_rulesets == 1 && /^[[:space:]]+url:[[:space:]]*/ {
+      value = $0
+      sub(/^[[:space:]]+url:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      if (old_prefix != "" && index(value, old_prefix "/") == 1) {
+        value = substr(value, length(old_prefix) + 2)
+      }
+      if (new_prefix != "") {
+        value = new_prefix "/" value
+      }
+      match($0, /^[[:space:]]+/)
+      indent = substr($0, 1, RLENGTH)
+      print indent "url: \"" value "\""
+      next
+    }
+    { print }
+  ' "${mihomo_config}" > "${temp_output}" && mv "${temp_output}" "${mihomo_config}"
+
+  printf '%s' "${ruleset_prefix}" > "${state_file}"
+  log Debug "rule-providers 前缀已更新: ${ruleset_prefix:-官方}"
   return 0
 }
 
 # 检查并更新订阅
+# 参数: [force] true 时忽略 update_subscription 开关
 upsubs() {
-  if [ "${update_subscription}" != "true" ]; then
+  local force="${1:-false}"
+
+  if [ "${force}" != "true" ] && [ "${update_subscription}" != "true" ]; then
     log Warning "更新订阅已禁用: update_subscription=\"${update_subscription}\""
     return 1
   fi
@@ -600,143 +644,129 @@ upsubs() {
     fi
     yq="${box_dir}/bin/yq"
   fi
+
   case "${bin_name}" in
     "mihomo")
-      local url_count=${#subscription_url_mihomo[@]}
-      local file_count=${#name_provide_mihomo_config[@]}
-
-      if [ "$url_count" -eq 0 ]; then
-        log Warning "${bin_name} 订阅链接为空"
-        return 1
+      if [ ! -s "${subscriptions_file}" ]; then
+        log Warning "订阅清单为空: ${subscriptions_file}"
+        return 0
       fi
 
-      if [ "$url_count" -ne "$file_count" ]; then
-        log Error "订阅链接数量 (${url_count}) 与文件名数量 (${file_count}) 不匹配!"
-        return 1
-      fi
+      log Info "${bin_name} 开始更新订阅 → $(date)"
 
-      log Info "${bin_name} 开始更新 ${url_count} 个订阅 → $(date)"
-      
       if [ -z "${mihomo_provide_path}" ] || ! mkdir -p "${mihomo_provide_path}"; then
-          log Error "mihomo_provide_path 未定义或无法创建目录!"
-          return 1
+        log Error "mihomo_provide_path 未定义或无法创建目录!"
+        return 1
       fi
 
       local success_count=0
-      local update_failed=false
-      local rules_extracted=false
+      local failure_count=0
+      local total_count=0
+      local renew_done=false
 
-      for i in $(seq 0 $((url_count - 1))); do
-        local url="${subscription_url_mihomo[$i]}"
-        local file_name="${name_provide_mihomo_config[$i]}"
-        local provider_file="${mihomo_provide_path}/${file_name}"
-        
-        log Info "--> 正在处理订阅 #${i}: ${file_name}"
+      while IFS='|' read -r provider_name provider_url; do
+        case "${provider_name}" in
+          ''|\#*) continue ;;
+        esac
 
-        if [ "${renew}" = "true" ] && [ "$i" -eq 0 ]; then
-          log Info "检测到 renew=true, 仅使用第一个订阅链接更新"
-          if LOG_MASK_URL=mask upfile "${mihomo_config}" "${url}" "ClashMeta"; then
+        if [ -z "${provider_url}" ]; then
+          log Warning "订阅地址为空，跳过: ${provider_name}"
+          failure_count=$((failure_count + 1))
+          continue
+        fi
+
+        total_count=$((total_count + 1))
+        local safe_name
+        safe_name="$(sub_provider_file_name "${provider_name}")"
+        local provider_file="${mihomo_provide_path}/${safe_name}.yaml"
+        local temp_file="${provider_file}.download"
+
+        log Info "--> 正在处理订阅: ${provider_name}"
+
+        if [ "${renew}" = "true" ] && [ "${renew_done}" = "false" ]; then
+          log Info "检测到 renew=true, 仅使用第一个订阅链接覆盖主配置"
+          if LOG_MASK_URL=mask upfile "${mihomo_config}" "${provider_url}" "ClashMeta"; then
             log Info "${mihomo_config} 更新成功"
-            if [ -f "${box_pid}" ]; then
-              kill -0 "$(<"${box_pid}" 2>/dev/null)" && \
-              $scripts_dir/box.service restart 2>/dev/null
-            fi
+            reload_if_running
             log Info "${bin_name} 订阅更新完成 → $(date)"
-            exit 0
+            return 0
           else
             log Error "${mihomo_config} 更新失败"
-            exit 1
+            return 1
           fi
         fi
-        
-        if LOG_MASK_URL=mask upfile "${provider_file}" "${url}" "ClashMeta"; then
-          log Debug "文件大小: $(wc -c < "${provider_file}" 2>/dev/null || echo "未知") 字节"
-          log Debug "文件路径: ${provider_file}"
-          
-          local decoded_content
-          decoded_content=$(base64 -d "${provider_file}" 2>/dev/null)
 
-          if [ $? -eq 0 ] && echo "${decoded_content}" | grep -qE "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://"; then
-            log Info "检测到 Base64 编码订阅, 正在解码..."
-            echo "${decoded_content}" > "${provider_file}"
-            local proxy_count=$(echo "${decoded_content}" | grep -cE "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://")
-            log Debug "提取到 ${proxy_count} 个代理节点"
-            log Info "订阅 #${i} (Base64解码/原始链接) 已保存"
-            success_count=$((success_count + 1))
-          elif ${yq} 'has("proxies")' "${provider_file}" 2>/dev/null; then
-            if [ "${custom_rules_subs}" = "true" ] && [ "$rules_extracted" = "false" ]; then
-              if ${yq} 'has("rules")' "${provider_file}" &>/dev/null; then
-                log Info "在 ${file_name} 中找到规则, 正在提取..."
-                ${yq} '.rules' "${provider_file}" > "${mihomo_provide_rules}"
-                ${yq} -i '{"rules": .}' "${mihomo_provide_rules}"
-                log Info "规则已提取到 ${mihomo_provide_rules}"
-                rules_extracted=true
-              fi
-            fi
+        rm -f "${temp_file}"
 
-            log Debug "标准订阅格式, 正在提取 proxies 并覆盖原文件..."
-            local temp_proxies_file
-            temp_proxies_file=$(mktemp)
-            
-            # 提取 proxies 数组并验证
-            log Debug "尝试提取 proxies 字段..."     
-            if ${yq} '.proxies' "${provider_file}" > "${temp_proxies_file}" 2>/dev/null; then
-              if [ -s "${temp_proxies_file}" ]; then
-                local proxy_count=$(${yq} 'length' "${temp_proxies_file}" 2>/dev/null || echo "0")
-                log Debug "提取到 ${proxy_count} 个代理节点"
-                ${yq} -i '{"proxies": .}' "${temp_proxies_file}"
-                mv "${temp_proxies_file}" "${provider_file}"
-                log Info "订阅 #${i} (标准格式) 已处理并保存"
-                success_count=$((success_count + 1))
-              else
-                log Error "订阅 #${i} (${file_name}) proxies 字段为空"
-                rm -f "${temp_proxies_file}" "${provider_file}"
-                update_failed=true
-              fi
+        if ! LOG_MASK_URL=mask upfile "${temp_file}" "${provider_url}" "ClashMeta"; then
+          log Error "订阅下载失败: ${provider_name}"
+          rm -f "${temp_file}"
+          [ "${subscription_keep_last_good}" = "true" ] || rm -f "${provider_file}"
+          failure_count=$((failure_count + 1))
+          continue
+        fi
+
+        local proxy_count=0
+        local valid_subscription=false
+
+        if ${yq} 'has("proxies")' "${temp_file}" >/dev/null 2>&1; then
+          local temp_proxies="${temp_file}.proxies"
+          if ${yq} '.proxies' "${temp_file}" > "${temp_proxies}" 2>/dev/null && [ -s "${temp_proxies}" ]; then
+            proxy_count="$(${yq} 'length' "${temp_proxies}" 2>/dev/null || echo 0)"
+            if [ "${proxy_count}" -gt 0 ] 2>/dev/null; then
+              ${yq} -i '{"proxies": .}' "${temp_proxies}"
+              mv "${temp_proxies}" "${temp_file}"
+              valid_subscription=true
             else
-              log Error "订阅 #${i} (${file_name}) yq 提取 proxies 失败"
-              rm -f "${temp_proxies_file}" "${provider_file}"
-              update_failed=true
+              log Error "订阅 proxies 为空: ${provider_name}"
+              rm -f "${temp_proxies}" "${temp_file}"
             fi
-
-          elif ${yq} '.. | select(tag == "!!str")' "${provider_file}" 2>/dev/null | grep -qE "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://"; then
-            local proxy_count=$(${yq} '.. | select(tag == "!!str")' "${provider_file}" 2>/dev/null | grep -cE "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://")
-            log Debug "提取到 ${proxy_count} 个代理节点"
-            log Info "订阅 #${i} (原始链接) 已保存"
-            success_count=$((success_count + 1))
           else
-            log Error "订阅 #${i} (${file_name}) 格式无法识别或内容为空, 已删除"
-            rm -f "${provider_file}"
-            update_failed=true
+            log Error "订阅 proxies 提取失败: ${provider_name}"
+            rm -f "${temp_proxies}" "${temp_file}"
           fi
-        else
-          log Error "订阅 #${i} (${file_name}) 下载失败"
-          update_failed=true
+        elif [ -n "$(base64 -d "${temp_file}" 2>/dev/null | grep -E "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://" | head -n 1)" ]; then
+          local decoded_file="${temp_file}.decoded"
+          base64 -d "${temp_file}" > "${decoded_file}" 2>/dev/null
+          proxy_count="$(grep -cE "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://" "${decoded_file}" 2>/dev/null || true)"
+          [ -n "${proxy_count}" ] || proxy_count=0
+          mv "${decoded_file}" "${temp_file}"
+          valid_subscription=true
         fi
-      done
 
-      log Info "成功更新 ${success_count} / ${url_count} 个订阅"
-      
-      if [ "${renew}" != "true" ] && [ "${success_count}" -gt 0 ]; then
-        if [ "${auto_modify_config}" = "true" ]; then
-          log Info "正在更新 ${name_mihomo_config} 的 proxy-providers 配置..."
-          if update_mihomo_providers; then
-            log Info "proxy-providers 配置更新成功"
-          else
-            log Warning "proxy-providers 配置更新失败，请手动检查配置文件"
-          fi
-        else
-          log Info "auto_modify_config 未启用，跳过更新 proxy-providers 配置"
+        if [ "${valid_subscription}" != "true" ]; then
+          log Error "订阅格式无法识别或内容为空: ${provider_name}"
+          rm -f "${temp_file}"
+          [ "${subscription_keep_last_good}" = "true" ] || rm -f "${provider_file}"
+          failure_count=$((failure_count + 1))
+          continue
         fi
+
+        mv "${temp_file}" "${provider_file}"
+        log Info "订阅 ${provider_name} 已保存（${proxy_count} 个节点）"
+        success_count=$((success_count + 1))
+      done < "${subscriptions_file}"
+
+      log Info "成功更新 ${success_count} / ${total_count} 个订阅"
+
+      if [ "${success_count}" -gt 0 ] && [ "${auto_modify_config}" = "true" ]; then
+        log Info "正在更新 ${name_mihomo_config} 的 proxy-providers 与 rule-providers 配置..."
+        update_mihomo_providers || log Warning "proxy-providers 配置更新失败，请手动检查配置文件"
+        update_mihomo_rulesets || log Warning "rule-providers 前缀更新失败，请手动检查配置文件"
+      elif [ "${auto_modify_config}" != "true" ]; then
+        log Info "auto_modify_config 未启用，跳过更新 proxy-providers 配置"
       fi
-      
-      if [ "${update_failed}" = "true" ]; then
-        log Error "部分订阅链接更新失败"
+
+      if [ "${failure_count}" -gt 0 ]; then
+        log Error "${failure_count} 个订阅更新失败"
+        if [ "${success_count}" -gt 0 ]; then
+          return 2
+        fi
         return 1
-      else
-        log Info "更新订阅于 $(date +"%F %R")"
-        return 0
       fi
+
+      log Info "更新订阅于 $(date +"%F %R")"
+      return 0
       ;;
     "sing-box")
       update_file_name="${sing_config}"
@@ -746,10 +776,7 @@ upsubs() {
         if upfile "${update_file_name}" "${subscription_url_singbox}" "sing-box"; then
           log Info "${update_file_name} 已保存"
           log Info "更新订阅于 $(date +"%F %R")"
-          if [ -f "${box_pid}" ]; then
-            kill -0 "$(<"${box_pid}" 2>/dev/null)" && \
-            $scripts_dir/box.service restart 2>/dev/null
-          fi
+          reload_if_running
           return 0
         else
           log Error "更新订阅失败"
@@ -769,6 +796,140 @@ upsubs() {
       return 1
       ;;
   esac
+}
+
+reload_if_running() {
+  if [ -f "${box_pid}" ] && kill -0 "$(<"${box_pid}" 2>/dev/null)" 2>/dev/null; then
+    reload
+  fi
+}
+
+sub_usage() {
+  cat <<'EOF'
+用法:
+  box.tool sub add <订阅地址> [名字]
+  box.tool sub list
+  box.tool sub rm <名字>
+  box.tool sub update
+EOF
+}
+
+sub_add() {
+  local url="$1"
+  local name="$2"
+
+  case "${url}" in
+    http://*|https://*) ;;
+    *)
+      log Error "订阅地址必须以 http:// 或 https:// 开头"
+      return 1
+      ;;
+  esac
+
+  if [ -z "${name}" ]; then
+    name="$(printf '%s' "${url}" | busybox sed -E 's#^https?://([^/]+).*#\1#')"
+  fi
+
+  case "${name}" in
+    *"|"*)
+      log Error "名字不能包含 |"
+      return 1
+      ;;
+  esac
+
+  mkdir -p "$(dirname "${subscriptions_file}")" || return 1
+  touch "${subscriptions_file}"
+
+  if subscription_exists "${name}"; then
+    log Error "订阅已存在: ${name}"
+    return 1
+  fi
+
+  local new_safe existing_name
+  new_safe="$(sub_provider_file_name "${name}")"
+  while IFS='|' read -r existing_name _; do
+    case "${existing_name}" in
+      ''|\#*) continue ;;
+    esac
+    if [ "$(sub_provider_file_name "${existing_name}")" = "${new_safe}" ]; then
+      log Error "订阅名生成的节点文件名冲突: ${existing_name}"
+      return 1
+    fi
+  done < "${subscriptions_file}"
+
+  printf '%s|%s\n' "${name}" "${url}" >> "${subscriptions_file}"
+  log Info "已添加订阅: ${name}"
+  log Info "执行 box.tool sub update 拉取节点"
+  return 0
+}
+
+sub_list() {
+  if [ ! -s "${subscriptions_file}" ]; then
+    log Info "订阅清单为空: ${subscriptions_file}"
+    return 0
+  fi
+
+  printf '%-20s %-44s %s\n' "名字" "地址" "节点文件"
+
+  while IFS='|' read -r name url; do
+    case "${name}" in
+      ''|\#*) continue ;;
+    esac
+
+    local safe_name provider_file state
+    safe_name="$(sub_provider_file_name "${name}")"
+    provider_file="${mihomo_provide_path}/${safe_name}.yaml"
+
+    if [ -s "${provider_file}" ]; then
+      state="已下载"
+    else
+      state="未下载"
+    fi
+
+    printf '%-20s %-44s %s\n' "${name}" "$(mask_url "${url}")" "${state}"
+  done < "${subscriptions_file}"
+}
+
+sub_rm() {
+  local name="$1"
+
+  if [ -z "${name}" ]; then
+    sub_usage
+    return 1
+  fi
+
+  if ! subscription_exists "${name}"; then
+    log Error "订阅不存在: ${name}"
+    return 1
+  fi
+
+  local temp_file="${subscriptions_file}.tmp"
+  if busybox awk -F'|' -v name="${name}" '$1 != name' "${subscriptions_file}" > "${temp_file}"; then
+    mv "${temp_file}" "${subscriptions_file}"
+  else
+    rm -f "${temp_file}"
+    log Error "删除订阅失败: ${name}"
+    return 1
+  fi
+
+  local safe_name provider_file
+  safe_name="$(sub_provider_file_name "${name}")"
+  provider_file="${mihomo_provide_path}/${safe_name}.yaml"
+  rm -f "${provider_file}" "${provider_file}.download"
+
+  log Info "已删除订阅: ${name}"
+  return 0
+}
+
+sub_update() {
+  upsubs true
+  local status=$?
+
+  if [ "${status}" -ne 1 ]; then
+    reload_if_running
+  fi
+
+  return "${status}"
 }
 
 upkernel() {
@@ -1507,21 +1668,43 @@ case "$1" in
     $1
     ;;
   geosub)
-    upsubs || exit 1
+    upsubs
+    sub_status=$?
+    [ "${sub_status}" -eq 1 ] && exit 1
     upgeox
-    if [ -f "${box_pid}" ]; then
-      kill -0 "$(<"${box_pid}" 2>/dev/null)" && reload
-    fi
+    reload_if_running
+    exit "${sub_status}"
     ;;
   geox|subs)
+    sub_status=0
     if [ "$1" = "geox" ]; then
       upgeox
     else
-      upsubs || exit 1
+      upsubs
+      sub_status=$?
+      [ "${sub_status}" -eq 1 ] && exit 1
     fi
-    if [ -f "${box_pid}" ]; then
-      kill -0 "$(<"${box_pid}" 2>/dev/null)" && reload
-    fi
+    reload_if_running
+    exit "${sub_status}"
+    ;;
+  sub)
+    case "$2" in
+      add)
+        sub_add "$3" "$4"
+        ;;
+      list|ls)
+        sub_list
+        ;;
+      rm|remove|del)
+        sub_rm "$3"
+        ;;
+      update|up)
+        sub_update
+        ;;
+      *)
+        sub_usage
+        ;;
+    esac
     ;;
   upkernel)
     upkernel "$2"
@@ -1560,7 +1743,7 @@ case "$1" in
     ;;
   *)
     log Error "$0 $1 未找到"
-    log Info "用法: $0 {check|memcg|cpuset|blkio|geosub|geox|subs|upkernel [name]|upkernels [name...]|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|bond0|bond1|all}"
+    log Info "用法: $0 {check|memcg|cpuset|blkio|geosub|geox|subs|sub|upkernel [name]|upkernels [name...]|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|bond0|bond1|all}"
     log Info "upkernel 支持的核心: sing-box, mihomo, mihomo_smart, xray, v2fly, hysteria"
     ;;
 esac

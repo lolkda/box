@@ -90,8 +90,8 @@ jobs:
           {
             "version": "$VERSION",
             "versionCode": "$DATE_NUM",
-            "zipUrl": "https://github.com/boxproxy/box/releases/download/$VERSION/box-$VERSION.zip",
-            "changelog": "https://github.com/boxproxy/box/raw/master/CHANGELOG.md"
+            "zipUrl": "https://github.com/${{ github.repository }}/releases/download/$VERSION/box-$VERSION.zip",
+            "changelog": "https://raw.githubusercontent.com/${{ github.repository }}/master/CHANGELOG.md"
           }
           EOF
 
@@ -159,7 +159,7 @@ jobs:
       contents: read
     needs:
       - build
-    if: success()
+    if: ${{ vars.ENABLE_TELEGRAM == 'true' }}
     steps:
       - uses: actions/checkout@v4.1.0
         with:
