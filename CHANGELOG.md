@@ -1,3 +1,7 @@
+#### Changelog 1.3.1 - 22-11-2026
+- 修正模块更新元数据指向 fork 仓库
+- 订阅管理改为 subscriptions.list 与 box.tool sub 命令
+
 #### Changelog 1.3.0 - 22-11-2026
 - feat: manage mihomo subscriptions from subscriptions.list (9dc5a59)
 
