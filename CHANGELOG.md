@@ -1,3 +1,9 @@
+#### Changelog 1.3.2 - 22-11-2026
+- 合并 upstream/test：适配 mihomo 与 sing-box 新版 eBPF 入站配置
+- 新增 box.tool sub 订阅管理（subscriptions.list）
+- 订阅更新失败保留上一个可用 provider
+- 规则集地址支持 ruleset_prefix
+
 #### Changelog 1.3.1 - 22-11-2026
 - 修正模块更新元数据指向 fork 仓库
 - 订阅管理改为 subscriptions.list 与 box.tool sub 命令
