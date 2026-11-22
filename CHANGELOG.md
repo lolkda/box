@@ -1,3 +1,9 @@
+#### Changelog 1.4.0 - 22-11-2026
+- 新增 KernelSU WebUI 管理页面：订阅、服务、策略组、规则、规则集、设置、日志
+- box.tool 新增 status/logs/settings/config JSON 接口
+- 危险操作与核心更新支持二次确认
+- 修复 webroot 被服务启动覆盖的问题
+
 #### Changelog 1.3.2 - 22-11-2026
 - 合并 upstream/test：适配 mihomo 与 sing-box 新版 eBPF 入站配置
 - 新增 box.tool sub 订阅管理（subscriptions.list）
