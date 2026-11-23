@@ -15,9 +15,15 @@ import { Field } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { Sheet } from "../../components/ui/sheet";
 import { useToast } from "../../components/ui/toast";
-import { formatDateTime, getErrorMessage } from "../../lib/utils";
+import { formatDateTime, getErrorDetail, getErrorMessage } from "../../lib/utils";
 
 const emptyCounts: RuleProfileCounts = { groups: 0, rule_providers: 0, rules: 0 };
+
+function profileErrorText(error: unknown): string {
+  const message = getErrorMessage(error);
+  const detail = getErrorDetail(error).split("\n")[0].slice(0, 160);
+  return detail ? `${message}（${detail}）` : message;
+}
 
 function CountLink({ to, label, count }: { to: string; label: string; count?: number }) {
   return (
@@ -95,7 +101,7 @@ export function RuleProfileCard() {
       const data = await api.ruleProfileUrl();
       setUrlDraft(data.url);
     } catch (error) {
-      toast({ title: "读取规则订阅地址失败", description: getErrorMessage(error), tone: "error" });
+      toast({ title: "读取规则订阅地址失败", description: profileErrorText(error), tone: "error" });
     } finally {
       setUrlLoading(false);
     }
@@ -114,7 +120,7 @@ export function RuleProfileCard() {
       setUrlSheetOpen(false);
       await refreshAll();
     } catch (error) {
-      toast({ title: "保存规则订阅地址失败", description: getErrorMessage(error), tone: "error" });
+      toast({ title: "保存规则订阅地址失败", description: profileErrorText(error), tone: "error" });
     } finally {
       setSaving(false);
     }
@@ -128,7 +134,7 @@ export function RuleProfileCard() {
       setClearOpen(false);
       await refreshAll();
     } catch (error) {
-      toast({ title: "清除规则订阅失败", description: getErrorMessage(error), tone: "error" });
+      toast({ title: "清除规则订阅失败", description: profileErrorText(error), tone: "error" });
     } finally {
       setClearing(false);
     }
@@ -140,7 +146,7 @@ export function RuleProfileCard() {
       const fetched = await api.fetchRuleProfile();
       setPending(fetched);
     } catch (error) {
-      toast({ title: "下载或校验规则模板失败", description: getErrorMessage(error), tone: "error" });
+      toast({ title: "下载或校验规则模板失败", description: profileErrorText(error), tone: "error" });
     } finally {
       setFetching(false);
     }
@@ -165,9 +171,9 @@ export function RuleProfileCard() {
       if (error instanceof ApiError && error.code === "E_RELOAD") {
         setPending(null);
         await refreshAll();
-        toast({ title: "配置已保存，但重载失败", description: getErrorMessage(error), tone: "error" });
+        toast({ title: "配置已保存，但重载失败", description: profileErrorText(error), tone: "error" });
       } else {
-        toast({ title: "应用规则模板失败", description: getErrorMessage(error), tone: "error" });
+        toast({ title: "应用规则模板失败", description: profileErrorText(error), tone: "error" });
       }
     } finally {
       setApplying(null);

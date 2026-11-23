@@ -421,6 +421,8 @@ done
 case "${url}" in
   https://rule-profile.example/config.yaml) cp "${WORK}/rule-profile.yaml" "${out}" ;;
   https://rule-profile.example/bad.yaml) cp "${WORK}/rule-profile-bad.yaml" "${out}" ;;
+  https://rule-profile.example/fallback.yaml) exit 22 ;;
+  https://rule-profile.example/fail.yaml) exit 22 ;;
   *) exit 22 ;;
 esac
 printf '200'
@@ -434,14 +436,15 @@ jassert '.data.configured == true and .data.counts.groups >= 1 and .data.counts.
 rp_url="$(run_tool rule-profile url --json 2>/dev/null)"
 jassert '.ok == true and .data.url == "https://rule-profile.example/config.yaml"' "${rp_url}" "rule-profile url 只在编辑时返回完整地址"
 rp_fetch="$(run_tool rule-profile fetch --json 2>/dev/null)"
-jassert '.ok == true and .data.counts.groups == 2 and .data.counts.rule_providers == 1 and .data.counts.rules == 2' "${rp_fetch}" "rule-profile fetch 下载并校验模板"
+jassert '.ok == true and .data.counts.groups == 2 and .data.counts.rule_providers == 3 and .data.counts.rules == 2' "${rp_fetch}" "rule-profile fetch 下载并校验模板"
 assert_eq "${before_rp_hash}" "$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)" "fetch 不修改 config.yaml"
 rp_apply="$(run_tool rule-profile apply --json 2>/dev/null)"
 jassert '.ok == true and .data.reloaded == false and (.data.changed | length) == 3' "${rp_apply}" "rule-profile apply 应用三段"
 rp_after="$(run_tool rule-profile get --json 2>/dev/null)"
-jassert '.data.counts.groups == 2 and .data.counts.rule_providers == 1 and .data.counts.rules == 2 and .data.updated_at != ""' "${rp_after}" "rule-profile apply 更新计数和时间"
+jassert '.data.counts.groups == 2 and .data.counts.rule_providers == 3 and .data.counts.rules == 2 and .data.updated_at != ""' "${rp_after}" "rule-profile apply 更新计数和时间"
 assert_eq "${before_rp_proxy}" "$(yq -o=json '."proxy-providers"' "${BOX_HOME}/mihomo/config.yaml" | jq -S .)" "apply 保留 proxy-providers"
 assert_eq "${before_rp_port}" "$(yq -r '."mixed-port"' "${BOX_HOME}/mihomo/config.yaml")" "apply 保留 mixed-port"
+yq -e '."rule-providers" | (has("cn_domain") and has("Fake-IP-Filter"))' "${BOX_HOME}/mihomo/config.yaml" >/dev/null 2>&1 && ok "apply 保留 DNS 引用的规则集" || bad "apply 保留 DNS 引用的规则集"
 [ -f "${BOX_HOME}/mihomo/config.yaml.bak" ] && ok "apply 生成 config.yaml.bak" || bad "apply 生成 config.yaml.bak"
 grep -q 'DOMAIN,example.com,国外代理' "${BOX_HOME}/mihomo/config.yaml" && bad "apply 应替换旧规则" || ok "apply 替换旧规则"
 
@@ -449,6 +452,29 @@ rp_fetch_reload="$(run_tool rule-profile fetch --json 2>/dev/null)"
 jassert '.ok == true' "${rp_fetch_reload}" "rule-profile 重新 fetch 成功"
 rp_apply_reload="$(run_tool rule-profile apply --reload --json 2>/dev/null)"
 jassert '.ok == true and .data.reloaded == false' "${rp_apply_reload}" "服务未运行时 apply --reload 返回未重载"
+
+cat > "${WORK}/bin/wget" <<'EOF'
+#!/usr/bin/env bash
+out=""; url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -O) out="$2"; shift 2 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "${url}" in
+  https://rule-profile.example/fallback.yaml) cp "${WORK}/rule-profile.yaml" "${out}"; exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "${WORK}/bin/wget"
+run_tool rule-profile set "https://rule-profile.example/fallback.yaml" --json >/dev/null 2>&1
+rp_fallback_fetch="$(run_tool rule-profile fetch --json 2>/dev/null)"
+jassert '.ok == true and .data.counts.groups == 2 and .data.counts.rules == 2' "${rp_fallback_fetch}" "curl 失败时回退 wget 下载模板"
+run_tool rule-profile set "https://rule-profile.example/fail.yaml" --json >/dev/null 2>&1
+rp_download_fail="$(run_tool rule-profile fetch --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_DOWNLOAD" and (.error.detail | contains("curl=22"))' "${rp_download_fail}" "下载失败返回 E_DOWNLOAD 而非空 JSON"
+rm -f "${WORK}/bin/wget"
 
 rp_bad_before="$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)"
 run_tool rule-profile set "https://rule-profile.example/bad.yaml" --json >/dev/null 2>&1

@@ -63,6 +63,48 @@ _log_command="$*"
 _log_command="$(printf '%s' "${_log_command}" | sed -E 's#https?://[^[:space:]]+#<url>#g')"
 log Info "执行命令: $0 ${_log_command}"
 
+# 以模块运行用户组执行下载：root:net_admin 会跳过 tproxy 的 owner 规则。
+download_run_as_box_user() {
+  if command -v getprop >/dev/null 2>&1 && busybox setuidgid "${box_user_group}" true >/dev/null 2>&1; then
+    busybox setuidgid "${box_user_group}" "$@"
+  else
+    "$@"
+  fi
+}
+
+# 解析真实 IPv4，绕过 mihomo fake-ip DNS；输出 host@port@ip。
+download_resolve_target() {
+  local url="$1"
+  local authority host port ip dns
+  case "${url}" in
+    http://*|https://*) ;;
+    *) return 1 ;;
+  esac
+  authority="${url#*://}"
+  authority="${authority%%/*}"
+  authority="${authority##*@}"
+  [ -n "${authority}" ] || return 1
+  host="${authority%%:*}"
+  port=443
+  case "${url}" in http://*) port=80 ;; esac
+  case "${authority}" in *:*) port="${authority##*:}" ;; esac
+  case "${host}" in
+    ''|*[!A-Za-z0-9.-]*) return 1 ;;
+  esac
+  case "${host}" in
+    *[!0-9.]*) ;;
+    *) printf '%s@%s@%s\n' "${host}" "${port}" "${host}"; return 0 ;;
+  esac
+  for dns in 1.1.1.1 223.5.5.5; do
+    ip="$(download_run_as_box_user busybox nslookup "${host}" "${dns}" 2>/dev/null | busybox awk '/^Name:/ { found = 1 } found && /^Address [0-9]+: / { print $3 }' | busybox grep -E '^[0-9]+(\.[0-9]+){3}$' | busybox head -n 1)"
+    if [ -n "${ip}" ]; then
+      printf '%s@%s@%s\n' "${host}" "${port}" "${ip}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # 更新文件
 upfile() {
   local file="$1"
@@ -93,30 +135,58 @@ upfile() {
   log Debug "保存到: ${file}"
   log Debug "使用 User-Agent: ${current_ua}"
 
-  if which curl >/dev/null; then
-    http_code=$(curl -L -s --insecure --http1.1 --compressed --user-agent "${current_ua}" -o "${file}" -w "%{http_code}" "${update_url}")
+  UPFILE_ERROR=""
+  local curl_bin="" target host port ip resolve_args="" http_code curl_exit_code wget_exit_code curl_ok=false
+  if [ -x "${bin_dir}/curl" ]; then
+    curl_bin="${bin_dir}/curl"
+  elif command -v curl >/dev/null 2>&1; then
+    curl_bin="$(command -v curl)"
+  fi
+
+  if [ -n "${curl_bin}" ]; then
+    target="$(download_resolve_target "${update_url}" 2>/dev/null || true)"
+    if [ -n "${target}" ]; then
+      host="${target%%@*}"
+      target="${target#*@}"
+      port="${target%%@*}"
+      ip="${target#*@}"
+      resolve_args="--resolve ${host}:${port}:${ip}"
+    fi
+    http_code="$(download_run_as_box_user "${curl_bin}" -L -s --insecure --http1.1 --compressed --connect-timeout 20 ${resolve_args} --user-agent "${current_ua}" -o "${file}" -w "%{http_code}" "${update_url}")"
     curl_exit_code=$?
 
-    if [ ${curl_exit_code} -ne 0 ]; then
-      log Error "使用 curl 下载失败 (退出码: ${curl_exit_code})"
-      [ -f "${file_bak}" ] && mv "${file_bak}" "${file}"
-      return 1
+    if [ "${curl_exit_code}" -eq 0 ] && [ "${http_code}" = "200" ] && [ -s "${file}" ]; then
+      curl_ok=true
+    else
+      if [ "${curl_exit_code}" -ne 0 ]; then
+        UPFILE_ERROR="curl=${curl_exit_code}"
+        log Error "使用 curl 下载失败 (退出码: ${curl_exit_code})"
+      elif [ "${http_code}" != "200" ]; then
+        UPFILE_ERROR="http=${http_code:-unknown}"
+        log Error "下载失败: 服务器返回 HTTP 状态码 ${http_code}"
+      else
+        UPFILE_ERROR="curl=empty"
+        log Error "curl 下载文件为空"
+      fi
+      rm -f "${file}" 2>/dev/null
     fi
+  fi
 
-    if [ "${http_code}" -ne 200 ]; then
-      log Error "下载失败: 服务器返回 HTTP 状态码 ${http_code}"
-      [ -f "${file_bak}" ] && mv "${file_bak}" "${file}"
-      return 1
-    fi
-  else
-    if ! busybox wget --no-check-certificate -q -U "${current_ua}" -O "${file}" "${update_url}"; then
+  if [ "${curl_ok}" != "true" ]; then
+    download_run_as_box_user busybox wget --no-check-certificate -q -T 30 -U "${current_ua}" -O "${file}" "${update_url}"
+    wget_exit_code=$?
+    if [ "${wget_exit_code}" -ne 0 ] || [ ! -s "${file}" ]; then
+      [ "${wget_exit_code}" -eq 0 ] && wget_exit_code=empty
+      UPFILE_ERROR="${UPFILE_ERROR:+${UPFILE_ERROR}; }wget=${wget_exit_code}"
       log Error "使用 wget 下载失败"
+      rm -f "${file}" 2>/dev/null
       [ -f "${file_bak}" ] && mv "${file_bak}" "${file}"
       return 1
     fi
   fi
 
   if [ ! -s "${file}" ]; then
+    UPFILE_ERROR="empty"
     log Error "下载失败: 文件为空"
     [ -f "${file_bak}" ] && mv "${file_bak}" "${file}"
     return 1
@@ -2512,6 +2582,49 @@ rule_profile_url_json() {
   json_ok "$(printf '{"url":%s}' "$(json_quote "$(cat "${url_file}" 2>/dev/null)")")"
 }
 
+rule_profile_preserve_dns_providers() {
+  local file="$1"
+  local old_file="${mihomo_config}"
+  local names="${box_run_state}/rule-profile.refs.$$"
+  local name
+  [ -f "${file}" ] && [ -f "${old_file}" ] || return 0
+
+  {
+    ${yq} -r '.dns."fake-ip-filter"[]?' "${old_file}" 2>/dev/null
+    ${yq} -r '.dns."nameserver-policy" | keys[]?' "${old_file}" 2>/dev/null
+  } | busybox grep '^rule-set:' | busybox sed 's/^rule-set://' | busybox sort -u > "${names}" 2>/dev/null || true
+
+  while IFS= read -r name; do
+    [ -n "${name}" ] || continue
+    case "${name}" in
+      ''|*[!A-Za-z0-9_.-]*) continue ;;
+    esac
+    if ${yq} -e ".rule-providers | has(\"${name}\")" "${file}" >/dev/null 2>&1; then
+      continue
+    fi
+    if ${yq} -e ".rule-providers | has(\"${name}\")" "${old_file}" >/dev/null 2>&1; then
+      if ! ${yq} -i ".rule-providers[\"${name}\"] = (load(\"${old_file}\") | .rule-providers[\"${name}\"])" "${file}" 2>/dev/null; then
+        rm -f "${names}"
+        json_error "E_IO" "保留 DNS 引用的规则集失败: ${name}"
+        return 1
+      fi
+    fi
+  done < "${names}"
+  rm -f "${names}" 2>/dev/null
+  return 0
+}
+
+rule_profile_download_json() {
+  local dest="$1"
+  local url="$2"
+  UPFILE_ERROR=""
+  if ! LOG_MASK_URL=mask upfile "${dest}" "${url}" "mihomo"; then
+    json_error "E_DOWNLOAD" "下载规则模板失败" "${UPFILE_ERROR:-unknown}"
+    return 1
+  fi
+  return 0
+}
+
 rule_profile_fetch_json() {
   if [ "${bin_name}" != "mihomo" ]; then
     json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
@@ -2529,11 +2642,18 @@ rule_profile_fetch_json() {
   pending="$(rule_profile_pending_file)"
   tmp_file="${pending}.tmp.$$"
   rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
-  if ! LOG_MASK_URL=mask upfile "${tmp_file}" "${url}" "mihomo"; then
+  if ! rule_profile_download_json "${tmp_file}" "${url}"; then
     rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
     return 1
   fi
-  rm -f "${tmp_file}.bak" 2>/dev/null
+  if ! config_validate_json "${tmp_file}"; then
+    rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
+    return 1
+  fi
+  if ! rule_profile_preserve_dns_providers "${tmp_file}"; then
+    rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
+    return 1
+  fi
   if ! config_validate_json "${tmp_file}"; then
     rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
     return 1
@@ -2564,6 +2684,9 @@ rule_profile_apply_json() {
     return 1
   fi
   ensure_yq
+  if ! rule_profile_preserve_dns_providers "${pending}"; then
+    return 1
+  fi
   if ! apply_output="$(config_apply_json "${pending}" 2>/dev/null)"; then
     if [ -n "${apply_output}" ]; then
       printf '%s\n' "${apply_output}"

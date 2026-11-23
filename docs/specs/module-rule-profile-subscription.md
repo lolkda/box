@@ -66,9 +66,9 @@
 
 - 参与者或触发方：应用确认对话框。
 - 前置条件与输入：存在已校验的待应用快照；用户选择“仅保存”或“保存并重载”。
-- 必须满足的行为：只替换 `config.yaml` 的 `proxy-groups`、`rule-providers`、`rules`；保留 `proxy-providers` 及其他顶层配置；写入前生成 `config.yaml.bak`；写入后再次校验 YAML；按现有 `ruleset_prefix` 规则处理规则集 URL。
+- 必须满足的行为：只替换 `config.yaml` 的 `proxy-groups`、`rule-providers`、`rules`；保留 `proxy-providers` 及其他顶层配置；如果保留的 DNS 段（`dns.fake-ip-filter`、`dns.nameserver-policy`）引用了旧 `rule-providers` 中的名称，则把这些旧规则集定义带入新三段，避免 mihomo 启动校验失败；写入前生成 `config.yaml.bak`；写入后再次校验 YAML；按现有 `ruleset_prefix` 规则处理规则集 URL。
 - 输出或状态变化：应用成功后更新最近应用时间；清除待应用快照；刷新策略组、规则、规则集和核心配置查询。
-- 边界与失败行为：写入失败时还原备份；校验失败时还原备份；应用失败不更新最近应用时间；不修改节点 provider 文件。
+- 边界与失败行为：写入失败时还原备份；校验失败时还原备份；应用失败不更新最近应用时间；不修改节点 provider 文件；因 DNS 引用而保留的旧规则集只补充缺失名称，不做通用手工合并。
 
 ### R-004：应用后重载
 
@@ -133,11 +133,11 @@
 ### D-003：三段整体替换
 
 - 状态：已确认
-- 结论：应用时整体替换三段，不与现有手工内容自动合并。
-- 理由：规则顺序、策略组引用和规则集引用必须保持一致，自动合并容易产生非法引用。
-- 考虑过的备选：按名称合并；预览后选择性应用。
-- 未采用原因：合并规则复杂且容易破坏引用；当前先提供可预测的托管行为。
-- 影响范围：R-003。
+- 结论：应用时整体替换三段，不与现有手工内容自动合并；但保留 DNS 段仍引用的旧规则集名称，避免保留配置产生悬空引用。
+- 理由：规则顺序、策略组引用和规则集引用必须保持一致；DNS 引用是跨段依赖，不能随 `rule-providers` 一起被删掉。
+- 考虑过的备选：按名称合并全部旧规则集；预览后选择性应用；直接删除 DNS 中的 `rule-set:` 引用。
+- 未采用原因：全量合并会保留无关旧内容；删除 DNS 引用会改变解析行为；只补 DNS 依赖是最小且可验证的保留范围。
+- 影响范围：R-003、AC-003、AC-007。
 
 ### D-004：订阅页独立卡片
 
@@ -184,7 +184,7 @@
 - 操作或输入：打开订阅页，配置合法 URL；刷新页面；修改 URL；清除 URL。
 - 预期结果：卡片显示掩码 URL 和“已配置”；修改后 URL 更新；清除后恢复未配置状态；节点订阅不受影响。
 - 验证状态：已执行（本地）
-- 验证证据：`bash test/module-webui.test.sh` 105 项通过；Vite mock 页面手动验证配置、修改、清除。
+- 验证证据：`bash test/module-webui.test.sh` 108 项通过；Vite mock 页面手动验证配置、修改、清除。
 
 ### AC-002：下载与校验
 
@@ -200,9 +200,9 @@
 - 对应规则：R-003、R-007
 - 前置条件：当前配置有节点 `proxy-providers`、端口和 DNS 配置；合法模板已校验。
 - 操作或输入：选择“仅保存”。
-- 预期结果：`proxy-groups`、`rule-providers`、`rules` 与模板一致；`proxy-providers`、端口、DNS 不变；生成 `config.yaml.bak`；最近应用时间更新。
-- 验证状态：已执行（本地）
-- 验证证据：shell 回归断言 `proxy-providers` 与 `mixed-port` 保持不变、生成 `.bak`、旧规则被替换、计数和更新时间更新；真实 22/33/49 模板在临时 `BOX_HOME` 通过 `config apply`。
+- 预期结果：`proxy-groups`、`rule-providers`、`rules` 与模板一致；`proxy-providers`、端口、DNS 不变；DNS 引用的旧规则集仍存在；生成 `config.yaml.bak`；最近应用时间更新。
+- 验证状态：已执行（本地 + 真机）
+- 验证证据：shell 回归断言 `proxy-providers` 与 `mixed-port` 保持不变、DNS 引用的 `cn_domain`/`Fake-IP-Filter` 保留、生成 `.bak`、旧规则被替换、计数和更新时间更新；真实模板在真机得到 22 个策略组、35 个规则集（33 + 2 个 DNS 依赖）、49 条规则，服务启动成功。
 
 ### AC-004：重载选择
 
@@ -230,6 +230,15 @@
 - 预期结果：显示“规则与策略订阅”卡片、掩码 URL、最近应用时间和三类数量；可进入策略、规则、规则集和核心配置页面。
 - 验证状态：已执行（本地 mock）
 - 验证证据：Vite mock 在约 1920×953 和 500×844 视口手动验证卡片、配置、更新确认、仅保存、保存并重载和清除流程。
+
+### AC-007：保留 DNS 引用的规则集
+
+- 对应规则：R-003、R-005
+- 前置条件：当前 `config.yaml` 的 `dns.fake-ip-filter` 或 `dns.nameserver-policy` 包含 `rule-set:<name>`，且模板中没有该规则集。
+- 操作或输入：更新并应用模板。
+- 预期结果：对应旧规则集定义被带入新 `rule-providers`；mihomo 启动校验不再报 `not found rule-set`。
+- 验证状态：已执行（真机）
+- 验证证据：真机模板应用后为 22 个策略组、35 个规则集、49 条规则；`mihomo` 服务启动成功，代理请求返回 HTTP 204。
 
 ## 7. 未决问题与假设
 
@@ -281,6 +290,7 @@
 复用：
 
 - `config_validate_json`：校验三段结构、策略组名称/类型、规则集字段、规则引用。
+- `rule_profile_preserve_dns_providers`：保留 `dns.fake-ip-filter`、`dns.nameserver-policy` 中仍引用的旧规则集名称。
 - `config_apply_json`：备份 `config.yaml`、写入三段、YAML 回校验。
 - `update_mihomo_rulesets`：应用 `ruleset_prefix`。
 - `reload_if_running` 或 `reload`：按用户选择执行重载。
@@ -299,7 +309,9 @@
 配置 URL
   -> 保存 URL
   -> 更新规则与策略
-  -> 下载并校验模板
+  -> 解析真实 IPv4 并以 root:net_admin 下载（绕过 tproxy/fake-ip）
+  -> 校验模板
+  -> 保留 DNS 段仍引用的旧规则集
   -> 显示策略组/规则集/规则数量
   -> 选择 取消 / 仅保存 / 保存并重载
   -> 写入 config.yaml（保留其他段落）
@@ -311,12 +323,15 @@
 
 - Shell：URL 配置/清除、合法模板 fetch/apply、非法 YAML 拒绝、保留 `proxy-providers`、生成 `.bak`、不泄露完整 URL。
 - 前端：卡片未配置/已配置状态、配置 URL、更新确认、仅保存/重载分支、错误展示、链接跳转。
+- 下载链路：curl 使用真实 IPv4 与 `root:net_admin`，失败回退 wget；失败返回 `E_DOWNLOAD` 详情。
+- DNS 依赖：应用模板时保留 `dns.fake-ip-filter` / `dns.nameserver-policy` 引用的旧规则集。
 - 构建：`npm run typecheck`、`npm test`、`npm run build`、`bash test/module-webui.test.sh`。
 
 ## 9. 验证记录
 
-- 2026-11-24：`bash test/module-webui.test.sh` 通过 105 项，覆盖 URL 配置/清除、模板 fetch/apply、保留 `proxy-providers` 与 `mixed-port`、生成 `config.yaml.bak`、非法模板拒绝、sing-box 不支持状态，以及 `tool.log` 不泄露规则订阅 token。
-- 2026-11-24：真实示例模板在临时 `BOX_HOME` 通过 `config apply`，得到 22 个策略组、33 个规则集、49 条规则。
+- 2026-11-24：`bash test/module-webui.test.sh` 通过 108 项，覆盖 URL 配置/清除、模板 fetch/apply、保留 `proxy-providers` 与 `mixed-port`、保留 DNS 引用的规则集、curl 失败回退 wget、下载失败返回 `E_DOWNLOAD`、生成 `config.yaml.bak`、非法模板拒绝、sing-box 不支持状态，以及 `tool.log` 不泄露规则订阅 token。
+- 2026-11-24：真实示例模板在临时 `BOX_HOME` 通过 `config apply`，得到 22 个策略组、33 个规则集、49 条规则；真机应用时因 DNS 引用额外保留 2 个规则集，最终为 35 个规则集。
+- 2026-11-24：真机 1.10.1 复现 `curl: (35)`；原因是 tproxy + fake-ip 下 root shell 下载命中 fake-ip 且被代理，规则模板和节点订阅均失败。修正后的下载链路在真机成功获取模板；规则模板应用后服务启动成功，代理请求返回 HTTP 204。
 - 2026-11-24：`npm run typecheck`、`npm test`（7 个文件、23 项测试）和 `npm run build` 通过。
 - 2026-11-24：Vite mock 手动验证约 1920×953 与 500×844 视口；配置、更新确认、仅保存、保存并重载、清除流程均可操作。
-- 尚未执行：真机部署、真机下载规则模板、真机 mihomo reload 成功/失败路径、真机安全区与 WebView 性能复测。
+- 尚未执行：真机安装 1.10.2 后的完整 UI 流程、真机 mihomo reload 成功/失败路径、真机安全区与 WebView 性能复测。
