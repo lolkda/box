@@ -297,8 +297,6 @@ apply_network_control_policy() {
   local ssid
   local bssid
   local wifi_ip=""
-  local i
-
   iface=$(get_wifi_iface)
   wifi_status_text=$(cmd wifi status 2>/dev/null)
   wifi_status=$(is_wifi_connected "${iface}")
@@ -308,7 +306,7 @@ apply_network_control_policy() {
   control_log_msg "--- 网络状态检查 ---"
 
   if [ "${wifi_status}" = "wifi" ]; then
-    for i in 1 2 3 4 5 6; do
+    for _ in 1 2 3 4 5 6; do
       wifi_ip=$(get_wifi_ip "${iface}")
       [ -n "${wifi_ip}" ] && break
       busybox sleep 0.5

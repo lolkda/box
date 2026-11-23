@@ -6,14 +6,14 @@ import { AppShell } from "./shell";
 import { OverviewPage } from "../features/overview/overview-page";
 import { ToastProvider } from "../components/ui/toast";
 
-function installStatusMock() {
+function installStatusMock(core = "mihomo") {
   const mock = {
     exec(command: string, _options: string, callbackName: string) {
       let payload;
       if (command.includes("status") && command.includes("--json")) {
         payload = {
           ok: true,
-          data: { running: true, pid: 1234, core: "mihomo", mode: "tproxy", config: "config.yaml", config_exists: true, subscriptions: 2, active_tasks: 0 },
+          data: { running: true, pid: 1234, core, mode: "tproxy", config: "config.yaml", config_exists: true, subscriptions: 2, active_tasks: 0 },
           meta: { version: 1 },
         };
       } else if (command.includes("task") && command.includes("list")) {
@@ -61,5 +61,23 @@ describe("AppShell", () => {
     }
     expect(await screen.findByText("运行中")).toBeInTheDocument();
     expect(await screen.findByText("mihomo · tproxy · PID 1234")).toBeInTheDocument();
+  });
+
+  it("blocks mihomo-only pages when the core is sing-box", async () => {
+    installStatusMock("sing-box");
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const router = createMemoryRouter(
+      [{ path: "/", element: <AppShell />, children: [{ path: "rules", element: <div>rules content</div> }] }],
+      { initialEntries: ["/rules"] },
+    );
+    render(
+      <QueryClientProvider client={client}>
+        <ToastProvider>
+          <RouterProvider router={router} />
+        </ToastProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("规则 仅支持 mihomo")).toBeInTheDocument();
+    expect(screen.queryByText("rules content")).not.toBeInTheDocument();
   });
 });

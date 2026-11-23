@@ -40,9 +40,10 @@ jassert() {
 run_tool() { bash -O extglob "${BOX_HOME}/scripts/box.tool" "$@"; }
 
 setup() {
-  mkdir -p "${BOX_HOME}/mihomo" "${BOX_HOME}/bin" "${BOX_HOME}/scripts" "${WORK}/bin"
+  mkdir -p "${BOX_HOME}/mihomo" "${BOX_HOME}/sing-box" "${BOX_HOME}/bin" "${BOX_HOME}/scripts" "${WORK}/bin"
   cp "${ROOT}/box/settings.ini" "${BOX_HOME}/settings.ini"
   cp "${ROOT}/box/mihomo/config.yaml" "${BOX_HOME}/mihomo/config.yaml"
+  cp "${ROOT}/box/sing-box/config.json" "${BOX_HOME}/sing-box/config.json"
   cp "${ROOT}/box/scripts/box.tool" "${BOX_HOME}/scripts/box.tool"
   cp "${ROOT}/box/scripts/box.service" "${BOX_HOME}/scripts/box.service"
   chmod +x "${BOX_HOME}/scripts/box.tool" "${BOX_HOME}/scripts/box.service"
@@ -93,6 +94,7 @@ jassert '.data.items | length == 0' "${list_json}" "sub rm 删除订阅"
 settings_json="$(run_tool settings get --json 2>/dev/null)"
 jassert '.ok == true and (.data.settings | has("network_mode")) and (.data.settings | has("githubtoken") | not)' "${settings_json}" "settings get 不返回 token 明文"
 jassert '(.data.arrays | has("wifi_ssids_list")) and .data.sensitive.githubtoken.set == false' "${settings_json}" "settings get 返回数组和敏感状态"
+jassert '(.data.settings | has("cn_ip_url")) and (.data.settings | has("cn_ipv6_url")) and (.data.settings | has("subscription_url_singbox"))' "${settings_json}" "settings get 返回新增配置键"
 
 cat > "${WORK}/settings.json" <<'EOF'
 {"network_mode":"tproxy","wifi_ssids_list":["My Home WiFi","Cafe 'Test'"],"githubtoken":"abcdef1234567890"}
@@ -132,6 +134,18 @@ EOF
 unknown_result="$(run_tool settings apply "${WORK}/unknown-settings.json" --json 2>/dev/null)"
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${unknown_result}" "未知设置键被拒绝"
 
+cat > "${WORK}/bad-core.json" <<'EOF'
+{"bin_name":"xray"}
+EOF
+bad_core_result="$(run_tool settings apply "${WORK}/bad-core.json" --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_core_result}" "旧核心 bin_name 被拒绝"
+
+cat > "${WORK}/bad-url.json" <<'EOF'
+{"cn_ip_url":"not-a-url","subscription_url_singbox":"ftp://example.com/sub"}
+EOF
+bad_url_result="$(run_tool settings apply "${WORK}/bad-url.json" --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_url_result}" "新增 URL 字段校验失败"
+
 # ---------------------------------------------------------------------------
 # 4. 配置 JSON 接口与引用校验
 # ---------------------------------------------------------------------------
@@ -161,7 +175,57 @@ empty_name_result="$(run_tool config apply "${WORK}/config-empty-name.json" --js
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${empty_name_result}" "空策略组名称被拒绝"
 
 # ---------------------------------------------------------------------------
-# 5. 日志 JSON 接口
+# 5. mihomo 核心配置 JSON 接口
+# ---------------------------------------------------------------------------
+core_json="$(run_tool core get --json 2>/dev/null)"
+jassert '.ok == true and .data.core == "mihomo" and .data.structured.mode == "rule" and (.data.raw | contains("mixed-port"))' "${core_json}" "core get 返回结构化与 raw"
+
+cat > "${WORK}/core-structured.json" <<'EOF'
+{"structured":{"mode":"global","log-level":"info","allow-lan":false,"profile.store-selected":false}}
+EOF
+core_apply_result="$(run_tool core apply "${WORK}/core-structured.json" --json 2>/dev/null)"
+jassert '.ok == true and .data.mode == "structured"' "${core_apply_result}" "core apply structured 成功"
+core_after="$(run_tool core get --json 2>/dev/null)"
+jassert '.data.structured.mode == "global" and .data.structured["log-level"] == "info" and .data.structured["allow-lan"] == false' "${core_after}" "core apply 结构化字段生效"
+
+jq -Rs '{raw: .}' "${BOX_HOME}/mihomo/config.yaml" > "${WORK}/core-raw.json"
+core_raw_result="$(run_tool core apply "${WORK}/core-raw.json" --json 2>/dev/null)"
+jassert '.ok == true and .data.mode == "raw"' "${core_raw_result}" "core apply raw 成功"
+
+before_core_hash="$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)"
+printf '%s
+' '{"raw":"bad: [unclosed"}' > "${WORK}/core-bad-raw.json"
+core_bad_raw="$(run_tool core apply "${WORK}/core-bad-raw.json" --json 2>/dev/null)"
+after_core_hash="$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${core_bad_raw}" "core apply 非法 YAML 被拒绝"
+assert_eq "${before_core_hash}" "${after_core_hash}" "core apply 非法 YAML 不修改文件"
+
+# ---------------------------------------------------------------------------
+# 6. 应用与网络清单 JSON 接口
+# ---------------------------------------------------------------------------
+lists_empty="$(run_tool lists get --json 2>/dev/null)"
+jassert '.ok == true and (.data.package | length) == 0 and (.data.gid | length) == 0' "${lists_empty}" "lists get 初始返回空清单"
+
+cat > "${WORK}/lists.json" <<'EOF'
+{"package":[{"uid":"0","package":"com.example.app"},{"package":"com.example.other"},{"uid":"10","package":"com.example.work"}],"gid":["1000","10123"],"interfaces":{"allow":["ap+","wlan+"],"ignore":["wlan0"]}}
+EOF
+lists_apply_result="$(run_tool lists apply "${WORK}/lists.json" --json 2>/dev/null)"
+jassert '.ok == true and (.data.changed | index("package")) != null and (.data.changed | index("interfaces")) != null' "${lists_apply_result}" "lists apply 返回 changed"
+lists_after="$(run_tool lists get --json 2>/dev/null)"
+jassert '(.data.package | length) == 3 and .data.package[2].uid == "10" and (.data.gid | length) == 2 and (.data.interfaces.allow | length) == 2' "${lists_after}" "lists 写入后读取一致"
+assert_contains '0:com.example.app' "$(cat "${BOX_HOME}/package.list.cfg")" "package.list.cfg 写入 UID:包名"
+assert_contains 'allow wlan+' "$(cat "${BOX_HOME}/ap.list.cfg")" "ap.list.cfg 写入 allow"
+
+before_lists_hash="$(md5sum "${BOX_HOME}/package.list.cfg" | cut -d' ' -f1)"
+printf '%s
+' '{"package":[{"uid":"0","package":"bad package"}],"gid":["not-gid"],"interfaces":{"allow":["bad interface"]}}' > "${WORK}/lists-bad.json"
+lists_bad="$(run_tool lists apply "${WORK}/lists-bad.json" --json 2>/dev/null)"
+after_lists_hash="$(md5sum "${BOX_HOME}/package.list.cfg" | cut -d' ' -f1)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${lists_bad}" "lists apply 非法清单被拒绝"
+assert_eq "${before_lists_hash}" "${after_lists_hash}" "lists apply 非法清单不修改文件"
+
+# ---------------------------------------------------------------------------
+# 7. 日志 JSON 接口
 # ---------------------------------------------------------------------------
 mkdir -p "${BOX_HOME}/run"
 printf 'line1\nline2\nline3\n' > "${BOX_HOME}/run/runs.log"
@@ -169,7 +233,7 @@ logs_json="$(run_tool logs 2 --json 2>/dev/null)"
 jassert '.ok == true and (.data.lines | length) == 2 and .data.lines[1] == "line3"' "${logs_json}" "logs 返回行数组"
 
 # ---------------------------------------------------------------------------
-# 6. 后台任务生命周期
+# 8. 后台任务生命周期
 # ---------------------------------------------------------------------------
 task_json="$(run_tool task start sub-update --json 2>/dev/null)"
 jassert '.ok == true and .data.state == "running" and .data.cancelable == true' "${task_json}" "task start 返回运行中任务"
@@ -210,7 +274,7 @@ bad_array_result="$(run_tool settings apply "${WORK}/bad-array.json" --json 2>/d
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_array_result}" "非法数组项被拒绝"
 
 # ---------------------------------------------------------------------------
-# 7. 服务包装、日志清空与重置
+# 9. 服务包装、日志清空与重置
 # ---------------------------------------------------------------------------
 cat > "${BOX_HOME}/scripts/box.service" <<'EOF'
 #!/usr/bin/env bash
@@ -231,8 +295,22 @@ jassert '.ok == true and .data.cleared == true' "${reset_json}" "reset subscript
 delete_json="$(run_tool config delete --json 2>/dev/null)"
 jassert '.ok == true and (.data.path | contains("config.yaml.deleted"))' "${delete_json}" "config delete 返回备份路径"
 
+# 切换到 sing-box，status 应读取 sing-box 配置
+cat > "${WORK}/switch-singbox.json" <<'EOF'
+{"bin_name":"sing-box","subscription_url_singbox":"https://example.com/singbox"}
+EOF
+run_tool settings apply "${WORK}/switch-singbox.json" --json >/dev/null 2>&1
+sing_status="$(run_tool status --json 2>/dev/null)"
+jassert '.ok == true and .data.core == "sing-box" and .data.config == "config.json" and .data.config_exists == true' "${sing_status}" "status 正确识别 sing-box 配置"
+settings_sing="$(run_tool settings get --json 2>/dev/null)"
+jassert '.data.settings.subscription_url_singbox == "https://example.com/singbox"' "${settings_sing}" "sing-box 订阅地址写入 settings"
+core_sing="$(run_tool core get --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${core_sing}" "sing-box 不支持 mihomo 核心配置接口"
+config_sing="$(run_tool config get --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${config_sing}" "sing-box 不支持 mihomo 规则配置接口"
+
 # ---------------------------------------------------------------------------
-# 8. CLI 文本兼容（不带 --json）
+# 10. CLI 文本兼容（不带 --json）
 # ---------------------------------------------------------------------------
 run_tool sub add "https://example.com/cli" "CLI订阅" >/dev/null 2>&1
 cli_list="$(run_tool sub list 2>/dev/null)"

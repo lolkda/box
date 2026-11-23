@@ -14,6 +14,7 @@ export interface SettingField {
   hint?: string;
   sensitive?: boolean;
   inputMode?: "text" | "numeric" | "url";
+  showWhen?: { key: string; equals: string };
 }
 
 export interface SettingsGroup {
@@ -33,9 +34,6 @@ export const settingsGroups: SettingsGroup[] = [
       { key: "bin_name", label: "代理核心", kind: "select", hint: "切换核心后需要重启服务", options: [
         { value: "mihomo", label: "mihomo" },
         { value: "sing-box", label: "sing-box" },
-        { value: "xray", label: "xray" },
-        { value: "v2fly", label: "v2fly" },
-        { value: "hysteria", label: "hysteria" },
       ] },
       { key: "auto_modify_config", label: "自动维护配置", kind: "switch", hint: "更新订阅时自动重写 proxy-providers 与 rule-providers" },
       { key: "update_subscription", label: "自动更新订阅", kind: "switch" },
@@ -98,6 +96,8 @@ export const settingsGroups: SettingsGroup[] = [
         { value: "ipset", label: "ipset" },
         { value: "ebpf", label: "eBPF" },
       ] },
+      { key: "cn_ip_url", label: "CNIP IPv4 源", kind: "text", inputMode: "url", placeholder: "https://ispip.clang.cn/all_cn.txt" },
+      { key: "cn_ipv6_url", label: "CNIP IPv6 源", kind: "text", inputMode: "url", placeholder: "https://ispip.clang.cn/all_cn_ipv6.txt" },
       { key: "cnip_force_proxy_apps", label: "强制代理应用", kind: "package-array", hint: "可填写包名，或从已安装应用中选择；支持 用户ID:包名" },
       { key: "force_proxy_cidrs", label: "强制代理 IPv4 网段", kind: "array", placeholder: "192.168.1.0/24", hint: "CIDR 格式，例如 192.168.1.0/24" },
       { key: "force_proxy_cidrs6", label: "强制代理 IPv6 网段", kind: "array", placeholder: "fd00::/8" },
@@ -157,13 +157,10 @@ export const settingsGroups: SettingsGroup[] = [
         { value: "enable", label: "稳定版" },
         { value: "disable", label: "预发行版" },
       ] },
+      { key: "subscription_url_singbox", label: "sing-box 订阅地址", kind: "text", inputMode: "url", placeholder: "https://example.com/sub", hint: "仅在代理核心为 sing-box 时显示", showWhen: { key: "bin_name", equals: "sing-box" } },
       { key: "githubtoken", label: "GitHub Token", kind: "password", sensitive: true, hint: "只显示设置状态，不会回填明文" },
     ],
   },
 ];
 
 export const allSettingsFields = settingsGroups.flatMap((group) => group.fields);
-
-export function fieldsForGroup(id: string): SettingField[] {
-  return settingsGroups.find((group) => group.id === id)?.fields || [];
-}

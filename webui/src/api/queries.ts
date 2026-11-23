@@ -12,6 +12,8 @@ export const queryKeys = {
   logs: ["logs"] as const,
   tasks: ["tasks"] as const,
   taskLogs: (id: string) => ["tasks", id, "logs"] as const,
+  coreConfig: ["core-config"] as const,
+  appLists: ["app-lists"] as const,
 };
 
 export function useStatusQuery() {
@@ -65,6 +67,23 @@ export function useTasksQuery() {
   });
 }
 
+export function useCoreConfigQuery(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.coreConfig,
+    queryFn: api.coreConfig,
+    enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function useAppListsQuery() {
+  return useQuery({
+    queryKey: queryKeys.appLists,
+    queryFn: api.appLists,
+    staleTime: 10_000,
+  });
+}
+
 export function useTaskLogsQuery(id: string | null) {
   return useQuery({
     queryKey: queryKeys.taskLogs(id || ""),
@@ -84,6 +103,8 @@ export function useInvalidateOperationalQueries() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
     void queryClient.invalidateQueries({ queryKey: queryKeys.logs });
     void queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.coreConfig });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.appLists });
   };
 }
 

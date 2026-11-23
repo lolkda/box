@@ -70,10 +70,6 @@ export function getErrorDetail(error: unknown): string {
   return "";
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 export function uniquePush(list: string[], value: string): string[] {
   const trimmed = value.trim();
   if (!trimmed || list.includes(trimmed)) return list;

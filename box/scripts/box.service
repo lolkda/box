@@ -234,7 +234,7 @@ box_permission() {
   else
     if  [[ "${box_user_group}" != @(root:net_admin|0:3005) ]]; then
       log Error "不支持的用户组 [ \"${box_user_group}\" ]"
-      sed -i "s/box_user_group=.*/box_user_group=\"root:net_admin\"/g" "${settings}"
+      sed -i "s/box_user_group=.*/box_user_group=\"root:net_admin\"/g" "${settings_file}"
       log Debug "已自动切换为 [ root:net_admin ]，请重启 box"
       exit 1
     fi
@@ -302,18 +302,6 @@ tun_effective_stack() {
   else
     printf 'mixed\n'
   fi
-}
-
-force_network_mode() {
-  local target_mode="$1"
-  local reason="$2"
-
-  [ -n "${target_mode}" ] || return 1
-  [ "${network_mode}" = "${target_mode}" ] && return 0
-
-  [ -n "${reason}" ] && log Warning "${reason}"
-  sed -i 's/\(network_mode=\)"[^"]*"/\1"'"${target_mode}"'"/g' "${settings}"
-  network_mode="${target_mode}"
 }
 
 sing_config_is_jsonc() {
@@ -601,15 +589,9 @@ sing_set_tun_flags() {
   local strict_route="$3"
   local auto_redirect="$4"
 
-  if [ "${auto_route}" = "true" ]; then
-    ${yq_bin} '(.inbounds[] | select(.type == "tun") | .auto_route) |= true' -i --output-format=json "${sing_work_config}"
-    ${yq_bin} '(.inbounds[] | select(.type == "tun") | .strict_route) |= true' -i --output-format=json "${sing_work_config}"
-    ${yq_bin} '(.inbounds[] | select(.type == "tun") | .auto_redirect) |= true' -i --output-format=json "${sing_work_config}"
-  else
-    ${yq_bin} '(.inbounds[] | select(.type == "tun") | .auto_route) |= false' -i --output-format=json "${sing_work_config}"
-    ${yq_bin} '(.inbounds[] | select(.type == "tun") | .strict_route) |= false' -i --output-format=json "${sing_work_config}"
-    ${yq_bin} '(.inbounds[] | select(.type == "tun") | .auto_redirect) |= false' -i --output-format=json "${sing_work_config}"
-  fi
+  ${yq_bin} "(.inbounds[] | select(.type == \"tun\") | .auto_route) = ${auto_route}" -i --output-format=json "${sing_work_config}"
+  ${yq_bin} "(.inbounds[] | select(.type == \"tun\") | .strict_route) = ${strict_route}" -i --output-format=json "${sing_work_config}"
+  ${yq_bin} "(.inbounds[] | select(.type == \"tun\") | .auto_redirect) = ${auto_redirect}" -i --output-format=json "${sing_work_config}"
 }
 
 sing_set_tun_auto_route() {
@@ -1151,32 +1133,6 @@ box_run_bin() {
   : > "${box_run}/tool.log"
 
   case "${bin_name}" in
-    hysteria)
-      # 同步端口
-      if [ -f "${hysteria_config}" ]; then
-        sed -i -e "/tcpTProxy:/,/listen:/s/listen: :.*/listen: :${tproxy_port}/" "${hysteria_config}"
-        sed -i -e "/udpTProxy:/,/listen:/s/listen: :.*/listen: :${tproxy_port}/" "${hysteria_config}"
-        sed -i -e "/tcpRedirect:/,/listen:/s/listen: :.*/listen: :${redir_port}/" "${hysteria_config}"
-      fi
-
-      # 验证 network_mode for hysteria
-      case "${network_mode}" in
-        redirect|tproxy|enhance)
-          ;;
-        *)
-          force_network_mode "tproxy" "${bin_name} 不支持网络模式: ${network_mode}，已切换到 TPROXY"
-          ;;
-      esac
-      start_core_bin -c "${hysteria_config}"
-      if kill -0 "${PID}" 2>/dev/null; then
-        echo -n "${PID}" > "${box_pid}"
-      else
-        set_description error
-        log Error "$(cat "${box_run}/${bin_name}.log")"
-        log Error "配置失败，请检查 ${box_run}/${bin_name}.log 文件。"
-        exit 1
-      fi
-      ;;
     sing-box)
       if [ "${auto_modify_config}" = "true" ]; then
         prepare_singbox
@@ -1205,56 +1161,6 @@ box_run_bin() {
         exit 1
       fi
       ;;
-    xray)
-      force_network_mode "tproxy" "${bin_name} 仅支持 TPROXY，已自动切换网络模式"
-      if [ ! -f "${xray_config}" ]; then
-        log Error "未找到配置文件：${xray_config}"
-        set_description error "配置文件不存在"
-        exit 1
-      else
-        if [[ "${xray_config}" == *.yaml ]]; then
-          ${box_dir}/bin/yq '(.inbounds[] | select(.protocol == "dokodemo-door") | .port) = '"${tproxy_port}"'' -i --output-format=yaml "${xray_config}" >/dev/null 2>&1
-        elif [[ "${xray_config}" == *.json ]]; then
-          ${box_dir}/bin/yq '(.inbounds[] | select(.protocol == "dokodemo-door") | select(.tag == "tproxy-in") | .port) = '"${tproxy_port}" -i --output-format=json "${xray_config}" >/dev/null 2>&1
-        fi
-        log Info "已定位配置文件：${xray_config}"
-      fi
-      export XRAY_LOCATION_ASSET="${box_dir}/${bin_name}"
-      if ${bin_path} -test -confdir "${box_dir}/${bin_name}" > "${box_run}/${bin_name}.log" 2>&1; then
-        start_core_bin run -confdir "${box_dir}/${bin_name}"
-        echo -n $PID > "${box_pid}"
-      else
-        set_description error
-        log Error "$(<"${box_run}/${bin_name}.log")"
-        log Error "配置失败，请检查 ${box_run}/${bin_name}.log 文件。"
-        exit 1
-      fi
-      ;;
-    v2fly)
-      force_network_mode "tproxy" "${bin_name} 仅支持 TPROXY，已自动切换网络模式"
-      if [ ! -f "${v2fly_config}" ]; then
-        log Error "未找到配置文件：${v2fly_config}"
-        set_description error "配置文件不存在"
-        exit 1
-      else
-        if [[ "${v2fly_config}" == *.yaml ]]; then
-          ${box_dir}/bin/yq '(.inbounds[] | select(.protocol == "dokodemo-door") | .port) = '"${tproxy_port}"'' -i --output-format=yaml "${v2fly_config}" >/dev/null 2>&1
-        elif [[ "${v2fly_config}" == *.json ]]; then
-          ${box_dir}/bin/yq '(.inbounds[] | select(.protocol == "dokodemo-door") | select(.tag == "tproxy-in") | .port) = '"${tproxy_port}" -i --output-format=json "${v2fly_config}" >/dev/null 2>&1
-        fi
-        log Info "已定位配置文件：${v2fly_config}"
-      fi
-      export V2RAY_LOCATION_ASSET="${box_dir}/${bin_name}"
-      if ${bin_path} test -d "${box_dir}/${bin_name}" > "${box_run}/${bin_name}.log" 2>&1; then
-        start_core_bin run -d "${box_dir}/${bin_name}"
-        echo -n $PID > "${box_pid}"
-      else
-        set_description error
-        log Error "$(<"${box_run}/${bin_name}.log")"
-        log Error "配置失败，请检查 ${box_run}/${bin_name}.log 文件。"
-        exit 1
-      fi
-      ;;
     *)
       log Error "[ ${bin_name} ] 未知内核。"
       exit 1
@@ -1273,7 +1179,7 @@ box_cgroup() {
       else
         log Warning "无法为 ${bin_name} 启用 ${cgroup_attr}"
         log Warning "已关闭 cgroups ${cgroup_attr}"
-        sed -i -E "/cgroup_${cgroup_attr}/ s/(true)/false/" "${settings}"
+        sed -i -E "/cgroup_${cgroup_attr}/ s/(true)/false/" "${settings_file}"
       fi
     fi
   }
@@ -1312,7 +1218,6 @@ box_bin_status() {
   cpu=$(ps -p $PID -o %cpu | busybox awk 'NR==2{print $1}' 2>/dev/null)
 
   cpus_allowed=$(grep Cpus_allowed_list /proc/$PID/status | busybox awk '{ print $2" "$3 }')
-  core=$(busybox awk '{print $39}' /proc/$PID/stat 2>/dev/null)
 
   log Info "${bin_name} CPU: ${cpu:-无法获取}%, 允许核心: ${cpus_allowed:-无法获取}"
 
@@ -1464,7 +1369,7 @@ start_box() {
 
   # 检查 bin_name 是否已定义
   case "${bin_name}" in
-    mihomo|xray|sing-box|v2fly|hysteria)
+    mihomo|sing-box)
       log Info "启动服务"
       ;;
     *)

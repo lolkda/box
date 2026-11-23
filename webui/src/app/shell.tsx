@@ -2,11 +2,13 @@ import { useCallback, useEffect } from "react";
 import { Outlet, useLocation, useNavigate, useRouteError } from "react-router-dom";
 import { ChevronLeft, ShieldAlert } from "lucide-react";
 import { isKernelsuAvailable } from "../api/client";
-import { useTaskCompletionWatcher } from "../api/queries";
+import { useStatusQuery, useTaskCompletionWatcher } from "../api/queries";
 import { useToast } from "../components/ui/toast";
 import { BottomNav } from "../components/layout/bottom-nav";
 import { TaskIndicator } from "../components/layout/task-indicator";
+import { PageSkeleton } from "../components/ui/skeleton";
 import { getErrorMessage } from "../lib/utils";
+import { Button } from "../components/ui/button";
 
 const pageMeta: Record<string, { title: string; back?: string }> = {
   "/": { title: "概览" },
@@ -19,7 +21,11 @@ const pageMeta: Record<string, { title: string; back?: string }> = {
   "/logs": { title: "日志", back: "/more" },
   "/tasks": { title: "任务", back: "/more" },
   "/danger": { title: "危险操作", back: "/more" },
+  "/core-config": { title: "核心配置", back: "/more" },
+  "/apps-network": { title: "应用与网络", back: "/more" },
 };
+
+const mihomoOnlyPaths = new Set(["/groups", "/rules", "/providers", "/core-config"]);
 
 function KsuUnavailablePage() {
   return (
@@ -41,6 +47,7 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const toast = useToast();
+  const statusQuery = useStatusQuery();
   const meta = pageMeta[location.pathname] || { title: "Box 管理" };
 
   useEffect(() => {
@@ -64,6 +71,19 @@ export function AppShell() {
 
   if (!isKernelsuAvailable()) {
     return <KsuUnavailablePage />;
+  }
+
+  if (mihomoOnlyPaths.has(location.pathname)) {
+    if (statusQuery.isLoading) return <PageSkeleton />;
+    if (statusQuery.data && statusQuery.data.core !== "mihomo") {
+      return (
+        <MihomoUnsupportedPage
+          title={meta.title}
+          core={statusQuery.data.core}
+          onBack={() => navigate("/more")}
+        />
+      );
+    }
   }
 
   return (
@@ -100,6 +120,20 @@ export function AppShell() {
         <Outlet />
       </main>
       <BottomNav />
+    </div>
+  );
+}
+
+
+function MihomoUnsupportedPage({ title, core, onBack }: { title: string; core: string; onBack: () => void }) {
+  return (
+    <div className="flex min-h-[70dvh] items-center justify-center px-2">
+      <div className="w-full rounded-2xl border border-border bg-surface p-6 text-center shadow-sm">
+        <ShieldAlert size={26} className="mx-auto text-warning" />
+        <h1 className="mt-3 text-base font-semibold text-fg">{title} 仅支持 mihomo</h1>
+        <p className="mt-2 text-xs leading-5 text-fg-muted">当前代理核心为 {core}。请先切回 mihomo，或到设置页修改代理核心。</p>
+        <Button variant="secondary" className="mt-4" onClick={onBack}>返回更多</Button>
+      </div>
     </div>
   );
 }

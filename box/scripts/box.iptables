@@ -1,6 +1,5 @@
 #!/system/bin/sh
 
-scripts_dir="${0%/*}"
 source /data/adb/box/settings.ini
 
 runtime_iptables_env="${box_run_state}/runtime.iptables.env"
@@ -2249,24 +2248,6 @@ case "${bin_name}" in
     fake_ip_range=$(busybox awk -F'"' '/inet4_range/ {print $4}' "${sing_config}")
     fake_ip6_range=$(busybox awk -F'"' '/inet6_range/ {print $4}' "${sing_config}")
     ;;
-  "hysteria")
-    case "${network_mode}" in
-      redirect|tproxy|enhance)
-        # 支持的模式，无需操作
-        true
-        ;;
-      *)
-        log Warning "$bin_name 不支持网络模式: $network_mode，已切换到 TPROXY"
-        sed -i 's/\(network_mode=\)\"[^\"]*\"/\1"tproxy"/g' ${settings}
-        ;;
-    esac
-    ;;
-  "xray" | "v2fly")
-    if [[ "${network_mode}" != "tproxy" ]]; then
-      log Warning "$bin_name 不支持网络模式: $network_mode，已切换到 TPROXY"
-      sed -i 's/\(network_mode=\)\"[^\"]*\"/\1"tproxy"/g' ${settings}
-    fi
-    ;;
   *)
     log Error "<${bin_name}> 未知内核。"
     exit 1
@@ -3115,6 +3096,11 @@ fi
 
 if [ "${network_mode}" = "ebpf" ] && [[ "${bin_name}" == @(mihomo|sing-box) ]]; then
   case "$1" in
+    reload_ebpf)
+      probe_capabilities
+      reload_rule_ebpf
+      exit 0
+      ;;
     enable|renew)
       cleanup_mode="$(cleanup_mode_for_apply)"
       log Debug "eBPF 模式跳过 iptables、策略路由、CNIP 与模块 BPF 匹配规则，清理模式: ${cleanup_mode}"
@@ -3137,13 +3123,18 @@ if [ "${network_mode}" = "ebpf" ] && [[ "${bin_name}" == @(mihomo|sing-box) ]]; 
       ;;
     *)
       echo "${red}$0 $1 未知命令${normal}"
-      echo "${yellow}用法:${normal} ${green}$0${normal} {${yellow}enable|disable|renew${normal}}"
+      echo "${yellow}用法:${normal} ${green}$0${normal} {${yellow}enable|disable|renew|reload_ebpf${normal}}"
       ;;
   esac
   exit 0
 fi
 
 probe_capabilities
+
+if [ "$1" = "reload_ebpf" ]; then
+  reload_rule_ebpf
+  exit 0
+fi
 
 if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
   case "$1" in
@@ -3249,7 +3240,7 @@ if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
       ;;
     *)
       echo "${red}$0 $1 未知命令${normal}"
-      echo "${yellow}用法:${normal} ${green}$0${normal} {${yellow}enable|disable|renew${normal}}"
+      echo "${yellow}用法:${normal} ${green}$0${normal} {${yellow}enable|disable|renew|reload_ebpf${normal}}"
       ;;
   esac
 else
@@ -3300,7 +3291,7 @@ else
       ;;
     *)
       echo "${red}$0: '$1' 未知命令${normal}"
-      echo "${yellow}用法:${normal} ${green}$0${normal} {${yellow}enable|disable|renew${normal}}"
+      echo "${yellow}用法:${normal} ${green}$0${normal} {${yellow}enable|disable|renew|reload_ebpf${normal}}"
       ;;
   esac
 fi

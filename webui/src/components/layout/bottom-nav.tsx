@@ -10,7 +10,7 @@ const items = [
   { to: "/more", label: "更多", icon: Menu, end: false },
 ];
 
-const morePrefixes = ["/settings", "/providers", "/logs", "/tasks", "/danger"];
+const morePrefixes = ["/settings", "/providers", "/logs", "/tasks", "/danger", "/core-config", "/apps-network"];
 
 export function BottomNav() {
   const location = useLocation();

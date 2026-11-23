@@ -10,7 +10,7 @@
 ## 项目定位
 
 本仓库主要提供：
-- 统一的代理核心运行管理（mihomo / sing-box / xray / v2fly / hysteria）
+- 统一的代理核心运行管理（mihomo / sing-box）
 - 多网络模式下的透明代理规则编排（TProxy / Redirect / Tun / Mixed / Enhance）
 - 订阅、Geo 资源、核心二进制与 WebUI 的统一维护脚本
 - 适配 Android Root 生态的模块化目录与服务生命周期管理
@@ -24,9 +24,6 @@
 ├── bin/                # 代理核心与工具二进制
 ├── mihomo/             # mihomo 配置目录
 ├── sing-box/           # sing-box 配置目录
-├── xray/               # xray 配置目录
-├── v2fly/              # v2fly 配置目录
-├── hysteria/           # hysteria 配置目录
 ├── scripts/            # 核心脚本
 │   ├── box.service     # 服务生命周期管理
 │   ├── box.iptables    # 透明代理规则管理
@@ -64,13 +61,15 @@ su -c "/data/adb/box/scripts/box.tool sub update"
 
 - 概览：运行状态、启动/停止/重启/重载、关键指标与最近日志
 - 订阅：掩码列表、添加/编辑/删除、单条与全部更新
-- 策略组、规则、规则集：可视化增删改；规则支持结构化构建与高级原文模式
-- 设置：全部可编辑标量键、数组编辑器、应用包名选择与 GitHub Token 脱敏
+- 策略组、规则、规则集：仅 mihomo，可视化增删改；规则支持结构化构建与高级原文模式
+- 核心配置：mihomo 安全运行层表单 + 完整 YAML 高级编辑
+- 应用与网络：`package.list.cfg` / `gid.list.cfg` / `ap.list.cfg` 可视化清单
+- 设置：全部可编辑标量键、数组编辑器、应用包名选择与 GitHub Token 脱敏；sing-box 订阅地址在对应核心下显示
 - 日志：自动刷新、级别过滤、搜索、复制与清空
 - 任务中心：订阅/内核等后台任务由 shell 托管，关闭页面后可恢复查看
 - 危险操作：删除配置、清空日志、重置订阅、更新核心（均需二次确认）
 
-`box.tool --json` 在本次重构后统一返回 `{ok,data,error}` 包络；CLI 文本命令保持不变，旧 `--json` 字段不兼容。规格见 [module-webui-refactor.md](docs/specs/module-webui-refactor.md)。
+`box.tool --json` 在本次重构后统一返回 `{ok,data,error}` 包络；CLI 文本命令保持不变，旧 `--json` 字段不兼容。规格见 [module-webui-refactor.md](docs/specs/module-webui-refactor.md) 与 [module-webui-config-expansion.md](docs/specs/module-webui-config-expansion.md)。
 
 源码在 `webui/`，构建：
 

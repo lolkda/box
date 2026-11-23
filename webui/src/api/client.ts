@@ -1,7 +1,11 @@
 import { exec } from "kernelsu";
 import type {
   ApiEnvelope,
+  AppListsData,
+  AppListsPayload,
   ConfigData,
+  CoreConfigData,
+  MihomoStructuredConfig,
   LogsData,
   PackageInfo,
   ServiceAction,
@@ -122,12 +126,6 @@ export const api = {
     runJson<Subscription>(["sub", "set", oldName, newName, url, "--json"]),
 
   removeSubscription: (name: string) => runJson<{ name: string }>(["sub", "rm", name, "--json"]),
-
-  updateSubscription: (name?: string) =>
-    runJson<{ updated: boolean; partial: boolean; failed: boolean }>(
-      name ? ["sub", "update", name, "--json"] : ["sub", "update", "--json"],
-    ),
-
   config: () => runJson<ConfigData>(["config", "get", "--json"]),
 
   applyConfig: (config: ConfigData) => runJsonWithFile<{ changed: string[] }>(["config", "apply"], config),
@@ -153,9 +151,6 @@ export const api = {
 
   taskStart: (kind: TaskKind, arg?: string) =>
     runJson<TaskInfo>(["task", "start", kind, ...(arg ? [arg] : []), "--json"]),
-
-  taskStatus: (id: string) => runJson<TaskInfo>(["task", "status", id, "--json"]),
-
   taskLogs: async (id: string, count = 200) => {
     const data = await runJson<TaskLogsData>(["task", "logs", id, String(count), "--json"]);
     return data;
@@ -167,6 +162,16 @@ export const api = {
   },
 
   taskCancel: (id: string) => runJson<TaskInfo>(["task", "cancel", id, "--json"]),
+
+  coreConfig: () => runJson<CoreConfigData>(["core", "get", "--json"]),
+
+  applyCoreConfig: (payload: { structured?: MihomoStructuredConfig; raw?: string }) =>
+    runJsonWithFile<{ changed: string[]; mode: string }>(["core", "apply"], payload),
+
+  appLists: () => runJson<AppListsData>(["lists", "get", "--json"]),
+
+  applyAppLists: (payload: AppListsPayload) =>
+    runJsonWithFile<{ changed: string[] }>(["lists", "apply"], payload),
 };
 
 interface KsuPackageBridge {

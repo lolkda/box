@@ -15,17 +15,24 @@ busybox mkdir -p "$(dirname "$TOOL_LOG")"
 box_log="$TOOL_LOG"
 
 # 设置 GitHub API 访问配置
-setup_github_api() {
-  rev1="busybox wget --no-check-certificate -qO-"
-  if which curl >/dev/null; then
-    rev1="curl --insecure -sL"
-  fi
-  if [ -n "$githubtoken" ]; then
-    if which curl >/dev/null; then
-      rev1="curl --insecure -sL -H \"Authorization: token ${githubtoken}\""
+github_get() {
+  if command -v curl >/dev/null 2>&1; then
+    if [ -n "${githubtoken}" ]; then
+      curl --insecure -sL -H "Authorization: token ${githubtoken}" "$@"
     else
-      rev1="busybox wget --no-check-certificate -qO- --header=\"Authorization: token ${githubtoken}\""
+      curl --insecure -sL "$@"
     fi
+  else
+    if [ -n "${githubtoken}" ]; then
+      busybox wget --no-check-certificate -qO- --header="Authorization: token ${githubtoken}" "$@"
+    else
+      busybox wget --no-check-certificate -qO- "$@"
+    fi
+  fi
+}
+
+setup_github_api() {
+  if [ -n "${githubtoken}" ]; then
     log Debug "GitHub Token 已配置，将使用认证访问 GitHub API"
   else
     log Debug "未配置 GitHub Token，将使用匿名访问 GitHub API"
@@ -42,7 +49,7 @@ divider() {
   [ -n "$box_log" ] && log Info "----------------------------------------" >/dev/null
 }
 trap divider EXIT
-log Info "执行命令: $0 $@"
+log Info "执行命令: $0 $*"
 
 # 更新文件
 upfile() {
@@ -157,12 +164,18 @@ reload_cnip_sets_after_update() {
     log Info "服务运行中且已启用 CNIP，正在重写入 ipset"
   fi
 
-  if [ "${updated_v4}" = "true" ]; then
-    reload_cnip_set cnip inet "${cn_ip_file}" || ok="false"
-  fi
+  if [ "${cnip_mode}" = "ebpf" ]; then
+    if [ "${updated_v4}" = "true" ] || [ "${updated_v6}" = "true" ]; then
+      "${scripts_dir}/box.iptables" reload_ebpf >/dev/null 2>&1 || ok="false"
+    fi
+  else
+    if [ "${updated_v4}" = "true" ]; then
+      reload_cnip_set cnip inet "${cn_ip_file}" || ok="false"
+    fi
 
-  if [ "${updated_v6}" = "true" ]; then
-    reload_cnip_set cnip6 inet6 "${cn_ipv6_file}" || ok="false"
+    if [ "${updated_v6}" = "true" ]; then
+      reload_cnip_set cnip6 inet6 "${cn_ipv6_file}" || ok="false"
+    fi
   fi
 
   [ "${ok}" = "true" ]
@@ -273,27 +286,6 @@ check() {
         log Error "$(<"${box_run}/${bin_name}_report.log")" >&2
       fi
       ;;
-    xray)
-      export XRAY_LOCATION_ASSET="${box_dir}/xray"
-      if ${bin_path} -test -confdir "${box_dir}/${bin_name}" > "${box_run}/${bin_name}_report.log" 2>&1; then
-        log Info "配置检查通过"
-      else
-        log Debug "$(ls ${box_dir}/${bin_name})"
-        log Error "$(<"${box_run}/${bin_name}_report.log")" >&2
-      fi
-      ;;
-    v2fly)
-      export V2RAY_LOCATION_ASSET="${box_dir}/v2fly"
-      if ${bin_path} test -d "${box_dir}/${bin_name}" > "${box_run}/${bin_name}_report.log" 2>&1; then
-        log Info "配置检查通过"
-      else
-        log Debug "$(ls ${box_dir}/${bin_name})"
-        log Error "$(<"${box_run}/${bin_name}_report.log")" >&2
-      fi
-      ;;
-    hysteria)
-      true
-      ;;
     *)
       log Error "<${bin_name}> 未知的二进制文件."
       exit 1
@@ -340,13 +332,6 @@ reload() {
         return 1
       fi
       ;;
-    "xray"|"v2fly"|"hysteria")
-      if [ -f "${box_pid}" ]; then
-        if kill -0 "$(<"${box_pid}" 2>/dev/null)"; then
-          restart_box
-        fi
-      fi
-      ;;
     *)
       log Warning "${bin_name} 不支持使用 API 重载配置."
       return 1
@@ -370,7 +355,7 @@ upcurl() {
   mkdir -p "${bin_dir}/backup"
   [ -f "${bin_dir}/curl" ] && cp "${bin_dir}/curl" "${bin_dir}/backup/curl.bak" >/dev/null 2>&1
 
-  local latest_version=$($rev1 "https://api.github.com/repos/stunnel/static-curl/releases" | grep "tag_name" | busybox grep -oE "[0-9.]*" | head -1)
+  local latest_version=$(github_get "https://api.github.com/repos/stunnel/static-curl/releases" | grep "tag_name" | busybox grep -oE "[0-9.]*" | head -1)
   local download_link="https://github.com/stunnel/static-curl/releases/download/${latest_version}/curl-linux-${arch}-glibc-${latest_version}.tar.xz"
   local temp_archive="${box_dir}/curl.tar.xz"
   local temp_extract_dir="${box_dir}/curl_temp"
@@ -432,6 +417,13 @@ upyq() {
 
 # 检查并更新 geoip 和 geosite
 upgeox() {
+  case "${bin_name}" in
+    mihomo|sing-box) ;;
+    *)
+      log Error "不支持的代理核心: ${bin_name}"
+      return 1
+      ;;
+  esac
   geodata_mode=$(busybox awk '!/^ *#/ && /geodata-mode:*./{print $2}' "${mihomo_config}")
   [ -z "${geodata_mode}" ] && geodata_mode=false
   case "${bin_name}" in
@@ -446,12 +438,6 @@ upgeox() {
       geoip_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/geoip-lite.db"
       geosite_file="${box_dir}/sing-box/geosite.db"
       geosite_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/geosite.db"
-      ;;
-    *)
-      geoip_file="${box_dir}/${bin_name}/geoip.dat"
-      geoip_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/geoip-lite.dat"
-      geosite_file="${box_dir}/${bin_name}/geosite.dat"
-      geosite_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/geosite.dat"
       ;;
   esac
   if [ "${update_geo}" = "true" ] && { log Info "每日更新 GeoX" && log Debug "正在下载 ${geoip_url}"; } && upfile "${geoip_file}" "${geoip_url}" && { log Debug "正在下载 ${geosite_url}" && upfile "${geosite_file}" "${geosite_url}"; }; then
@@ -469,7 +455,7 @@ upgeox() {
 
 upgeox_all() {
   local original_bin_name=$bin_name
-  for core in mihomo sing-box xray v2fly; do
+  for core in mihomo sing-box; do
       bin_name=$core
       upgeox
   done
@@ -796,10 +782,6 @@ upsubs() {
         return 1
       fi
       ;;
-    "xray"|"v2fly"|"hysteria")
-      log Warning "${bin_name} 不支持订阅功能.."
-      return 1
-      ;;
     *)
       log Error "<${bin_name}> 未知的二进制文件."
       return 1
@@ -1000,21 +982,6 @@ mask_secret() {
   printf '%s' "${value}" | busybox awk '{ print substr($0, 1, 4) "****" substr($0, length($0) - 3) }'
 }
 
-file_state_json() {
-  local file="$1"
-  local size=0
-  local updated=""
-  if [ -f "${file}" ]; then
-    size="$(busybox wc -c < "${file}" 2>/dev/null | busybox tr -d '[:space:]')"
-    [ -n "${size}" ] || size=0
-    updated="$(busybox stat -c '%y' "${file}" 2>/dev/null | busybox cut -d. -f1 || true)"
-  fi
-  printf '{"exists":%s,"size":%s,"updated_at":%s}' \
-    "$(json_bool "$([ -s "${file}" ] && printf true || printf false)")" \
-    "${size}" \
-    "$(json_quote "${updated}")"
-}
-
 ensure_yq() {
   yq="yq"
   if ! command -v yq &>/dev/null; then
@@ -1026,9 +993,23 @@ ensure_yq() {
 }
 
 status_json() {
+  case "${bin_name}" in
+    mihomo|sing-box) ;;
+    *)
+      json_error "E_VALIDATION" "不支持的代理核心: ${bin_name}"
+      return 1
+      ;;
+  esac
+
   local running=false
   local pid="null"
   local config_exists=false
+  local config_file="${mihomo_config}"
+  local config_name="${name_mihomo_config}"
+  if [ "${bin_name}" = "sing-box" ]; then
+    config_file="${sing_config}"
+    config_name="${name_sing_config}"
+  fi
   if [ -f "${box_pid}" ]; then
     local current_pid
     current_pid="$(cat "${box_pid}" 2>/dev/null)"
@@ -1037,14 +1018,14 @@ status_json() {
       pid="${current_pid}"
     fi
   fi
-  [ -f "${mihomo_config}" ] && config_exists=true
+  [ -f "${config_file}" ] && config_exists=true
 
   json_ok "$(printf '{"running":%s,"pid":%s,"core":%s,"mode":%s,"config":%s,"config_exists":%s,"subscriptions":%s,"active_tasks":%s}' \
     "$(json_bool "${running}")" \
     "${pid}" \
     "$(json_quote "${bin_name}")" \
     "$(json_quote "${network_mode}")" \
-    "$(json_quote "${name_mihomo_config}")" \
+    "$(json_quote "${config_name}")" \
     "$(json_bool "${config_exists}")" \
     "$(subscription_count)" \
     "$(task_running_count)")"
@@ -1299,7 +1280,7 @@ sub_update_json() {
 
 settings_scalar_keys() {
   cat <<'EOF'
-auto_modify_config boot_auto_start bin_name network_mode tproxy_port redir_port ipv6 performance_mode quic mihomo_dns_forward proxy_tcp proxy_udp dns_hijack_tcp dns_hijack_udp dns_hijack_mode bypass_cn_ip bypass_cn_ip_v4 bypass_cn_ip_v6 cnip_mode proxy_mode update_subscription update_geo use_ghproxy url_ghproxy mihomo_stable singbox_stable run_crontab interva_update cgroup_memcg memcg_limit taskset_cpu allow_cpu cgroup_blkio weight mac_filter mac_mode ruleset_prefix subscription_keep_last_good enable_network_service_control use_module_on_wifi use_module_on_wifi_disconnect use_ssid_matching use_wifi_list_mode inotify_log_enabled renew
+auto_modify_config boot_auto_start bin_name network_mode tproxy_port redir_port ipv6 performance_mode quic mihomo_dns_forward proxy_tcp proxy_udp dns_hijack_tcp dns_hijack_udp dns_hijack_mode bypass_cn_ip bypass_cn_ip_v4 bypass_cn_ip_v6 cnip_mode cn_ip_url cn_ipv6_url proxy_mode update_subscription update_geo use_ghproxy url_ghproxy mihomo_stable singbox_stable subscription_url_singbox run_crontab interva_update cgroup_memcg memcg_limit taskset_cpu allow_cpu cgroup_blkio weight mac_filter mac_mode ruleset_prefix subscription_keep_last_good enable_network_service_control use_module_on_wifi use_module_on_wifi_disconnect use_ssid_matching use_wifi_list_mode inotify_log_enabled renew
 EOF
 }
 
@@ -1349,7 +1330,7 @@ settings_validate_scalar() {
       case "${value}" in blacklist|whitelist) return 0 ;; *) return 1 ;; esac
       ;;
     bin_name)
-      case "${value}" in mihomo|sing-box|xray|v2fly|hysteria) return 0 ;; *) return 1 ;; esac
+      case "${value}" in mihomo|sing-box) return 0 ;; *) return 1 ;; esac
       ;;
     tproxy_port|redir_port)
       case "${value}" in ''|*[!0-9]*) return 1 ;; esac
@@ -1374,7 +1355,7 @@ settings_validate_scalar() {
       [ "$(printf '%s' "${value}" | busybox awk '{ print NF }')" -eq 5 ] || return 1
       return 0
       ;;
-    url_ghproxy|ruleset_prefix)
+    url_ghproxy|ruleset_prefix|cn_ip_url|cn_ipv6_url|subscription_url_singbox)
       [ -z "${value}" ] && return 0
       case "${value}" in http://*|https://*) return 0 ;; *) return 1 ;; esac
       ;;
@@ -1743,8 +1724,369 @@ config_validate_json() {
   return 0
 }
 
+core_get_json() {
+  ensure_yq
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "核心配置仅支持 mihomo"
+    return 1
+  fi
+  if [ ! -f "${mihomo_config}" ]; then
+    json_error "E_NOT_FOUND" "配置文件不存在: ${mihomo_config}"
+    return 1
+  fi
+
+  local structured raw
+  structured="$(${yq} -o=json '{
+    "mode": ((.mode // "rule") | downcase),
+    "log-level": ((."log-level" // "error") | downcase),
+    "allow-lan": (."allow-lan" // false),
+    "external-controller": (."external-controller" // ""),
+    "external-ui": (."external-ui" // ""),
+    "profile.store-selected": (.profile."store-selected" // true),
+    "profile.store-fake-ip": (.profile."store-fake-ip" // true),
+    "unified-delay": (."unified-delay" // false),
+    "tcp-concurrent": (."tcp-concurrent" // true),
+    "find-process-mode": ((."find-process-mode" // "always") | downcase)
+  }' "${mihomo_config}" 2>/dev/null)" || {
+    json_error "E_IO" "读取 mihomo 配置失败"
+    return 1
+  }
+  raw="$(cat "${mihomo_config}" 2>/dev/null)" || {
+    json_error "E_IO" "读取 mihomo 原始配置失败"
+    return 1
+  }
+  printf '{"ok":true,"data":{"core":"mihomo","file":%s,"structured":%s,"raw":%s},"meta":{"version":1}}\n' \
+    "$(json_quote "${mihomo_config}")" "${structured}" "$(json_quote "${raw}")"
+}
+
+core_apply_json() {
+  local file="$1"
+  if [ ! -s "${file}" ]; then
+    json_error "E_USAGE" "core apply: 缺少 JSON 文件"
+    return 1
+  fi
+  ensure_yq
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "核心配置仅支持 mihomo"
+    return 1
+  fi
+  if [ ! -f "${mihomo_config}" ]; then
+    json_error "E_NOT_FOUND" "配置文件不存在: ${mihomo_config}"
+    return 1
+  fi
+  if ! ${yq} -e 'tag == "!!map"' "${file}" >/dev/null 2>&1; then
+    json_error "E_VALIDATION" "core apply 必须是 JSON 对象"
+    return 1
+  fi
+
+  local has_raw has_structured
+  has_raw="$(${yq} -r 'has("raw")' "${file}" 2>/dev/null)"
+  has_structured="$(${yq} -r 'has("structured")' "${file}" 2>/dev/null)"
+  if [ "${has_raw}" = "true" ] && [ "${has_structured}" = "true" ]; then
+    json_error "E_VALIDATION" "raw 与 structured 不能同时提交"
+    return 1
+  fi
+  if [ "${has_raw}" != "true" ] && [ "${has_structured}" != "true" ]; then
+    json_error "E_VALIDATION" "缺少 raw 或 structured"
+    return 1
+  fi
+
+  local temp_file="${mihomo_config}.tmp.$$"
+  local mode key tag value path
+  if [ "${has_raw}" = "true" ]; then
+    tag="$(${yq} -r '.raw | tag' "${file}" 2>/dev/null)"
+    if [ "${tag}" != "!!str" ]; then
+      json_error "E_VALIDATION" "raw 必须是字符串"
+      return 1
+    fi
+    ${yq} -r '.raw' "${file}" > "${temp_file}" 2>/dev/null || {
+      rm -f "${temp_file}"
+      json_error "E_IO" "写入临时配置失败"
+      return 1
+    }
+    if ! ${yq} -e '.' "${temp_file}" >/dev/null 2>&1; then
+      rm -f "${temp_file}"
+      json_error "E_VALIDATION" "YAML 语法校验失败"
+      return 1
+    fi
+    mode="raw"
+  else
+    if ! ${yq} -e '.structured | tag == "!!map"' "${file}" >/dev/null 2>&1; then
+      json_error "E_VALIDATION" "structured 必须是对象"
+      return 1
+    fi
+    cp -f "${mihomo_config}" "${temp_file}" || {
+      json_error "E_IO" "无法创建临时配置"
+      return 1
+    }
+    ${yq} -r '.structured | keys | .[]' "${file}" > "${temp_file}.keys" 2>/dev/null
+    while IFS= read -r key; do
+      [ -n "${key}" ] || continue
+      case "${key}" in
+        mode) path='.mode' ;;
+        log-level) path='."log-level"' ;;
+        allow-lan) path='."allow-lan"' ;;
+        external-controller) path='."external-controller"' ;;
+        external-ui) path='."external-ui"' ;;
+        profile.store-selected) path='.profile."store-selected"' ;;
+        profile.store-fake-ip) path='.profile."store-fake-ip"' ;;
+        unified-delay) path='."unified-delay"' ;;
+        tcp-concurrent) path='."tcp-concurrent"' ;;
+        find-process-mode) path='."find-process-mode"' ;;
+        *)
+          rm -f "${temp_file}" "${temp_file}.keys"
+          json_error "E_VALIDATION" "不支持的 mihomo 配置字段: ${key}"
+          return 1
+          ;;
+      esac
+      tag="$(${yq} -r ".structured.\"${key}\" | tag" "${file}" 2>/dev/null)"
+      value="$(${yq} -r ".structured.\"${key}\"" "${file}" 2>/dev/null)"
+      case "${key}" in
+        allow-lan|profile.store-selected|profile.store-fake-ip|unified-delay|tcp-concurrent)
+          case "${tag}" in
+            '!!bool') ;;
+            *) rm -f "${temp_file}" "${temp_file}.keys"; json_error "E_VALIDATION" "${key} 必须是布尔值"; return 1 ;;
+          esac
+          ;;
+        mode)
+          case "${value}" in rule|global|direct) ;; *) rm -f "${temp_file}" "${temp_file}.keys"; json_error "E_VALIDATION" "mode 必须是 rule/global/direct"; return 1 ;; esac
+          ;;
+        log-level)
+          case "${value}" in silent|error|warning|info|debug) ;; *) rm -f "${temp_file}" "${temp_file}.keys"; json_error "E_VALIDATION" "log-level 非法"; return 1 ;; esac
+          ;;
+        find-process-mode)
+          case "${value}" in always|strict|off) ;; *) rm -f "${temp_file}" "${temp_file}.keys"; json_error "E_VALIDATION" "find-process-mode 非法"; return 1 ;; esac
+          ;;
+        external-controller|external-ui)
+          case "${tag}" in
+            '!!str') ;;
+            *) rm -f "${temp_file}" "${temp_file}.keys"; json_error "E_VALIDATION" "${key} 必须是字符串"; return 1 ;;
+          esac
+          ;;
+      esac
+      local literal
+      case "${key}" in
+        allow-lan|profile.store-selected|profile.store-fake-ip|unified-delay|tcp-concurrent)
+          literal="${value}"
+          ;;
+        *)
+          literal="$(json_quote "${value}")"
+          ;;
+      esac
+      if ! ${yq} -i "${path} = ${literal}" "${temp_file}" 2>/dev/null; then
+        rm -f "${temp_file}" "${temp_file}.keys"
+        json_error "E_IO" "写入临时配置失败"
+        return 1
+      fi
+    done < "${temp_file}.keys"
+    rm -f "${temp_file}.keys"
+    if ! ${yq} -e '.' "${temp_file}" >/dev/null 2>&1; then
+      rm -f "${temp_file}"
+      json_error "E_VALIDATION" "YAML 语法校验失败"
+      return 1
+    fi
+    mode="structured"
+  fi
+
+  mv "${temp_file}" "${mihomo_config}" || {
+    rm -f "${temp_file}"
+    json_error "E_IO" "替换 mihomo 配置失败"
+    return 1
+  }
+  json_ok "$(printf '{"changed":["mihomo"],"mode":%s}' "$(json_quote "${mode}")")"
+}
+
+lists_get_json() {
+  local package_file="${box_dir}/package.list.cfg"
+  local gid_file="${box_dir}/gid.list.cfg"
+  local ap_file="${box_dir}/ap.list.cfg"
+
+  printf '{"ok":true,"data":{"package":['
+  local first=1 line uid package
+  if [ -f "${package_file}" ]; then
+    while IFS= read -r line; do
+      line="$(printf '%s' "${line}" | busybox sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+      case "${line}" in ''|'#'*|mode:*) continue ;; esac
+      case "${line}" in
+        *:*) uid="${line%%:*}"; package="${line#*:}" ;;
+        *) uid=""; package="${line}" ;;
+      esac
+      [ -n "${package}" ] || continue
+      [ "${first}" -eq 1 ] || printf ','
+      printf '{"uid":%s,"package":%s}' "$(json_quote "${uid}")" "$(json_quote "${package}")"
+      first=0
+    done < "${package_file}"
+  fi
+  printf '],"gid":['
+  first=1
+  if [ -f "${gid_file}" ]; then
+    while IFS= read -r line; do
+      line="$(printf '%s' "${line}" | busybox sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+      case "${line}" in ''|'#'*) continue ;; esac
+      [ "${first}" -eq 1 ] || printf ','
+      printf '%s' "$(json_quote "${line}")"
+      first=0
+    done < "${gid_file}"
+  fi
+  printf '],"interfaces":{"allow":['
+  first=1
+  if [ -f "${ap_file}" ]; then
+    while IFS=' ' read -r action iface rest; do
+      [ "${action}" = "allow" ] || continue
+      [ -n "${iface}" ] || continue
+      [ "${first}" -eq 1 ] || printf ','
+      printf '%s' "$(json_quote "${iface}")"
+      first=0
+    done < "${ap_file}"
+  fi
+  printf '],"ignore":['
+  first=1
+  if [ -f "${ap_file}" ]; then
+    while IFS=' ' read -r action iface rest; do
+      [ "${action}" = "ignore" ] || continue
+      [ -n "${iface}" ] || continue
+      [ "${first}" -eq 1 ] || printf ','
+      printf '%s' "$(json_quote "${iface}")"
+      first=0
+    done < "${ap_file}"
+  fi
+  printf ']},"files":{"package":%s,"gid":%s,"interfaces":%s}},"meta":{"version":1}}\n' \
+    "$(json_quote "${package_file}")" "$(json_quote "${gid_file}")" "$(json_quote "${ap_file}")"
+}
+
+lists_apply_json() (
+  local file="$1"
+  if [ ! -s "${file}" ]; then
+    json_error "E_USAGE" "lists apply: 缺少 JSON 文件"
+    return 1
+  fi
+  ensure_yq
+  if ! ${yq} -e 'tag == "!!map"' "${file}" >/dev/null 2>&1; then
+    json_error "E_VALIDATION" "lists apply 必须是 JSON 对象"
+    return 1
+  fi
+
+  local package_file="${box_dir}/package.list.cfg"
+  local gid_file="${box_dir}/gid.list.cfg"
+  local ap_file="${box_dir}/ap.list.cfg"
+  local package_tmp="${package_file}.tmp.$$"
+  local gid_tmp="${gid_file}.tmp.$$"
+  local ap_tmp="${ap_file}.tmp.$$"
+  local changed="" uid package line entry
+  trap 'rm -f "${package_tmp}" "${gid_tmp}" "${ap_tmp}" "${package_tmp}.rows" "${gid_tmp}.rows" "${ap_tmp}.allow" "${ap_tmp}.ignore"' EXIT
+
+  if ${yq} -e 'has("package")' "${file}" >/dev/null 2>&1; then
+    if ! ${yq} -e '.package | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
+      json_error "E_VALIDATION" "package 必须是数组"
+      return 1
+    fi
+    printf '# 应用包名配置文件\n# 格式: <用户ID>:<包名> 或 <包名>\n' > "${package_tmp}" || {
+      json_error "E_IO" "写入 package.list.cfg 临时文件失败"
+      return 1
+    }
+    ${yq} -r '.package[] | [(.uid // ""), (.package // "")] | join("|")' "${file}" > "${package_tmp}.rows" 2>/dev/null
+    while IFS='|' read -r uid package; do
+      case "${uid}" in
+        ''|*[!0-9]*) [ -z "${uid}" ] || { rm -f "${package_tmp}" "${package_tmp}.rows"; json_error "E_VALIDATION" "非法 UID: ${uid}"; return 1; } ;;
+      esac
+      printf '%s' "${package}" | busybox grep -Eq '^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$' || {
+        rm -f "${package_tmp}" "${package_tmp}.rows"
+        json_error "E_VALIDATION" "非法包名: ${package}"
+        return 1
+      }
+      if [ -n "${uid}" ]; then
+        printf '%s:%s\n' "${uid}" "${package}" >> "${package_tmp}"
+      else
+        printf '%s\n' "${package}" >> "${package_tmp}"
+      fi
+    done < "${package_tmp}.rows"
+    rm -f "${package_tmp}.rows"
+    changed="${changed}${changed:+,}\"package\""
+  fi
+
+  if ${yq} -e 'has("gid")' "${file}" >/dev/null 2>&1; then
+    if ! ${yq} -e '.gid | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
+      json_error "E_VALIDATION" "gid 必须是数组"
+      return 1
+    fi
+    printf '# GID 配置文件\n# 每行一个 GID 数字\n' > "${gid_tmp}" || {
+      json_error "E_IO" "写入 gid.list.cfg 临时文件失败"
+      return 1
+    }
+    ${yq} -r '.gid[]' "${file}" > "${gid_tmp}.rows" 2>/dev/null
+    while IFS= read -r line; do
+      [ -n "${line}" ] || continue
+      printf '%s' "${line}" | busybox grep -Eq '^[0-9]+$' || {
+        rm -f "${gid_tmp}" "${gid_tmp}.rows"
+        json_error "E_VALIDATION" "非法 GID: ${line}"
+        return 1
+      }
+      printf '%s\n' "${line}" >> "${gid_tmp}"
+    done < "${gid_tmp}.rows"
+    rm -f "${gid_tmp}.rows"
+    changed="${changed}${changed:+,}\"gid\""
+  fi
+
+  if ${yq} -e 'has("interfaces")' "${file}" >/dev/null 2>&1; then
+    if ! ${yq} -e '.interfaces | tag == "!!map"' "${file}" >/dev/null 2>&1; then
+      json_error "E_VALIDATION" "interfaces 必须是对象"
+      return 1
+    fi
+    printf '# 网络接口 allow/ignore 配置\n# 格式: allow <接口名> 或 ignore <接口名>\n' > "${ap_tmp}" || {
+      json_error "E_IO" "写入 ap.list.cfg 临时文件失败"
+      return 1
+    }
+    if ${yq} -e '.interfaces | has("allow")' "${file}" >/dev/null 2>&1; then
+      if ! ${yq} -e '.interfaces.allow | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
+        rm -f "${ap_tmp}"
+        json_error "E_VALIDATION" "interfaces.allow 必须是数组"
+        return 1
+      fi
+      ${yq} -r '.interfaces.allow[]' "${file}" > "${ap_tmp}.allow" 2>/dev/null
+      while IFS= read -r entry; do
+        [ -n "${entry}" ] || continue
+        printf '%s' "${entry}" | busybox grep -Eq '^[A-Za-z0-9_.:+-]+$' || {
+          rm -f "${ap_tmp}" "${ap_tmp}.allow"
+          json_error "E_VALIDATION" "非法接口名: ${entry}"
+          return 1
+        }
+        printf 'allow %s\n' "${entry}" >> "${ap_tmp}"
+      done < "${ap_tmp}.allow"
+      rm -f "${ap_tmp}.allow"
+    fi
+    if ${yq} -e '.interfaces | has("ignore")' "${file}" >/dev/null 2>&1; then
+      if ! ${yq} -e '.interfaces.ignore | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
+        rm -f "${ap_tmp}"
+        json_error "E_VALIDATION" "interfaces.ignore 必须是数组"
+        return 1
+      fi
+      ${yq} -r '.interfaces.ignore[]' "${file}" > "${ap_tmp}.ignore" 2>/dev/null
+      while IFS= read -r entry; do
+        [ -n "${entry}" ] || continue
+        printf '%s' "${entry}" | busybox grep -Eq '^[A-Za-z0-9_.:+-]+$' || {
+          rm -f "${ap_tmp}" "${ap_tmp}.ignore"
+          json_error "E_VALIDATION" "非法接口名: ${entry}"
+          return 1
+        }
+        printf 'ignore %s\n' "${entry}" >> "${ap_tmp}"
+      done < "${ap_tmp}.ignore"
+      rm -f "${ap_tmp}.ignore"
+    fi
+    changed="${changed}${changed:+,}\"interfaces\""
+  fi
+
+  if [ -f "${package_tmp}" ]; then mv "${package_tmp}" "${package_file}" || { rm -f "${package_tmp}" "${gid_tmp}" "${ap_tmp}"; json_error "E_IO" "替换 package.list.cfg 失败"; return 1; }; fi
+  if [ -f "${gid_tmp}" ]; then mv "${gid_tmp}" "${gid_file}" || { rm -f "${gid_tmp}" "${ap_tmp}"; json_error "E_IO" "替换 gid.list.cfg 失败"; return 1; }; fi
+  if [ -f "${ap_tmp}" ]; then mv "${ap_tmp}" "${ap_file}" || { rm -f "${ap_tmp}"; json_error "E_IO" "替换 ap.list.cfg 失败"; return 1; }; fi
+  json_ok "$(printf '{"changed":[%s]}' "${changed}")"
+)
+
 config_get_json() {
   ensure_yq
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "策略与规则配置仅支持 mihomo"
+    return 1
+  fi
   if [ ! -f "${mihomo_config}" ]; then
     json_error "E_NOT_FOUND" "配置文件不存在: ${mihomo_config}"
     return 1
@@ -1759,6 +2101,10 @@ config_get_json() {
 
 config_apply_json() {
   local file="$1"
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "策略与规则配置仅支持 mihomo"
+    return 1
+  fi
   if [ ! -s "${file}" ]; then
     json_error "E_USAGE" "config apply: 缺少 JSON 文件"
     return 1
@@ -1956,7 +2302,7 @@ task_start_json() {
       ;;
     upkernel)
       title="更新 ${arg} 核心"
-      case "${arg}" in mihomo|sing-box|xray|v2fly|hysteria|mihomo_smart|sing-box_ref1nd) ;; *)
+      case "${arg}" in mihomo|sing-box|mihomo_smart|sing-box_ref1nd) ;; *)
         json_error "E_VALIDATION" "不支持的内核: ${arg:-空}"
         return 1
       ;; esac
@@ -2214,7 +2560,7 @@ upkernel() {
       local release_page_url="https://github.com/vernesong/mihomo/releases/expanded_assets/Prerelease-Alpha"
       [ "${use_ghproxy}" = "true" ] && release_page_url="${url_ghproxy}/${release_page_url}"
       
-      local smart_version_tag=$($rev1 "${release_page_url}" | busybox grep -oE "smart-[a-f0-9]+" | head -1)
+      local smart_version_tag=$(github_get "${release_page_url}" | busybox grep -oE "smart-[a-f0-9]+" | head -1)
 
       if [ -z "$smart_version_tag" ]; then
         log Error "获取 mihomo-smart 最新版本标签失败"
@@ -2234,10 +2580,10 @@ upkernel() {
 
       if [ "${singbox_stable}" = "disable" ]; then
         log Debug "正在下载 ${core_to_update} 预发布版本"
-        latest_version=$($rev1 "${api_url}" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
+        latest_version=$(github_get "${api_url}" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
       else
         log Debug "正在下载 ${core_to_update} 最新稳定版本"
-        latest_version=$($rev1 "${api_url}/latest" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
+        latest_version=$(github_get "${api_url}/latest" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
       fi
 
       if [ -z "$latest_version" ]; then
@@ -2256,10 +2602,10 @@ upkernel() {
 
       if [ "${singbox_stable}" = "disable" ]; then
         log Debug "下载 ${core_to_update} 预发行版"
-        latest_version=$($rev1 "${api_url}" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
+        latest_version=$(github_get "${api_url}" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
       else
         log Debug "下载 ${core_to_update} 最新稳定版"
-        latest_version=$($rev1 "${api_url}/latest" | grep "tag_name" | busybox grep -oE "v[0-9.]*" | head -1)
+        latest_version=$(github_get "${api_url}/latest" | grep "tag_name" | busybox grep -oE "v[0-9.]*" | head -1)
       fi
 
       if [ -z "$latest_version" ]; then
@@ -2275,14 +2621,14 @@ upkernel() {
       download_link="https://github.com/MetaCubeX/mihomo/releases"
 
       if [ "${mihomo_stable}" = "enable" ]; then
-        latest_version=$($rev1 "https://api.github.com/repos/MetaCubeX/mihomo/releases" | grep "tag_name" | busybox grep -oE "v[0-9.]*" | head -1)
+        latest_version=$(github_get "https://api.github.com/repos/MetaCubeX/mihomo/releases" | grep "tag_name" | busybox grep -oE "v[0-9.]*" | head -1)
         tag="$latest_version"
       else
         if [ "$use_ghproxy" == true ]; then
           download_link="${url_ghproxy}/${download_link}"
         fi
         tag="Prerelease-Alpha"
-        latest_version=$($rev1 "${download_link}/expanded_assets/${tag}" | busybox grep -oE "alpha-[0-9a-z]+" | head -1)
+        latest_version=$(github_get "${download_link}/expanded_assets/${tag}" | busybox grep -oE "alpha-[0-9a-z]+" | head -1)
       fi
 
       if [ -z "$latest_version" ]; then
@@ -2290,63 +2636,9 @@ upkernel() {
         return 1
       fi
 
-      local extension="gz"
-      if [ "${platform}" = "android" ]; then
-        extension="zip"
-      fi
-
       filename="mihomo-${platform}-${arch}-${latest_version}"
       log Debug "下载 ${download_link}/download/${tag}/${filename}.gz"
       upfile "${box_dir}/${file_kernel}.gz" "${download_link}/download/${tag}/${filename}.gz" && xkernel "$core_to_update" "" "" "" "$file_kernel"
-      ;;
-    "xray"|"v2fly")
-      [ "${core_to_update}" = "xray" ] && bin='Xray' || bin='v2ray'
-      api_url="https://api.github.com/repos/$(if [ "${core_to_update}" = "xray" ]; then echo "XTLS/Xray-core/releases"; else echo "v2fly/v2ray-core/releases"; fi)"
-      latest_version=$($rev1 ${api_url} | grep "tag_name" | busybox grep -oE "v[0-9.]*" | head -1)
-
-      if [ -z "$latest_version" ]; then
-        log Error "获取 ${core_to_update} 最新版本号失败"
-        return 1
-      fi
-
-      case $(uname -m) in
-        "i386") download_file="$bin-linux-32.zip" ;;
-        "x86_64") download_file="$bin-linux-64.zip" ;;
-        "armv7l"|"armv8l") download_file="$bin-linux-arm32-v7a.zip" ;;
-        "aarch64") download_file="$bin-android-arm64-v8a.zip" ;;
-        *) log Error "不支持的架构: $(uname -m)" >&2; return 1 ;;
-      esac
-      download_link="https://github.com/$(if [ "${core_to_update}" = "xray" ]; then echo "XTLS/Xray-core/releases"; else echo "v2fly/v2ray-core/releases"; fi)"
-      log Debug "正在下载 ${download_link}/download/${latest_version}/${download_file}"
-      upfile "${box_dir}/${file_kernel}.zip" "${download_link}/download/${latest_version}/${download_file}" && xkernel "$core_to_update" "" "" "" "$file_kernel"
-      ;;
-    "hysteria")
-      local arch
-      case $(uname -m) in
-        "aarch64") arch="arm64" ;;
-        "armv7l" | "armv8l") arch="armv7" ;;
-        "i686") arch="386" ;;
-        "x86_64") arch="amd64" ;;
-        *)
-          log Warning "不支持的架构: $(uname -m)"
-          return 1
-          ;;
-      esac
-      mkdir -p "${bin_dir}/backup"
-      if [ -f "${bin_dir}/hysteria" ]; then
-        cp "${bin_dir}/hysteria" "${bin_dir}/backup/hysteria.bak" >/dev/null 2>&1
-      fi
-      local latest_version=$($rev1 "https://api.github.com/repos/apernet/hysteria/releases" | grep "tag_name" | grep -oE "[0-9.].*" | head -1 | sed 's/,//g' | cut -d '"' -f 1)
-
-      if [ -z "$latest_version" ]; then
-        log Error "获取 hysteria 最新版本号失败"
-        return 1
-      fi
-
-      local download_link="https://github.com/apernet/hysteria/releases/download/app%2Fv${latest_version}/hysteria-android-${arch}"
-
-      log Debug "正在下载 ${download_link}"
-      upfile "${bin_dir}/hysteria" "${download_link}" && xkernel "$core_to_update"
       ;;
     *)
       log Error "<${core_to_update}> 未知的二进制文件."
@@ -2412,36 +2704,6 @@ xkernel() {
       fi
       [ -d "${bin_dir}/sing-box-${latest_version#v}-${platform}-${arch}" ] && \
         rm -r "${bin_dir}/sing-box-${latest_version#v}-${platform}-${arch}"
-      ;;
-    "v2fly"|"xray")
-      bin="xray"
-      if [ "${core_to_process}" != "xray" ]; then
-        bin="v2ray"
-      fi
-      unzip_command="unzip"
-      if ! command -v unzip >/dev/null; then
-        unzip_command="busybox unzip"
-      fi
-
-      mkdir -p "${bin_dir}/update"
-      log Info "正在解压 ${bin} 核心..."
-      if ${unzip_command} -oq "${box_dir}/${file_kernel}.zip" "${bin}" -d "${bin_dir}/update"; then
-        if mv "${bin_dir}/update/${bin}" "${bin_dir}/${core_to_process}"; then
-          true # 成功
-        else
-          log Error "移动核心失败."
-          rm -rf "${bin_dir}/update"
-          return 1
-        fi
-      else
-        log Error "解压 ${box_dir}/${file_kernel}.zip 失败."
-        rm -rf "${bin_dir}/update"
-        return 1
-      fi
-      rm -rf "${bin_dir}/update"
-      ;;
-    "hysteria")
-      true
       ;;
     *)
       log Error "<${core_to_process}> 未知的二进制文件."
@@ -2729,40 +2991,14 @@ webroot() {
   ip_port=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/external-controller:/ {print $2}' "${mihomo_config}"; else busybox awk -F'[:,]' '/"external_controller"/ {print $2":"$3}' "${sing_config}" | sed 's/^[ \t]*//;s/"//g'; fi;)
   secret=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/^secret:/ {print $2}' "${mihomo_config}" | sed 's/"//g'; else busybox awk -F'"' '/"secret"/ {print $4}' "${sing_config}" | head -n 1; fi;)
   touch "$path_webroot"
-  if [[ "${bin_name}" = @(mihomo|sing-box) ]]; then
-    echo -e '
+  echo -e '
   <!DOCTYPE html>
   <script>
       document.location = 'http://127.0.0.1:9090/ui/'
   </script>
   </html>
   ' > $path_webroot
-    sed -i "s#document\.location =.*#document.location = 'http://$ip_port/ui/'#" $path_webroot
-  else
-   echo -e '
-  <!DOCTYPE html>
-  <html lang="zh-CN">
-  <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>不支持WebUI</title>
-      <style>
-          body {
-              font-family: Arial, sans-serif;
-              text-align: center;
-              padding: 50px;
-          }
-          h1 {
-              color: red;
-          }
-      </style>
-  </head>
-  <body>
-      <h1>不支持WebUI</h1>
-      <p>抱歉，xray/v2ray 不支持所需的WebUI功能。</p>
-  </body>
-  </html>' > $path_webroot
-  fi
+  sed -i "s#document\.location =.*#document.location = 'http://$ip_port/ui/'#" $path_webroot
   log Info "已生成/更新 WebUI 页面: ${path_webroot} → http://${ip_port}/ui/ (内核: ${bin_name})"
 }
 
@@ -2888,6 +3124,32 @@ case "$1" in
         ;;
       *)
         log Info "用法: $0 reset subscriptions"
+        ;;
+    esac
+    ;;
+  core)
+    case "$2" in
+      get)
+        core_get_json
+        ;;
+      apply)
+        core_apply_json "$3"
+        ;;
+      *)
+        json_error "E_USAGE" "用法: $0 core {get|apply <json文件>} --json"
+        ;;
+    esac
+    ;;
+  lists)
+    case "$2" in
+      get)
+        lists_get_json
+        ;;
+      apply)
+        lists_apply_json "$3"
+        ;;
+      *)
+        json_error "E_USAGE" "用法: $0 lists {get|apply <json文件>} --json"
         ;;
     esac
     ;;
@@ -3022,7 +3284,7 @@ case "$1" in
     upyq
     upcurl
     upgeox_all
-    upkernels sing-box mihomo xray v2fly hysteria
+    upkernels sing-box mihomo
     for bin_name in "${bin_list[@]}"; do
       upsubs
       upxui
@@ -3030,8 +3292,8 @@ case "$1" in
     ;;
   *)
     log Error "$0 $1 未找到"
-    log Info "用法: $0 {status|service|settings|config|logs|task|reset|sub|subs|geox|geosub|upkernel|upkernels|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|check|memcg|blkio|bond0|bond1|all}"
+    log Info "用法: $0 {status|service|settings|config|core|lists|logs|task|reset|sub|subs|geox|geosub|upkernel|upkernels|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|check|memcg|blkio|bond0|bond1|all}"
     log Info "JSON 调用统一追加 --json，返回 {ok,data,error} 包络"
-    log Info "upkernel 支持的核心: sing-box, mihomo, mihomo_smart, xray, v2fly, hysteria"
+    log Info "upkernel 支持的核心: sing-box, mihomo, mihomo_smart, sing-box_ref1nd"
     ;;
 esac

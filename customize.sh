@@ -1,4 +1,3 @@
-
 #!/system/bin/sh
 
 SKIPUNZIP=1
@@ -202,18 +201,9 @@ if handle_choice "是否需要下载内核或数据文件？" "是，进行下�
         if handle_choice "  - 下载 mihomo_smart (带Smart策略组) 内核？（与mihomo冲突，请勿同时下载）" "下载" "跳过"; then
             COMPONENTS_TO_DOWNLOAD="$COMPONENTS_TO_DOWNLOAD mihomo_smart"
         fi
-        if handle_choice "  - 下载 xray 内核？" "下载" "跳过"; then
-            COMPONENTS_TO_DOWNLOAD="$COMPONENTS_TO_DOWNLOAD xray"
-        fi
-        if handle_choice "  - 下载 v2fly 内核？" "下载" "跳过"; then
-            COMPONENTS_TO_DOWNLOAD="$COMPONENTS_TO_DOWNLOAD v2fly"
-        fi
-        if handle_choice "  - 下载 hysteria 内核？" "下载" "跳过"; then
-            COMPONENTS_TO_DOWNLOAD="$COMPONENTS_TO_DOWNLOAD hysteria"
-        fi
     else
         ui_print "- 已选择一键下载所有组件。"
-        COMPONENTS_TO_DOWNLOAD="geox utils sing-box mihomo xray v2fly hysteria"
+        COMPONENTS_TO_DOWNLOAD="geox utils sing-box mihomo"
     fi
 
     ui_print " "
@@ -294,7 +284,7 @@ if [ "${backup_box}" = "true" ]; then
         cp -af "${temp_dir}/${config_dir}/." "/data/adb/box/${config_dir}/"
     fi
   }
-  for dir in mihomo xray v2fly sing-box hysteria; do
+  for dir in mihomo sing-box; do
     restore_config_dir "$dir"
   done
 
@@ -317,7 +307,7 @@ if [ "${backup_box}" = "true" ]; then
       chmod 755 "${target_path}"
     fi
   }
-  for bin_item in curl yq xray sing-box v2fly hysteria mihomo; do
+  for bin_item in curl yq sing-box mihomo; do
     restore_binary "$bin_item"
   done
 
@@ -325,6 +315,33 @@ if [ "${backup_box}" = "true" ]; then
     ui_print "  - 恢复日志、pid等运行时文件"
     cp -af "${temp_dir}/run/." "/data/adb/box/run/"
   fi
+fi
+
+# 旧核心已移除：清理旧二进制与配置目录，并迁移非法 bin_name
+ui_print "- 清理已移除的 xray / v2fly / hysteria 核心"
+for legacy_bin in xray v2fly hysteria; do
+  busybox pkill -15 -f "/data/adb/box/bin/${legacy_bin}" >/dev/null 2>&1 || true
+done
+for legacy_dir in xray v2fly hysteria; do
+  rm -rf "/data/adb/box/${legacy_dir}" 2>/dev/null || ui_print "  ! 无法删除 /data/adb/box/${legacy_dir}"
+done
+for legacy_bin in xray v2fly hysteria; do
+  rm -f "/data/adb/box/bin/${legacy_bin}" 2>/dev/null || true
+  rm -f "/data/adb/box/bin/backup/${legacy_bin}.bak" 2>/dev/null || true
+done
+if [ -n "${temp_dir}" ] && [ -d "${temp_dir}" ]; then
+  for legacy_dir in xray v2fly hysteria; do
+    rm -rf "${temp_dir}/${legacy_dir}" 2>/dev/null || true
+  done
+  for legacy_bin in xray v2fly hysteria; do
+    rm -f "${temp_dir}/bin/${legacy_bin}" 2>/dev/null || true
+  done
+fi
+# 增量合并可能把旧的 bin_list 带回新版，强制收敛为两项
+sed -i 's|^bin_list=.*|bin_list=("mihomo" "sing-box")|' /data/adb/box/settings.ini 2>/dev/null || true
+if ! grep -qE '^bin_name="(mihomo|sing-box)"' /data/adb/box/settings.ini 2>/dev/null; then
+  sed -i 's/^bin_name=.*/bin_name="mihomo"/' /data/adb/box/settings.ini 2>/dev/null || true
+  ui_print "  - 旧核心配置已迁移到 mihomo"
 fi
 
 [ -z "$(find /data/adb/box/bin -type f -name '*' ! -name '*.bak')" ] && sed -Ei 's/^description=(\[.*][[:space:]]*)?/description=[ 😱 模块已安装但需手动下载内核 ] /g' $MODPATH/module.prop

@@ -6,7 +6,7 @@ import { queryKeys, useTaskLogsQuery, useTasksQuery } from "../../api/queries";
 import type { TaskInfo } from "../../api/types";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
-import { Card, CardBody } from "../../components/ui/card";
+import { Card } from "../../components/ui/card";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
 import { EmptyState } from "../../components/ui/empty-state";
 import { ErrorState } from "../../components/ui/error-state";

@@ -107,3 +107,51 @@ export interface PackageInfo {
   isSystem: boolean | null;
   uid: number | null;
 }
+
+export interface MihomoStructuredConfig {
+  mode: string;
+  "log-level": string;
+  "allow-lan": boolean;
+  "external-controller": string;
+  "external-ui": string;
+  "profile.store-selected": boolean;
+  "profile.store-fake-ip": boolean;
+  "unified-delay": boolean;
+  "tcp-concurrent": boolean;
+  "find-process-mode": string;
+}
+
+export interface CoreConfigData {
+  core: string;
+  file: string;
+  structured: MihomoStructuredConfig;
+  raw: string;
+}
+
+export interface PackageEntry {
+  uid?: string;
+  package: string;
+}
+
+export interface AppListsData {
+  package: PackageEntry[];
+  gid: string[];
+  interfaces: {
+    allow: string[];
+    ignore: string[];
+  };
+  files: {
+    package: string;
+    gid: string;
+    interfaces: string;
+  };
+}
+
+export interface AppListsPayload {
+  package: PackageEntry[];
+  gid: string[];
+  interfaces: {
+    allow: string[];
+    ignore: string[];
+  };
+}

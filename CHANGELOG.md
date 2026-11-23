@@ -1,17 +1,17 @@
+#### 未发布 - 23-11-2026
+- 核心精简：仅保留 mihomo + sing-box；安装/升级移除 xray、v2fly、hysteria 并清理旧文件
+- 新增 mihomo 核心配置页：安全运行层表单 + 完整 YAML 高级编辑
+- 新增应用与网络页：应用包（支持 UID:包名）、GID、接口 allow/ignore 清单
+- 设置页补齐 cn_ip_url、cn_ipv6_url、subscription_url_singbox
+- 管理页策略/规则/规则集/核心配置增加 mihomo-only 保护
+- 破坏性变更：不再支持 xray / v2fly / hysteria 核心
+- 清理死代码与失效分支：修复 settings 路径、GitHub Token 参数、eBPF CNIP 热更新
+
 #### Changelog 1.5.0 - 23-11-2026
 - 全链路重构 KernelSU WebUI：React + TypeScript 新版界面
 - 统一 box.tool JSON 契约与后端校验
 - 新增后台任务中心与设置数组编辑
 - 破坏性变更：旧 --json 输出不兼容
-
-#### 未发布 - 23-11-2026
-- 全链路重构 KernelSU WebUI：React + TypeScript + Vite + Tailwind + Radix
-- 移动端底部 5 项导航；概览、订阅、策略、规则、设置、日志、任务中心与危险操作重新设计
-- `box.tool --json` 统一 `{ok,data,error}` 包络；配置/设置增加后端校验与原子写入
-- 新增后台任务中心：`box.tool task start|status|logs|list|cancel`
-- 设置支持全部可编辑标量键与数组编辑器；GitHub Token 脱敏
-- 规则支持结构化编辑与高级原文模式
-- 破坏性变更：旧 `--json` 输出不兼容，CLI 文本命令保留
 
 #### Changelog 1.4.0 - 22-11-2026
 - 新增 KernelSU WebUI 管理页面：订阅、服务、策略组、规则、规则集、设置、日志

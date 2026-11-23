@@ -1,13 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useBlocker } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Eye, EyeOff, KeyRound, RotateCcw, Save, Search, X } from "lucide-react";
-import { api, listInstalledPackages, packageManagerAvailable } from "../../api/client";
+import { Eye, EyeOff, KeyRound, RotateCcw, Save, X } from "lucide-react";
+import { api } from "../../api/client";
 import { queryKeys, useSettingsQuery } from "../../api/queries";
-import type { PackageInfo } from "../../api/types";
 import { Accordion, AccordionItem } from "../../components/ui/accordion";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -16,7 +15,7 @@ import { ErrorState } from "../../components/ui/error-state";
 import { Field } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { PageTitle } from "../../components/ui/page-title";
-import { Sheet } from "../../components/ui/sheet";
+import { PackagePicker } from "../../components/ui/package-picker";
 import { Select } from "../../components/ui/select";
 import { PageSkeleton } from "../../components/ui/skeleton";
 import { Switch } from "../../components/ui/switch";
@@ -58,7 +57,7 @@ const settingsSchema = z.object({
       if (field.key === "interva_update" && value.trim().split(/\s+/).length !== 5) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field.key], message: "cron 表达式需要 5 个字段" });
       }
-      if ((field.key === "url_ghproxy" || field.key === "ruleset_prefix") && value && !/^https?:\/\//i.test(value)) {
+      if ((field.key === "url_ghproxy" || field.key === "ruleset_prefix" || field.key === "cn_ip_url" || field.key === "cn_ipv6_url" || field.key === "subscription_url_singbox") && value && !/^https?:\/\//i.test(value)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field.key], message: `${field.label}必须是 http(s) URL` });
       }
     }
@@ -95,101 +94,6 @@ function errorFor(errors: Record<string, unknown> | undefined, key: string): str
   const value = errors?.[key];
   if (value && typeof value === "object" && "message" in value) return String((value as { message?: unknown }).message);
   return undefined;
-}
-
-function PackagePicker({
-  open,
-  onOpenChange,
-  values,
-  onChange,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  values: string[];
-  onChange: (values: string[]) => void;
-}) {
-  const [packages, setPackages] = useState<PackageInfo[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set(values));
-  const available = packageManagerAvailable();
-
-  useEffect(() => {
-    if (!open) return;
-    setSelected(new Set(values));
-    setQuery("");
-    if (!available) return;
-    setLoading(true);
-    void listInstalledPackages()
-      .then(setPackages)
-      .finally(() => setLoading(false));
-  }, [open, values, available]);
-
-  const filtered = packages.filter((item) => {
-    const term = query.trim().toLowerCase();
-    return !term || item.packageName.toLowerCase().includes(term) || item.appLabel.toLowerCase().includes(term);
-  });
-
-  return (
-    <Sheet
-      open={open}
-      onOpenChange={onOpenChange}
-      title="选择应用"
-      description="选择需要强制走代理的应用包名。"
-      footer={
-        <>
-          <Button variant="secondary" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button variant="primary" onClick={() => { onChange([...selected]); onOpenChange(false); }}>
-            应用选择（{selected.size}）
-          </Button>
-        </>
-      }
-    >
-      {!available ? (
-        <div className="rounded-xl bg-warning-soft p-3 text-xs leading-5 text-warning">
-          当前 KernelSU 管理器未提供应用列表 API，请手动填写包名。
-        </div>
-      ) : (
-        <div className="space-y-3">
-          <div className="relative">
-            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-fg-subtle" />
-            <Input id="package-search" name="package-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索应用名或包名" className="pl-9" />
-          </div>
-          <div className="max-h-[50vh] space-y-1 overflow-y-auto rounded-xl border border-border p-1">
-            {loading ? <p className="p-3 text-xs text-fg-muted">正在读取应用列表…</p> : null}
-            {!loading && filtered.length === 0 ? <p className="p-3 text-xs text-fg-muted">没有找到应用</p> : null}
-            {filtered.map((item) => {
-              const checked = selected.has(item.packageName);
-              return (
-                <button
-                  key={item.packageName}
-                  type="button"
-                  onClick={() => {
-                    const next = new Set(selected);
-                    if (checked) next.delete(item.packageName);
-                    else next.add(item.packageName);
-                    setSelected(next);
-                  }}
-                  className={cn(
-                    "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left",
-                    checked ? "bg-primary-soft/60" : "hover:bg-surface-muted",
-                  )}
-                >
-                  <span className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-md border", checked ? "border-primary bg-primary text-primary-fg" : "border-border-strong")}>
-                    {checked ? <Check size={12} /> : null}
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block truncate text-xs font-medium text-fg">{item.appLabel}</span>
-                    <span className="block truncate font-mono text-[10px] text-fg-muted">{item.packageName}</span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </Sheet>
-  );
 }
 
 function SettingsFieldRow({
@@ -347,7 +251,7 @@ export function SettingsPage() {
     defaultValues: { settings: {}, arrays: {}, token: "" },
     mode: "onBlur",
   });
-  const { control, register, handleSubmit, reset, formState, setValue, getValues } = form;
+  const { control, register, handleSubmit, reset, formState, setValue, getValues, watch } = form;
   const dirty = formState.isDirty;
   const blocker = useBlocker(dirty || saving);
 
@@ -368,6 +272,7 @@ export function SettingsPage() {
     return () => window.removeEventListener("beforeunload", handler);
   }, [dirty]);
 
+  const formSettings = watch("settings") || {};
   const settingsErrors = (formState.errors.settings || {}) as Record<string, unknown>;
   const arrayErrors = (formState.errors.arrays || {}) as Record<string, unknown>;
 
@@ -412,7 +317,7 @@ export function SettingsPage() {
             {settingsGroups.map((group) => (
               <AccordionItem key={group.id} value={group.id} title={group.title} description={group.description}>
                 <div className="space-y-4">
-                  {group.fields.map((field) => (
+                  {group.fields.filter((field) => !field.showWhen || formSettings[field.showWhen.key] === field.showWhen.equals).map((field) => (
                     <SettingsFieldRow
                       key={field.key}
                       field={field}

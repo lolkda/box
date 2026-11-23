@@ -3,11 +3,9 @@
 scripts_dir="${0%/*}"
 service_path="${scripts_dir}/box.service"
 iptables_path="${scripts_dir}/box.iptables"
-data_box="/data/adb/box"
 run_path="/data/adb/box/run"
 file_settings="/data/adb/box/settings.ini"
 events="$1"
-monitor_dir="$2"
 monitor_file="$3"
 
 write_inotify_error() {

@@ -13,6 +13,8 @@ const ProvidersPage = lazy(() => import("../features/providers/providers-page").
 const LogsPage = lazy(() => import("../features/logs/logs-page").then((module) => ({ default: module.LogsPage })));
 const TasksPage = lazy(() => import("../features/tasks/tasks-page").then((module) => ({ default: module.TasksPage })));
 const DangerPage = lazy(() => import("../features/danger/danger-page").then((module) => ({ default: module.DangerPage })));
+const CoreConfigPage = lazy(() => import("../features/core-config/core-config-page").then((module) => ({ default: module.CoreConfigPage })));
+const AppsNetworkPage = lazy(() => import("../features/apps-network/apps-network-page").then((module) => ({ default: module.AppsNetworkPage })));
 
 function withSuspense(node: ReactNode): ReactNode {
   return <Suspense fallback={<PageSkeleton />}>{node}</Suspense>;
@@ -34,6 +36,8 @@ export const router = createHashRouter([
       { path: "logs", element: withSuspense(<LogsPage />) },
       { path: "tasks", element: withSuspense(<TasksPage />) },
       { path: "danger", element: withSuspense(<DangerPage />) },
+      { path: "core-config", element: withSuspense(<CoreConfigPage />) },
+      { path: "apps-network", element: withSuspense(<AppsNetworkPage />) },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },
