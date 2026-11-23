@@ -5,7 +5,6 @@ import { isKernelsuAvailable, supportsAsyncExec } from "../api/client";
 import { useStatusQuery, useTaskCompletionWatcher } from "../api/queries";
 import { useToast } from "../components/ui/toast";
 import { BottomNav } from "../components/layout/bottom-nav";
-import { TaskIndicator } from "../components/layout/task-indicator";
 import { PageSkeleton } from "../components/ui/skeleton";
 import { getErrorMessage } from "../lib/utils";
 import { Button } from "../components/ui/button";
@@ -94,9 +93,9 @@ export function AppShell() {
 
   return (
     <div className="min-h-dvh bg-bg text-fg">
-      <header className="sticky top-0 z-30 border-b border-border/80 bg-bg/90 pt-safe backdrop-blur-xl">
-        <div className="mx-auto flex min-h-14 max-w-3xl items-center gap-2 px-4">
-          {meta.back ? (
+      <main className="mx-auto w-full max-w-3xl px-4 pb-28 pt-[calc(1rem+var(--safe-top))]">
+        {meta.back ? (
+          <div className="mb-2 flex items-center">
             <button
               type="button"
               onClick={() => navigate(meta.back as string)}
@@ -105,24 +104,8 @@ export function AppShell() {
             >
               <ChevronLeft size={22} />
             </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-primary text-primary-fg shadow-sm">
-                <span className="text-sm font-bold">B</span>
-              </span>
-              <div>
-                <p className="text-sm font-semibold leading-4 tracking-tight">Box</p>
-                <p className="text-[10px] leading-3 text-fg-muted">KernelSU WebUI</p>
-              </div>
-            </div>
-          )}
-          <div className="min-w-0 flex-1">
-            {meta.back ? <p className="truncate text-sm font-semibold text-fg">{meta.title}</p> : null}
           </div>
-          <TaskIndicator />
-        </div>
-      </header>
-      <main className="mx-auto w-full max-w-3xl px-4 pb-28 pt-4">
+        ) : null}
         <Outlet />
       </main>
       <BottomNav />

@@ -58,6 +58,14 @@ describe("AppShell", () => {
     expect(await screen.findByText("mihomo · tproxy · PID 1234")).toBeInTheDocument();
   });
 
+  it("does not render the top app bar or task shortcut", async () => {
+    renderApp();
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(screen.queryByText("KernelSU WebUI")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("任务中心")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/个任务运行中/)).not.toBeInTheDocument();
+  });
+
   it("shows an upgrade message when ksu.spawn is unavailable", async () => {
     (window as Window & { ksu?: unknown }).ksu = { exec() {} };
     renderApp();
