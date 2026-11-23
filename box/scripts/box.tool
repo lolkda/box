@@ -2810,6 +2810,9 @@ rule_profile_item_json() {
   [ "$(rule_profile_active_id)" = "${id}" ] && active=true
   [ -s "$(rule_profile_entry_file "${id}" pending.yaml)" ] && pending=true
   fetched="$(cat "$(rule_profile_entry_file "${id}" fetched_at)" 2>/dev/null)"
+  if [ -z "${fetched}" ] && [ -s "$(rule_profile_entry_file "${id}" pending.yaml)" ]; then
+    fetched="$(busybox stat -c '%y' "$(rule_profile_entry_file "${id}" pending.yaml)" 2>/dev/null | busybox cut -d. -f1)"
+  fi
   applied="$(cat "$(rule_profile_entry_file "${id}" applied_at)" 2>/dev/null)"
   counts="$(rule_profile_item_counts "${id}")"
   printf '{"id":%s,"name":%s,"url_masked":%s,"active":%s,"pending":%s,"fetched_at":%s,"applied_at":%s,"counts":%s,"can_delete":%s}' \

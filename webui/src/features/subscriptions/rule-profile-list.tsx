@@ -215,7 +215,7 @@ export function RuleProfileList() {
     setDeactivating(true);
     try {
       await api.deactivateRuleProfile();
-      toast({ title: "已停用当前规则订阅", description: "config.yaml 保持不变", tone: "info" });
+      toast({ title: "已停用规则订阅", description: "config.yaml 保持不变", tone: "info" });
       setDeactivateOpen(false);
       await refreshAll();
     } catch (error) {
@@ -289,19 +289,19 @@ export function RuleProfileList() {
                       </div>
                       <p className="mt-1 truncate font-mono text-[11px] text-fg-muted">{item.url_masked}</p>
                       <p className="mt-1 text-[10px] text-fg-subtle">
-                        下载：{item.fetched_at ? formatDateTime(item.fetched_at) : "尚未下载"} · 应用：{item.applied_at ? formatDateTime(item.applied_at) : "尚未应用"}
+                        下载：{item.fetched_at ? formatDateTime(item.fetched_at) : item.pending ? "已暂存" : "尚未下载"} · 应用：{item.applied_at ? formatDateTime(item.applied_at) : "尚未应用"}
                       </p>
                     </div>
                     <ActionsMenu
                       items={[
                         ...(item.active
                           ? item.pending
-                            ? [{ label: "应用更新", icon: <Play size={14} />, onSelect: () => setUseTarget(item) }]
+                            ? [{ label: "应用此更新", icon: <Play size={14} />, onSelect: () => setUseTarget(item) }]
                             : []
                           : [{ label: "使用", icon: <Play size={14} />, onSelect: () => void beginUse(item) }]),
                         { label: "更新", icon: <RefreshCcw size={14} />, onSelect: () => void updateOne(item), disabled: updating },
                         { label: "编辑", icon: <Pencil size={14} />, onSelect: () => openEdit(item) },
-                        ...(item.active ? [{ label: "停用当前", icon: <Power size={14} />, onSelect: () => setDeactivateOpen(true) }] : []),
+                        ...(item.active ? [{ label: "停用", icon: <Power size={14} />, onSelect: () => setDeactivateOpen(true) }] : []),
                         {
                           label: "删除",
                           icon: <Trash2 size={14} />,
@@ -403,7 +403,7 @@ export function RuleProfileList() {
       <ConfirmDialog
         open={deactivateOpen}
         onOpenChange={setDeactivateOpen}
-        title="停用当前规则订阅？"
+        title="停用规则订阅？"
         description="只清除“当前使用”标记，不会修改 config.yaml；之后可以删除该条目。"
         confirmLabel="停用"
         loading={deactivating}
