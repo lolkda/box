@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from "react";
 import { Outlet, useLocation, useNavigate, useRouteError } from "react-router-dom";
 import { ChevronLeft, ShieldAlert } from "lucide-react";
-import { isKernelsuAvailable } from "../api/client";
+import { isKernelsuAvailable, supportsAsyncExec } from "../api/client";
 import { useStatusQuery, useTaskCompletionWatcher } from "../api/queries";
 import { useToast } from "../components/ui/toast";
 import { BottomNav } from "../components/layout/bottom-nav";
@@ -27,16 +27,18 @@ const pageMeta: Record<string, { title: string; back?: string }> = {
 
 const mihomoOnlyPaths = new Set(["/groups", "/rules", "/providers", "/core-config"]);
 
-function KsuUnavailablePage() {
+function KsuUnavailablePage({ outdated = false }: { outdated?: boolean }) {
   return (
     <div className="flex min-h-dvh items-center justify-center px-6 py-12">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 text-center shadow-sm">
         <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-warning-soft text-warning">
           <ShieldAlert size={24} />
         </div>
-        <h1 className="mt-4 text-base font-semibold text-fg">请从 KernelSU 打开</h1>
+        <h1 className="mt-4 text-base font-semibold text-fg">{outdated ? "请升级 KernelSU" : "请从 KernelSU 打开"}</h1>
         <p className="mt-2 text-xs leading-5 text-fg-muted">
-          KernelSU API 不可用。管理页需要通过 KernelSU 模块页的 WebUI 入口打开，直接访问文件不会获得 root 执行通道。
+          {outdated
+            ? "当前 KernelSU Manager 不支持异步命令接口 ksu.spawn()。请升级到 3.3 或更高版本后重新打开模块 WebUI。"
+            : "KernelSU API 不可用。管理页需要通过 KernelSU 模块页的 WebUI 入口打开，直接访问文件不会获得 root 执行通道。"}
         </p>
       </div>
     </div>
@@ -47,7 +49,11 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const toast = useToast();
-  const statusQuery = useStatusQuery();
+  const ksuAvailable = isKernelsuAvailable();
+  const asyncSupported = supportsAsyncExec();
+  const ready = ksuAvailable && asyncSupported;
+  const needsStatus = mihomoOnlyPaths.has(location.pathname);
+  const statusQuery = useStatusQuery({ enabled: ready && needsStatus });
   const meta = pageMeta[location.pathname] || { title: "Box 管理" };
 
   useEffect(() => {
@@ -67,10 +73,10 @@ export function AppShell() {
     [toast],
   );
 
-  useTaskCompletionWatcher(onTaskFinished);
+  useTaskCompletionWatcher(onTaskFinished, ready);
 
-  if (!isKernelsuAvailable()) {
-    return <KsuUnavailablePage />;
+  if (!ready) {
+    return <KsuUnavailablePage outdated={ksuAvailable && !asyncSupported} />;
   }
 
   if (mihomoOnlyPaths.has(location.pathname)) {

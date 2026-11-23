@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Code2, RefreshCw, Save, ShieldAlert, SlidersHorizontal } from "lucide-react";
 import { api } from "../../api/client";
-import { queryKeys, useCoreConfigQuery, useStatusQuery } from "../../api/queries";
+import { queryKeys, useCoreConfigQuery, useStatusQuery, useTaskStart } from "../../api/queries";
 import type { MihomoStructuredConfig } from "../../api/types";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -37,6 +37,7 @@ export function CoreConfigPage() {
   const statusQuery = useStatusQuery();
   const core = statusQuery.data?.core;
   const coreQuery = useCoreConfigQuery(core === "mihomo");
+  const startTask = useTaskStart();
   const queryClient = useQueryClient();
   const toast = useToast();
   const [tab, setTab] = useState<"structured" | "raw">("structured");
@@ -84,9 +85,8 @@ export function CoreConfigPage() {
   const updateDashboard = async () => {
     setUpdatingDashboard(true);
     try {
-      await api.taskStart("xui");
+      await startTask("xui");
       toast({ title: "已开始更新面板", description: "任务完成后刷新 /ui 查看 zashboard", tone: "info" });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
     } catch (error) {
       toast({ title: "启动面板更新失败", description: getErrorMessage(error), tone: "error" });
     } finally {

@@ -50,7 +50,7 @@ export function LogsPage() {
   const [query, setQuery] = useState("");
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
-  const logsQuery = useLogsQuery(paused);
+  const logsQuery = useLogsQuery({ paused });
   const queryClient = useQueryClient();
   const toast = useToast();
   const scrollRef = useRef<HTMLDivElement>(null);

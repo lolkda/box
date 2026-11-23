@@ -456,29 +456,56 @@ function handle(args: string[]): unknown {
   return failure("E_MOCK", `mock 未实现: ${args.join(" ")}`);
 }
 
+function unwrapShellCommand(value: string): string {
+  let command = value;
+  if (command.startsWith("'") && command.endsWith("'")) command = command.slice(1, -1);
+  return command.replace(/'\\''/g, "'");
+}
+
+function runMockCommand(command: string): { errno: number; stdout: string; stderr: string } {
+  const fileData = fileDataFromCommand(command);
+  if (fileData) {
+    tempFiles.set(fileData.path, fileData.content);
+    return { errno: 0, stdout: "", stderr: "" };
+  }
+  if (command.startsWith("rm -f ")) {
+    const path = parseTokens(command)[2];
+    if (path) tempFiles.delete(path);
+    return { errno: 0, stdout: "", stderr: "" };
+  }
+  const args = getArgs(command);
+  const result = handle(args) as { ok: boolean };
+  return { errno: result.ok ? 0 : 1, stdout: JSON.stringify(result), stderr: "" };
+}
+
 export function installMockKsu() {
   const target = window as Window & {
     ksu?: Record<string, unknown>;
   };
   target.ksu = {
     exec(command: string, _options: string, callbackName: string) {
-      const fileData = fileDataFromCommand(command);
-      if (fileData) {
-        tempFiles.set(fileData.path, fileData.content);
-        window.setTimeout(() => (window as unknown as Record<string, (errno: number, stdout: string, stderr: string) => void>)[callbackName]?.(0, "", ""), 5);
-        return;
-      }
-      if (command.startsWith("rm -f ")) {
-        const path = parseTokens(command)[2];
-        if (path) tempFiles.delete(path);
-        window.setTimeout(() => (window as unknown as Record<string, (errno: number, stdout: string, stderr: string) => void>)[callbackName]?.(0, "", ""), 5);
-        return;
-      }
-      const args = getArgs(command);
-      const result = handle(args) as { ok: boolean };
-      const errno = result.ok ? 0 : 1;
+      const result = runMockCommand(command);
       window.setTimeout(() => {
-        (window as unknown as Record<string, (errno: number, stdout: string, stderr: string) => void>)[callbackName]?.(errno, JSON.stringify(result), "");
+        (window as unknown as Record<string, (errno: number, stdout: string, stderr: string) => void>)[callbackName]?.(
+          result.errno,
+          result.stdout,
+          result.stderr,
+        );
+      }, 30);
+    },
+    spawn(_command: string, args: string, _options: string, callbackName: string) {
+      const shellArgs = JSON.parse(args) as string[];
+      const result = runMockCommand(unwrapShellCommand(shellArgs[1] || ""));
+      window.setTimeout(() => {
+        const child = (window as unknown as Record<string, {
+          stdout: { emit: (event: string, data: string) => void };
+          stderr: { emit: (event: string, data: string) => void };
+          emit: (event: string, ...payload: unknown[]) => void;
+        }>)[callbackName];
+        if (!child) return;
+        if (result.stdout) for (const line of result.stdout.split("\n")) child.stdout.emit("data", line);
+        if (result.stderr) for (const line of result.stderr.split("\n")) child.stderr.emit("data", line);
+        child.emit("exit", result.errno);
       }, 30);
     },
     toast() {},

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { ApiError, parseEnvelope, shellQuote } from "./client";
+import { afterEach, describe, expect, it } from "vitest";
+import { ApiError, execCommand, parseEnvelope, shellQuote } from "./client";
+import { clearKsuSpawnMock, installKsuSpawnMock } from "../test/ksu-spawn-mock";
 
 describe("parseEnvelope", () => {
   it("returns data for a successful envelope", () => {
@@ -33,5 +34,27 @@ describe("shellQuote", () => {
 
   it("escapes single quotes", () => {
     expect(shellQuote("it's ok")).toBe("'it'\\''s ok'");
+  });
+});
+
+describe("execCommand", () => {
+  afterEach(() => {
+    clearKsuSpawnMock();
+  });
+
+  it("collects stdout and stderr and preserves the exit code", async () => {
+    installKsuSpawnMock(() => ({ errno: 3, stdout: "first line\nsecond line", stderr: "warning" }));
+
+    await expect(execCommand("/data/adb/box/scripts/box.tool status --json")).resolves.toEqual({
+      errno: 3,
+      stdout: "first line\nsecond line",
+      stderr: "warning",
+    });
+  });
+
+  it("rejects when the KernelSU spawn bridge is unavailable", async () => {
+    (window as Window & { ksu?: unknown }).ksu = { exec() {} };
+
+    await expect(execCommand("true")).rejects.toMatchObject({ code: "E_UNSUPPORTED" });
   });
 });

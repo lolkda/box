@@ -1,4 +1,3 @@
-import { exec } from "kernelsu";
 import type {
   ApiEnvelope,
   AppListsData,
@@ -38,20 +37,109 @@ export function shellQuote(value: string): string {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
-export function isKernelsuAvailable(): boolean {
-  return typeof window !== "undefined" && typeof (window as Window & { ksu?: unknown }).ksu !== "undefined";
+interface KsuBridge {
+  spawn?: (command: string, args: string, options: string, callbackName: string) => void;
 }
 
-async function execRaw(command: string): Promise<{ errno: number; stdout: string; stderr: string }> {
-  if (!isKernelsuAvailable()) {
+type SpawnListener = (...args: any[]) => void;
+
+class SpawnStdio {
+  private readonly listeners: Record<string, SpawnListener[]> = {};
+
+  on(event: string, listener: SpawnListener): void {
+    (this.listeners[event] ||= []).push(listener);
+  }
+
+  emit(event: string, ...args: any[]): void {
+    for (const listener of this.listeners[event] || []) listener(...args);
+  }
+}
+
+class SpawnChildProcess {
+  private readonly listeners: Record<string, SpawnListener[]> = {};
+  readonly stdout = new SpawnStdio();
+  readonly stderr = new SpawnStdio();
+
+  on(event: string, listener: SpawnListener): void {
+    (this.listeners[event] ||= []).push(listener);
+  }
+
+  emit(event: string, ...args: any[]): void {
+    for (const listener of this.listeners[event] || []) listener(...args);
+  }
+}
+
+function getKsuBridge(): KsuBridge | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as Window & { ksu?: KsuBridge }).ksu;
+}
+
+export function isKernelsuAvailable(): boolean {
+  return typeof getKsuBridge() !== "undefined";
+}
+
+export function supportsAsyncExec(): boolean {
+  return typeof getKsuBridge()?.spawn === "function";
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+let spawnCallbackCounter = 0;
+
+export async function execCommand(command: string): Promise<{ errno: number; stdout: string; stderr: string }> {
+  const bridge = getKsuBridge();
+  if (!bridge) {
     throw new ApiError("E_UNAVAILABLE", "KernelSU API 不可用，请从 KernelSU 模块页打开");
   }
-  try {
-    return await exec(command);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new ApiError("E_EXEC", "执行命令失败", message);
+  if (typeof bridge.spawn !== "function") {
+    throw new ApiError("E_UNSUPPORTED", "KernelSU Manager 版本过低，请升级到 3.3 或更高版本");
   }
+  const spawnCommand = bridge.spawn.bind(bridge);
+
+  return new Promise((resolve, reject) => {
+    const callbackName = `box_exec_callback_${Date.now()}_${spawnCallbackCounter++}`;
+    const child = new SpawnChildProcess();
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    let settled = false;
+
+    const cleanup = () => {
+      delete (window as unknown as Record<string, SpawnChildProcess>)[callbackName];
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error instanceof ApiError ? error : new ApiError("E_EXEC", "执行命令失败", errorText(error)));
+    };
+
+    child.stdout.on("data", (data: string) => stdout.push(String(data)));
+    child.stderr.on("data", (data: string) => stderr.push(String(data)));
+    child.on("exit", (code: number | string | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const numericCode = typeof code === "number" ? code : Number(code);
+      resolve({
+        errno: Number.isFinite(numericCode) ? numericCode : 0,
+        stdout: stdout.join("\n"),
+        stderr: stderr.join("\n"),
+      });
+    });
+    child.on("error", (error: unknown) => {
+      // KernelSU also emits an error after a non-zero exit; the exit handler wins.
+      if (!settled) fail(error);
+    });
+
+    (window as unknown as Record<string, SpawnChildProcess>)[callbackName] = child;
+    try {
+      spawnCommand("/system/bin/sh", JSON.stringify(["-c", shellQuote(command)]), "{}", callbackName);
+    } catch (error) {
+      fail(error);
+    }
+  });
 }
 
 export function parseEnvelope<T>(stdout: string, errno: number, stderr: string): T {
@@ -78,7 +166,7 @@ export function parseEnvelope<T>(stdout: string, errno: number, stderr: string):
 
 export async function runJson<T>(args: string[]): Promise<T> {
   const command = `${TOOL} ${args.map(shellQuote).join(" ")}`;
-  const result = await execRaw(command);
+  const result = await execCommand(command);
   return parseEnvelope<T>(result.stdout, result.errno, result.stderr);
 }
 
@@ -95,12 +183,12 @@ function toBase64(text: string): string {
 export async function runJsonWithFile<T>(args: string[], payload: unknown): Promise<T> {
   const path = `/data/local/tmp/box-ui-${Date.now()}-${tempCounter++}.json`;
   const encoded = toBase64(JSON.stringify(payload));
-  await execRaw(`printf '%s' '${encoded}' | base64 -d > ${shellQuote(path)}`);
+  await execCommand(`printf '%s' '${encoded}' | base64 -d > ${shellQuote(path)}`);
   try {
     return await runJson<T>([...args, path, "--json"]);
   } finally {
     try {
-      await execRaw(`rm -f ${shellQuote(path)}`);
+      await execCommand(`rm -f ${shellQuote(path)}`);
     } catch {
       // 临时文件清理失败不覆盖主操作结果
     }

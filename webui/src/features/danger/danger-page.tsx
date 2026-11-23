@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle, FileX2, RotateCcw, ScrollText, Trash2 } from "lucide-react";
 import { api } from "../../api/client";
-import { queryKeys } from "../../api/queries";
+import { queryKeys, useTaskStart } from "../../api/queries";
 import { Button } from "../../components/ui/button";
 import { Card, CardBody, CardHeader } from "../../components/ui/card";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
@@ -61,6 +61,7 @@ const items: DangerItem[] = [
 
 export function DangerPage() {
   const queryClient = useQueryClient();
+  const startTask = useTaskStart();
   const navigate = useNavigate();
   const toast = useToast();
   const [pending, setPending] = useState<DangerItem | null>(null);
@@ -87,9 +88,8 @@ export function DangerPage() {
         await queryClient.invalidateQueries({ queryKey: queryKeys.status });
       } else {
         const core = pending.id === "upkernel-mihomo" ? "mihomo" : "sing-box";
-        await api.taskStart("upkernel", core);
+        await startTask("upkernel", core);
         toast({ title: `已开始更新 ${core} 核心`, tone: "info" });
-        await queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
         setPending(null);
         navigate("/tasks");
         return;

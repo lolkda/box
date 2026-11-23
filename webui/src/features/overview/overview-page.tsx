@@ -33,8 +33,8 @@ const actionLabels: Record<ServiceAction, string> = {
 };
 
 export function OverviewPage() {
-  const statusQuery = useStatusQuery();
-  const logsQuery = useLogsQuery();
+  const statusQuery = useStatusQuery({ live: true });
+  const logsQuery = useLogsQuery({ interval: 5000 });
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();

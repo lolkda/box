@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { DownloadCloud, Pencil, Plus, RefreshCcw, RadioTower, Trash2 } from "lucide-react";
 import { api } from "../../api/client";
-import { queryKeys, useSubscriptionsQuery } from "../../api/queries";
+import { queryKeys, useSubscriptionsQuery, useTaskStart } from "../../api/queries";
 import type { Subscription } from "../../api/types";
 import { ActionsMenu } from "../../components/ui/actions-menu";
 import { Badge } from "../../components/ui/badge";
@@ -27,6 +27,7 @@ interface SubscriptionForm {
 
 export function SubscriptionsPage() {
   const subscriptionsQuery = useSubscriptionsQuery();
+  const startTask = useTaskStart();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();
@@ -120,9 +121,8 @@ export function SubscriptionsPage() {
 
   const updateOne = async (subscription: Subscription) => {
     try {
-      await api.taskStart("sub-update", subscription.name);
+      await startTask("sub-update", subscription.name);
       toast({ title: "已开始更新订阅", description: subscription.name, tone: "info" });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
       navigate("/tasks");
     } catch (error) {
       toast({ title: "启动更新失败", description: getErrorMessage(error), tone: "error" });
@@ -132,9 +132,8 @@ export function SubscriptionsPage() {
   const updateAll = async () => {
     setUpdatingAll(true);
     try {
-      await api.taskStart("sub-update");
+      await startTask("sub-update");
       toast({ title: "已开始更新全部订阅", tone: "info" });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
       navigate("/tasks");
     } catch (error) {
       toast({ title: "启动更新失败", description: getErrorMessage(error), tone: "error" });

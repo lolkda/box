@@ -5,31 +5,26 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell } from "./shell";
 import { OverviewPage } from "../features/overview/overview-page";
 import { ToastProvider } from "../components/ui/toast";
+import { clearKsuSpawnMock, installKsuSpawnMock } from "../test/ksu-spawn-mock";
 
 function installStatusMock(core = "mihomo") {
-  const mock = {
-    exec(command: string, _options: string, callbackName: string) {
-      let payload;
-      if (command.includes("status") && command.includes("--json")) {
-        payload = {
-          ok: true,
-          data: { running: true, pid: 1234, core, mode: "tproxy", config: "config.yaml", config_exists: true, subscriptions: 2, active_tasks: 0 },
-          meta: { version: 1 },
-        };
-      } else if (command.includes("task") && command.includes("list")) {
-        payload = { ok: true, data: { items: [] }, meta: { version: 1 } };
-      } else if (command.includes("logs")) {
-        payload = { ok: true, data: { file: "/tmp/runs.log", lines: ["2026-11-23 08:00:00 [Info]: ready"] }, meta: { version: 1 } };
-      } else {
-        payload = { ok: true, data: {}, meta: { version: 1 } };
-      }
-      window.setTimeout(() => {
-        (window as unknown as Record<string, (errno: number, stdout: string, stderr: string) => void>)[callbackName]?.(0, JSON.stringify(payload), "");
-      }, 5);
-    },
-  };
-  (window as Window & { ksu?: unknown }).ksu = mock;
-  (globalThis as unknown as { ksu?: unknown }).ksu = mock;
+  installKsuSpawnMock((command) => {
+    let payload;
+    if (command.includes("status") && command.includes("--json")) {
+      payload = {
+        ok: true,
+        data: { running: true, pid: 1234, core, mode: "tproxy", config: "config.yaml", config_exists: true, subscriptions: 2, active_tasks: 0 },
+        meta: { version: 1 },
+      };
+    } else if (command.includes("task") && command.includes("list")) {
+      payload = { ok: true, data: { items: [] }, meta: { version: 1 } };
+    } else if (command.includes("logs")) {
+      payload = { ok: true, data: { file: "/tmp/runs.log", lines: ["2026-11-23 08:00:00 [Info]: ready"] }, meta: { version: 1 } };
+    } else {
+      payload = { ok: true, data: {}, meta: { version: 1 } };
+    }
+    return { stdout: JSON.stringify(payload) };
+  });
 }
 
 function renderApp() {
@@ -50,7 +45,7 @@ function renderApp() {
 describe("AppShell", () => {
   beforeEach(() => installStatusMock());
   afterEach(() => {
-    delete (window as Window & { ksu?: unknown }).ksu;
+    clearKsuSpawnMock();
   });
 
   it("renders the bottom navigation and overview status", async () => {
@@ -61,6 +56,13 @@ describe("AppShell", () => {
     }
     expect(await screen.findByText("运行中")).toBeInTheDocument();
     expect(await screen.findByText("mihomo · tproxy · PID 1234")).toBeInTheDocument();
+  });
+
+  it("shows an upgrade message when ksu.spawn is unavailable", async () => {
+    (window as Window & { ksu?: unknown }).ksu = { exec() {} };
+    renderApp();
+    expect(await screen.findByText("请升级 KernelSU")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "主导航" })).not.toBeInTheDocument();
   });
 
   it("blocks mihomo-only pages when the core is sing-box", async () => {

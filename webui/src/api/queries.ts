@@ -1,7 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
-import type { TaskInfo } from "./types";
+import type { TaskInfo, TaskKind } from "./types";
 
 export const queryKeys = {
   status: ["status"] as const,
@@ -16,12 +16,14 @@ export const queryKeys = {
   appLists: ["app-lists"] as const,
 };
 
-export function useStatusQuery() {
+export function useStatusQuery(options: { enabled?: boolean; live?: boolean } = {}) {
+  const { enabled = true, live = false } = options;
   return useQuery({
     queryKey: queryKeys.status,
     queryFn: api.status,
-    refetchInterval: 5000,
-    staleTime: 2000,
+    enabled,
+    refetchInterval: live ? 15_000 : false,
+    staleTime: live ? 10_000 : 30_000,
   });
 }
 
@@ -49,20 +51,25 @@ export function useSettingsQuery() {
   });
 }
 
-export function useLogsQuery(paused = false) {
+export function useLogsQuery(options: { paused?: boolean; interval?: number; enabled?: boolean } = {}) {
+  const { paused = false, interval = 2000, enabled = true } = options;
   return useQuery({
     queryKey: queryKeys.logs,
     queryFn: () => api.logs(200),
-    refetchInterval: paused ? false : 2000,
+    enabled,
+    refetchInterval: paused ? false : interval,
     staleTime: 1000,
   });
 }
 
-export function useTasksQuery() {
+export function useTasksQuery(options: { enabled?: boolean } = {}) {
+  const { enabled = true } = options;
   return useQuery({
     queryKey: queryKeys.tasks,
     queryFn: api.taskList,
-    refetchInterval: 1500,
+    enabled,
+    refetchInterval: (query) =>
+      query.state.data?.some((task) => task.state === "running") ? 2000 : false,
     staleTime: 500,
   });
 }
@@ -89,14 +96,30 @@ export function useTaskLogsQuery(id: string | null) {
     queryKey: queryKeys.taskLogs(id || ""),
     queryFn: () => api.taskLogs(id || "", 300),
     enabled: Boolean(id),
-    refetchInterval: 1500,
+    refetchInterval: 2000,
     staleTime: 500,
   });
 }
 
+export function useTaskStart() {
+  const queryClient = useQueryClient();
+  return useCallback(
+    async (kind: TaskKind, arg?: string) => {
+      const task = await api.taskStart(kind, arg);
+      queryClient.setQueryData<TaskInfo[]>(queryKeys.tasks, (current) => [
+        task,
+        ...(current || []).filter((item) => item.id !== task.id),
+      ]);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.status });
+      return task;
+    },
+    [queryClient],
+  );
+}
+
 export function useInvalidateOperationalQueries() {
   const queryClient = useQueryClient();
-  return () => {
+  return useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.status });
     void queryClient.invalidateQueries({ queryKey: queryKeys.subscriptions });
     void queryClient.invalidateQueries({ queryKey: queryKeys.config });
@@ -105,11 +128,11 @@ export function useInvalidateOperationalQueries() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
     void queryClient.invalidateQueries({ queryKey: queryKeys.coreConfig });
     void queryClient.invalidateQueries({ queryKey: queryKeys.appLists });
-  };
+  }, [queryClient]);
 }
 
-export function useTaskCompletionWatcher(onFinished?: (task: TaskInfo) => void) {
-  const tasksQuery = useTasksQuery();
+export function useTaskCompletionWatcher(onFinished?: (task: TaskInfo) => void, enabled = true) {
+  const tasksQuery = useTasksQuery({ enabled });
   const invalidate = useInvalidateOperationalQueries();
   const previous = useRef<Map<string, TaskInfo["state"]>>(new Map());
 
