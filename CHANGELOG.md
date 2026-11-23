@@ -1,3 +1,9 @@
+#### Changelog 1.10.3 - 24-11-2026
+- 订阅页拆分为“节点订阅”和“规则与策略”双 Tab
+- 规则订阅移出节点列表，使用独立子路由 /subscriptions/rule-profile
+- 节点/规则操作隔离，返回键与底部“订阅”选中态保持
+- 保留规则订阅 URL、数量、更新与策略/规则/规则集/config.yaml 入口
+
 #### Changelog 1.10.2 - 24-11-2026
 - 修复 tproxy + fake-ip 环境下规则模板和节点订阅下载失败
 - 下载前解析真实 IPv4，并使用 root:net_admin 绕过 tproxy
