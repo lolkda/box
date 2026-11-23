@@ -1,3 +1,9 @@
+#### Changelog 1.8.0 - 23-11-2026
+- 设置数据层重构：settings.json 成为唯一用户配置源，自动生成 settings.runtime.sh
+- 旧 settings.ini 不兼容，升级直接重置默认设置
+- 设置读取改为单次 JSON 解析，避免逐键 shell 开销
+- WebUI 设置页适配扁平设置接口
+
 #### Changelog 1.7.0 - 23-11-2026
 - mihomo /ui 固定为 zashboard
 - 模块包内置最新 dist-no-fonts
