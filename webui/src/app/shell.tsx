@@ -1,0 +1,117 @@
+import { useCallback, useEffect } from "react";
+import { Outlet, useLocation, useNavigate, useRouteError } from "react-router-dom";
+import { ChevronLeft, ShieldAlert } from "lucide-react";
+import { isKernelsuAvailable } from "../api/client";
+import { useTaskCompletionWatcher } from "../api/queries";
+import { useToast } from "../components/ui/toast";
+import { BottomNav } from "../components/layout/bottom-nav";
+import { TaskIndicator } from "../components/layout/task-indicator";
+import { getErrorMessage } from "../lib/utils";
+
+const pageMeta: Record<string, { title: string; back?: string }> = {
+  "/": { title: "概览" },
+  "/subscriptions": { title: "订阅" },
+  "/groups": { title: "策略" },
+  "/rules": { title: "规则" },
+  "/more": { title: "更多" },
+  "/settings": { title: "设置", back: "/more" },
+  "/providers": { title: "规则集", back: "/more" },
+  "/logs": { title: "日志", back: "/more" },
+  "/tasks": { title: "任务", back: "/more" },
+  "/danger": { title: "危险操作", back: "/more" },
+};
+
+function KsuUnavailablePage() {
+  return (
+    <div className="flex min-h-dvh items-center justify-center px-6 py-12">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 text-center shadow-sm">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-warning-soft text-warning">
+          <ShieldAlert size={24} />
+        </div>
+        <h1 className="mt-4 text-base font-semibold text-fg">请从 KernelSU 打开</h1>
+        <p className="mt-2 text-xs leading-5 text-fg-muted">
+          KernelSU API 不可用。管理页需要通过 KernelSU 模块页的 WebUI 入口打开，直接访问文件不会获得 root 执行通道。
+        </p>
+      </div>
+    </div>
+  );
+}
+
+export function AppShell() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const meta = pageMeta[location.pathname] || { title: "Box 管理" };
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [location.pathname]);
+
+  const onTaskFinished = useCallback(
+    (task: { title: string; state: string }) => {
+      if (task.state === "success") {
+        toast({ title: `${task.title}完成`, tone: "success" });
+      } else if (task.state === "failed" || task.state === "interrupted") {
+        toast({ title: `${task.title}失败`, description: "打开任务中心查看详细输出", tone: "error" });
+      } else if (task.state === "canceled") {
+        toast({ title: `${task.title}已取消`, tone: "info" });
+      }
+    },
+    [toast],
+  );
+
+  useTaskCompletionWatcher(onTaskFinished);
+
+  if (!isKernelsuAvailable()) {
+    return <KsuUnavailablePage />;
+  }
+
+  return (
+    <div className="min-h-dvh bg-bg text-fg">
+      <header className="sticky top-0 z-30 border-b border-border/80 bg-bg/90 pt-safe backdrop-blur-xl">
+        <div className="mx-auto flex min-h-14 max-w-3xl items-center gap-2 px-4">
+          {meta.back ? (
+            <button
+              type="button"
+              onClick={() => navigate(meta.back as string)}
+              className="-ml-2 flex h-10 w-10 items-center justify-center rounded-full text-fg-muted hover:bg-surface-muted hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              aria-label="返回"
+            >
+              <ChevronLeft size={22} />
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-primary text-primary-fg shadow-sm">
+                <span className="text-sm font-bold">B</span>
+              </span>
+              <div>
+                <p className="text-sm font-semibold leading-4 tracking-tight">Box</p>
+                <p className="text-[10px] leading-3 text-fg-muted">KernelSU WebUI</p>
+              </div>
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            {meta.back ? <p className="truncate text-sm font-semibold text-fg">{meta.title}</p> : null}
+          </div>
+          <TaskIndicator />
+        </div>
+      </header>
+      <main className="mx-auto w-full max-w-3xl px-4 pb-28 pt-4">
+        <Outlet />
+      </main>
+      <BottomNav />
+    </div>
+  );
+}
+
+export function RouteError() {
+  const error = useRouteError();
+  return (
+    <div className="mx-auto max-w-md px-4 py-12">
+      <div className="rounded-2xl border border-danger/20 bg-danger-soft p-5">
+        <h1 className="text-base font-semibold text-danger">页面加载失败</h1>
+        <p className="mt-2 text-xs text-fg">{getErrorMessage(error)}</p>
+      </div>
+    </div>
+  );
+}

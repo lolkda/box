@@ -634,6 +634,7 @@ update_mihomo_rulesets() {
 # 参数: [force] true 时忽略 update_subscription 开关
 upsubs() {
   local force="${1:-false}"
+  local only_name="${2:-}"
 
   if [ "${force}" != "true" ] && [ "${update_subscription}" != "true" ]; then
     log Warning "更新订阅已禁用: update_subscription=\"${update_subscription}\""
@@ -676,6 +677,10 @@ upsubs() {
         if [ -z "${provider_url}" ]; then
           log Warning "订阅地址为空，跳过: ${provider_name}"
           failure_count=$((failure_count + 1))
+          continue
+        fi
+
+        if [ -n "${only_name}" ] && [ "${provider_name}" != "${only_name}" ]; then
           continue
         fi
 
@@ -812,9 +817,11 @@ sub_usage() {
   cat <<'EOF'
 用法:
   box.tool sub add <订阅地址> [名字]
+  box.tool sub get <名字>
+  box.tool sub set <旧名字> <新名字> <订阅地址>
   box.tool sub list
   box.tool sub rm <名字>
-  box.tool sub update
+  box.tool sub update [名字]
 EOF
 }
 
@@ -826,6 +833,12 @@ sub_add() {
     http://*|https://*) ;;
     *)
       log Error "订阅地址必须以 http:// 或 https:// 开头"
+      return 1
+      ;;
+  esac
+  case "${url}" in
+    *"|"*)
+      log Error "订阅地址不能包含 |"
       return 1
       ;;
   esac
@@ -926,7 +939,8 @@ sub_rm() {
 }
 
 sub_update() {
-  upsubs true
+  local only_name="${1:-}"
+  upsubs true "${only_name}"
   local status=$?
 
   if [ "${status}" -ne 1 ]; then
@@ -942,12 +956,63 @@ sub_update() {
 
 json_quote() {
   local escaped
-  escaped="$(printf '%s' "$1" | busybox sed 's/\\/\\\\/g; s/"/\\"/g' | busybox awk 'BEGIN { ORS = "" } { if (NR > 1) printf "\\n"; printf "%s", $0 }')"
+  escaped="$(printf '%s' "$1" | busybox sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r//g' | busybox awk 'BEGIN { ORS = "" } { if (NR > 1) printf "\\n"; printf "%s", $0 }')"
   printf '"%s"' "${escaped}"
 }
 
 json_bool() {
   if [ "$1" = "true" ]; then printf 'true'; else printf 'false'; fi
+}
+
+json_ok() {
+  printf '{"ok":true,"data":%s,"meta":{"version":1}}\n' "${1:-null}"
+}
+
+has_json_arg() {
+  local arg
+  for arg in "$@"; do
+    [ "${arg}" = "--json" ] && return 0
+  done
+  return 1
+}
+
+json_error() {
+  local code="$1"
+  local message="$2"
+  local detail="${3:-}"
+  printf '{"ok":false,"error":{"code":%s,"message":%s,"detail":%s},"meta":{"version":1}}\n' \
+    "$(json_quote "${code}")" "$(json_quote "${message}")" "$(json_quote "${detail}")"
+}
+
+sh_single_quote() {
+  local escaped
+  escaped="$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+  printf "'%s'" "${escaped}"
+}
+
+mask_secret() {
+  local value="$1"
+  [ -n "${value}" ] || return 0
+  if [ "${#value}" -le 8 ]; then
+    printf '********'
+    return 0
+  fi
+  printf '%s' "${value}" | busybox awk '{ print substr($0, 1, 4) "****" substr($0, length($0) - 3) }'
+}
+
+file_state_json() {
+  local file="$1"
+  local size=0
+  local updated=""
+  if [ -f "${file}" ]; then
+    size="$(busybox wc -c < "${file}" 2>/dev/null | busybox tr -d '[:space:]')"
+    [ -n "${size}" ] || size=0
+    updated="$(busybox stat -c '%y' "${file}" 2>/dev/null | busybox cut -d. -f1 || true)"
+  fi
+  printf '{"exists":%s,"size":%s,"updated_at":%s}' \
+    "$(json_bool "$([ -s "${file}" ] && printf true || printf false)")" \
+    "${size}" \
+    "$(json_quote "${updated}")"
 }
 
 ensure_yq() {
@@ -963,6 +1028,7 @@ ensure_yq() {
 status_json() {
   local running=false
   local pid="null"
+  local config_exists=false
   if [ -f "${box_pid}" ]; then
     local current_pid
     current_pid="$(cat "${box_pid}" 2>/dev/null)"
@@ -971,14 +1037,17 @@ status_json() {
       pid="${current_pid}"
     fi
   fi
+  [ -f "${mihomo_config}" ] && config_exists=true
 
-  printf '{"running":%s,"pid":%s,"core":%s,"mode":%s,"config":%s,"subscriptions":%s}\n' \
+  json_ok "$(printf '{"running":%s,"pid":%s,"core":%s,"mode":%s,"config":%s,"config_exists":%s,"subscriptions":%s,"active_tasks":%s}' \
     "$(json_bool "${running}")" \
     "${pid}" \
     "$(json_quote "${bin_name}")" \
     "$(json_quote "${network_mode}")" \
     "$(json_quote "${name_mihomo_config}")" \
-    "$(subscription_count)"
+    "$(json_bool "${config_exists}")" \
+    "$(subscription_count)" \
+    "$(task_running_count)")"
 }
 
 subscription_count() {
@@ -998,52 +1067,239 @@ logs_json() {
   local file="${box_run}/runs.log"
   [ -f "${file}" ] || file="${box_log}"
 
-  if [ ! -f "${file}" ]; then
-    printf '{"file":%s,"lines":[]}\n' "$(json_quote "${file}")"
-    return 0
+  printf '{"ok":true,"data":{"file":%s,"lines":[' "$(json_quote "${file}")"
+  if [ -f "${file}" ]; then
+    tail -n "${line_count}" "${file}" 2>/dev/null | busybox awk '
+      BEGIN { first = 1 }
+      {
+        line = $0
+        gsub(/\\/, "\\\\", line)
+        gsub(/"/, "\\\"", line)
+        gsub(/\t/, "\\t", line)
+        gsub(/\r/, "", line)
+        if (!first) printf ","
+        printf "\"%s\"", line
+        first = 0
+      }
+      END { print "]" }
+    '
+  else
+    printf '] '
   fi
-
-  printf '{"file":%s,"lines":[' "$(json_quote "${file}")"
-  tail -n "${line_count}" "${file}" 2>/dev/null | busybox awk '
-    BEGIN { first = 1 }
-    {
-      line = $0
-      gsub(/\\/, "\\\\", line)
-      gsub(/"/, "\\\"", line)
-      gsub(/\t/, "\\t", line)
-      gsub(/\r/, "", line)
-      if (!first) printf ","
-      printf "\"%s\"", line
-      first = 0
-    }
-    END { print "]}" }
-  '
+  printf '},"meta":{"version":1}}\n'
 }
 
 sub_list_json() {
-  printf '{"items":['
+  printf '{"ok":true,"data":{"items":['
   local first=1
   if [ -s "${subscriptions_file}" ]; then
     while IFS='|' read -r name url; do
       case "${name}" in
         ''|\#*) continue ;;
       esac
-      local safe_name provider_file state
+      local safe_name provider_file state provider_size updated
       safe_name="$(sub_provider_file_name "${name}")"
       provider_file="${mihomo_provide_path}/${safe_name}.yaml"
-      if [ -s "${provider_file}" ]; then state="已下载"; else state="未下载"; fi
+      if [ -s "${provider_file}" ]; then state="downloaded"; else state="missing"; fi
+      provider_size=0
+      updated=""
+      if [ -f "${provider_file}" ]; then
+        provider_size="$(busybox wc -c < "${provider_file}" 2>/dev/null | busybox tr -d '[:space:]')"
+        [ -n "${provider_size}" ] || provider_size=0
+        updated="$(busybox stat -c '%y' "${provider_file}" 2>/dev/null | busybox cut -d. -f1 || true)"
+      fi
       [ "${first}" -eq 1 ] || printf ','
-      printf '{"name":%s,"url":%s,"provider":%s}' \
-        "$(json_quote "${name}")" "$(json_quote "${url}")" "$(json_quote "${state}")"
+      printf '{"name":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"updated_at":%s}' \
+        "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")" "$(json_quote "${state}")" \
+        "${provider_size}" "$(json_quote "${updated}")"
       first=0
     done < "${subscriptions_file}"
   fi
-  printf ']}\n'
+  printf ']},"meta":{"version":1}}\n'
 }
 
-settings_keys() {
+sub_get_json() {
+  local wanted="$1"
+  if [ -z "${wanted}" ]; then
+    json_error "E_USAGE" "缺少订阅名字"
+    return 1
+  fi
+  if ! subscription_exists "${wanted}"; then
+    json_error "E_NOT_FOUND" "订阅不存在: ${wanted}"
+    return 1
+  fi
+
+  local name url found=1 safe_name provider_file provider_size updated
+  while IFS='|' read -r name url; do
+    [ "${name}" = "${wanted}" ] || continue
+    found=0
+    safe_name="$(sub_provider_file_name "${name}")"
+    provider_file="${mihomo_provide_path}/${safe_name}.yaml"
+    provider_size=0
+    updated=""
+    if [ -f "${provider_file}" ]; then
+      provider_size="$(busybox wc -c < "${provider_file}" 2>/dev/null | busybox tr -d '[:space:]')"
+      [ -n "${provider_size}" ] || provider_size=0
+      updated="$(busybox stat -c '%y' "${provider_file}" 2>/dev/null | busybox cut -d. -f1 || true)"
+    fi
+    json_ok "$(printf '{"name":%s,"url":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"updated_at":%s}' \
+      "$(json_quote "${name}")" "$(json_quote "${url}")" "$(json_quote "$(mask_url "${url}")")" \
+      "$(json_quote "$([ -s "${provider_file}" ] && printf downloaded || printf missing)")" \
+      "${provider_size}" "$(json_quote "${updated}")")"
+    return 0
+  done < "${subscriptions_file}"
+
+  if [ "${found}" -eq 1 ]; then
+    json_error "E_NOT_FOUND" "订阅不存在: ${wanted}"
+    return 1
+  fi
+}
+
+sub_add_json() {
+  local url="$1"
+  local name="$2"
+  if [ -z "${url}" ]; then
+    json_error "E_USAGE" "缺少订阅地址"
+    return 1
+  fi
+  if [ -z "${name}" ]; then
+    name="$(printf '%s' "${url}" | busybox sed -E 's#^https?://([^/]+).*#\1#')"
+  fi
+
+  local output rc
+  output="$(sub_add "${url}" "${name}" 2>&1 1>/dev/null)"
+  rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    json_error "E_VALIDATION" "添加订阅失败" "$(printf '%s' "${output}" | busybox sed -E 's/^[0-9-]+ [0-9:]+ \[[A-Za-z]+\]: //')"
+    return 1
+  fi
+  json_ok "$(printf '{"name":%s,"url_masked":%s,"provider":"missing","provider_size":0,"updated_at":""}' \
+    "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")")"
+}
+
+sub_rm_json() {
+  local name="$1"
+  if [ -z "${name}" ]; then
+    json_error "E_USAGE" "缺少订阅名字"
+    return 1
+  fi
+  if ! subscription_exists "${name}"; then
+    json_error "E_NOT_FOUND" "订阅不存在: ${name}"
+    return 1
+  fi
+
+  local output rc
+  output="$(sub_rm "${name}" 2>&1 1>/dev/null)"
+  rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    json_error "E_IO" "删除订阅失败" "$(printf '%s' "${output}" | busybox sed -E 's/^[0-9-]+ [0-9:]+ \[[A-Za-z]+\]: //')"
+    return 1
+  fi
+  json_ok "$(printf '{"name":%s}' "$(json_quote "${name}")")"
+}
+
+sub_set_json() {
+  local old_name="$1"
+  local new_name="$2"
+  local url="$3"
+  if [ -z "${old_name}" ] || [ -z "${url}" ]; then
+    json_error "E_USAGE" "用法: sub set <旧名字> <新名字> <订阅地址> --json"
+    return 1
+  fi
+  [ -n "${new_name}" ] || new_name="${old_name}"
+  case "${url}" in
+    http://*|https://*) ;;
+    *)
+      json_error "E_VALIDATION" "订阅地址必须以 http:// 或 https:// 开头"
+      return 1
+      ;;
+  esac
+  case "${url}" in
+    *"|"*)
+      json_error "E_VALIDATION" "订阅地址不能包含 |"
+      return 1
+      ;;
+  esac
+  case "${new_name}" in
+    *"|"*)
+      json_error "E_VALIDATION" "名字不能包含 |"
+      return 1
+      ;;
+  esac
+  if ! subscription_exists "${old_name}"; then
+    json_error "E_NOT_FOUND" "订阅不存在: ${old_name}"
+    return 1
+  fi
+  if [ "${new_name}" != "${old_name}" ] && subscription_exists "${new_name}"; then
+    json_error "E_CONFLICT" "订阅已存在: ${new_name}"
+    return 1
+  fi
+
+  local old_safe new_safe temp_file provider_file renamed=false
+  old_safe="$(sub_provider_file_name "${old_name}")"
+  new_safe="$(sub_provider_file_name "${new_name}")"
+  if [ "${new_safe}" != "${old_safe}" ] && [ -f "${mihomo_provide_path}/${new_safe}.yaml" ]; then
+    json_error "E_CONFLICT" "订阅名生成的节点文件名冲突"
+    return 1
+  fi
+
+  temp_file="${subscriptions_file}.tmp.$$"
+  if ! busybox awk -F'|' -v old="${old_name}" -v new="${new_name}" -v url="${url}" '
+    BEGIN { OFS = "|"; found = 0 }
+    $1 == old { $1 = new; $2 = url; found = 1 }
+    { print }
+    END { exit(found ? 0 : 1) }
+  ' "${subscriptions_file}" > "${temp_file}"; then
+    rm -f "${temp_file}"
+    json_error "E_IO" "更新订阅失败"
+    return 1
+  fi
+  mv "${temp_file}" "${subscriptions_file}" || {
+    rm -f "${temp_file}"
+    json_error "E_IO" "写入订阅清单失败"
+    return 1
+  }
+
+  if [ "${old_safe}" != "${new_safe}" ]; then
+    provider_file="${mihomo_provide_path}/${old_safe}.yaml"
+    if [ -f "${provider_file}" ]; then
+      mv "${provider_file}" "${mihomo_provide_path}/${new_safe}.yaml"
+      renamed=true
+    fi
+    rm -f "${mihomo_provide_path}/${old_safe}.yaml.download"
+  fi
+
+  if [ "${auto_modify_config}" = "true" ] && [ -x "${box_dir}/bin/yq" -o "$(command -v yq 2>/dev/null)" ]; then
+    update_mihomo_providers >/dev/null 2>&1 || log Warning "订阅已更新，但 proxy-providers 配置更新失败"
+  fi
+
+  json_ok "$(printf '{"name":%s,"url_masked":%s,"renamed":%s}' \
+    "$(json_quote "${new_name}")" "$(json_quote "$(mask_url "${url}")")" "$(json_bool "${renamed}")")"
+}
+
+sub_update_json() {
+  local name="${1:-}"
+  if [ -n "${name}" ] && ! subscription_exists "${name}"; then
+    json_error "E_NOT_FOUND" "订阅不存在: ${name}"
+    return 1
+  fi
+
+  sub_update "${name}"
+  local rc=$?
+  if [ "${rc}" -eq 1 ]; then
+    json_error "E_COMMAND" "订阅更新失败" "请查看任务日志或 runs.log"
+    return 1
+  fi
+  if [ "${rc}" -eq 2 ]; then
+    json_ok "$(printf '{"updated":true,"partial":true,"failed":true}')"
+    return 0
+  fi
+  json_ok "$(printf '{"updated":true,"partial":false,"failed":false}')"
+}
+
+settings_scalar_keys() {
   cat <<'EOF'
-boot_auto_start bin_name network_mode tproxy_port redir_port ipv6 performance_mode quic mihomo_dns_forward proxy_tcp proxy_udp dns_hijack_tcp dns_hijack_udp dns_hijack_mode bypass_cn_ip bypass_cn_ip_v4 bypass_cn_ip_v6 cnip_mode proxy_mode update_subscription update_geo use_ghproxy url_ghproxy mihomo_stable singbox_stable run_crontab interva_update cgroup_memcg memcg_limit taskset_cpu allow_cpu cgroup_blkio weight mac_filter mac_mode ruleset_prefix
+auto_modify_config boot_auto_start bin_name network_mode tproxy_port redir_port ipv6 performance_mode quic mihomo_dns_forward proxy_tcp proxy_udp dns_hijack_tcp dns_hijack_udp dns_hijack_mode bypass_cn_ip bypass_cn_ip_v4 bypass_cn_ip_v6 cnip_mode proxy_mode update_subscription update_geo use_ghproxy url_ghproxy mihomo_stable singbox_stable run_crontab interva_update cgroup_memcg memcg_limit taskset_cpu allow_cpu cgroup_blkio weight mac_filter mac_mode ruleset_prefix subscription_keep_last_good enable_network_service_control use_module_on_wifi use_module_on_wifi_disconnect use_ssid_matching use_wifi_list_mode inotify_log_enabled renew
 EOF
 }
 
@@ -1053,15 +1309,101 @@ cnip_force_proxy_apps force_proxy_cidrs force_proxy_cidrs6 macs_list wifi_ssids_
 EOF
 }
 
+settings_all_keys() {
+  settings_scalar_keys
+  settings_array_keys
+  printf 'githubtoken\n'
+}
+
 settings_value() {
   local key="$1"
   eval "printf '%s' \"\${${key}}\""
 }
 
+settings_validate_scalar() {
+  local key="$1"
+  local value="$2"
+  if printf '%s' "${value}" | busybox grep -q '[[:cntrl:]]'; then
+    return 1
+  fi
+  case "${key}" in
+    auto_modify_config|boot_auto_start|ipv6|performance_mode|proxy_tcp|proxy_udp|dns_hijack_tcp|dns_hijack_udp|bypass_cn_ip|bypass_cn_ip_v4|bypass_cn_ip_v6|update_subscription|update_geo|use_ghproxy|run_crontab|cgroup_memcg|taskset_cpu|cgroup_blkio|mac_filter|subscription_keep_last_good|enable_network_service_control|use_module_on_wifi|use_module_on_wifi_disconnect|use_ssid_matching|inotify_log_enabled|renew)
+      case "${value}" in true|false) return 0 ;; *) return 1 ;; esac
+      ;;
+    quic|mihomo_dns_forward|mihomo_stable|singbox_stable)
+      case "${value}" in enable|disable) return 0 ;; *) return 1 ;; esac
+      ;;
+    network_mode)
+      case "${value}" in tun|tproxy|ebpf|redirect|mixed|enhance) return 0 ;; *) return 1 ;; esac
+      ;;
+    proxy_mode)
+      case "${value}" in core|blacklist|whitelist) return 0 ;; *) return 1 ;; esac
+      ;;
+    dns_hijack_mode)
+      case "${value}" in disable|tproxy|redirect) return 0 ;; *) return 1 ;; esac
+      ;;
+    cnip_mode)
+      case "${value}" in ipset|ebpf) return 0 ;; *) return 1 ;; esac
+      ;;
+    mac_mode|use_wifi_list_mode)
+      case "${value}" in blacklist|whitelist) return 0 ;; *) return 1 ;; esac
+      ;;
+    bin_name)
+      case "${value}" in mihomo|sing-box|xray|v2fly|hysteria) return 0 ;; *) return 1 ;; esac
+      ;;
+    tproxy_port|redir_port)
+      case "${value}" in ''|*[!0-9]*) return 1 ;; esac
+      [ "${value}" -ge 1 ] 2>/dev/null && [ "${value}" -le 65535 ] 2>/dev/null || return 1
+      return 0
+      ;;
+    memcg_limit)
+      printf '%s' "${value}" | busybox grep -Eq '^[0-9]+[KMGkmg]?$' || return 1
+      return 0
+      ;;
+    allow_cpu)
+      printf '%s' "${value}" | busybox grep -Eq '^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$' || return 1
+      return 0
+      ;;
+    weight)
+      [ -z "${value}" ] && return 0
+      case "${value}" in *[!0-9]*) return 1 ;; esac
+      [ "${value}" -ge 1 ] 2>/dev/null && [ "${value}" -le 1000 ] 2>/dev/null || return 1
+      return 0
+      ;;
+    interva_update)
+      [ "$(printf '%s' "${value}" | busybox awk '{ print NF }')" -eq 5 ] || return 1
+      return 0
+      ;;
+    url_ghproxy|ruleset_prefix)
+      [ -z "${value}" ] && return 0
+      case "${value}" in http://*|https://*) return 0 ;; *) return 1 ;; esac
+      ;;
+    githubtoken)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+settings_replace_line() {
+  local file="$1"
+  local key="$2"
+  local replacement="$3"
+  local escaped
+  escaped="$(printf '%s' "${replacement}" | busybox sed 's/[&\\#]/\\&/g')"
+  if busybox grep -q "^${key}=" "${file}"; then
+    busybox sed -i "s#^${key}=.*#${key}=${escaped}#" "${file}" || return 1
+  else
+    printf '%s=%s\n' "${key}" "${replacement}" >> "${file}" || return 1
+  fi
+}
+
 settings_get_json() {
-  printf '{"settings":{'
+  printf '{"ok":true,"data":{"settings":{'
   local first=1
-  for key in $(settings_keys); do
+  for key in $(settings_scalar_keys); do
     local value
     value="$(settings_value "${key}")"
     [ "${first}" -eq 1 ] || printf ','
@@ -1073,9 +1415,10 @@ settings_get_json() {
   for key in $(settings_array_keys); do
     [ "${first}" -eq 1 ] || printf ','
     printf '%s:[' "$(json_quote "${key}")"
-    eval "items=\"\${${key}[*]}\""
+    local items
+    eval "items=(\"\${${key}[@]}\")"
     local array_first=1
-    for item in ${items}; do
+    for item in "${items[@]}"; do
       [ "${array_first}" -eq 1 ] || printf ','
       printf '%s' "$(json_quote "${item}")"
       array_first=0
@@ -1083,39 +1426,149 @@ settings_get_json() {
     printf ']'
     first=0
   done
-  printf '}}\n'
+  local token_set=false token_preview=""
+  if [ -n "${githubtoken}" ]; then
+    token_set=true
+    token_preview="$(mask_secret "${githubtoken}")"
+  fi
+  printf '},"sensitive":{"githubtoken":{"set":%s,"preview":%s}}},"meta":{"version":1}}\n' \
+    "$(json_bool "${token_set}")" "$(json_quote "${token_preview}")"
 }
 
 settings_apply_json() {
   local file="$1"
   if [ ! -s "${file}" ]; then
-    log Error "settings apply: 缺少 JSON 文件"
+    json_error "E_USAGE" "settings apply: 缺少 JSON 文件"
+    return 1
+  fi
+  if [ ! -f "${settings_file}" ]; then
+    json_error "E_IO" "settings.ini 不存在"
     return 1
   fi
 
   ensure_yq
 
-  local changed=""
-  local key
+  if ! ${yq} -e 'tag == "!!map"' "${file}" >/dev/null 2>&1; then
+    json_error "E_VALIDATION" "设置必须是 JSON 对象"
+    return 1
+  fi
 
-  for key in $(settings_keys); do
+  local allowed=" $(settings_all_keys | busybox tr '\n' ' ') "
+  local key
+  for key in $(${yq} -r 'keys | .[]' "${file}" 2>/dev/null); do
+    case "${allowed}" in
+      *" ${key} "*) ;;
+      *)
+        json_error "E_VALIDATION" "未知设置键: ${key}"
+        return 1
+        ;;
+    esac
+  done
+
+  local temp_file="${settings_file}.tmp.$$"
+  cp -p "${settings_file}" "${temp_file}" || {
+    json_error "E_IO" "无法创建 settings.ini 临时文件"
+    return 1
+  }
+
+  local changed="" value tag replacement
+  for key in $(settings_scalar_keys); do
     if ${yq} -e "has(\"${key}\")" "${file}" >/dev/null 2>&1; then
-      local value
+      tag="$(${yq} -r ".${key} | tag" "${file}" 2>/dev/null)"
+      if [ "${tag}" != "!!str" ]; then
+        rm -f "${temp_file}"
+        json_error "E_VALIDATION" "设置 ${key} 必须是字符串"
+        return 1
+      fi
       value="$(${yq} -r ".${key} // \"\"" "${file}" 2>/dev/null)"
-      value="$(printf '%s' "${value}" | busybox sed 's/[&\\#]/\\&/g')"
-      busybox sed -i "s#^${key}=.*#${key}=\"${value}\"#" "${settings_file}"
+      if ! settings_validate_scalar "${key}" "${value}"; then
+        rm -f "${temp_file}"
+        json_error "E_VALIDATION" "设置 ${key} 的值不合法" "${value}"
+        return 1
+      fi
+      replacement="$(sh_single_quote "${value}")"
+      if ! settings_replace_line "${temp_file}" "${key}" "${replacement}"; then
+        rm -f "${temp_file}"
+        json_error "E_IO" "写入设置失败: ${key}"
+        return 1
+      fi
       changed="${changed}${changed:+,}$(json_quote "${key}")"
     fi
   done
 
   for key in $(settings_array_keys); do
     if ${yq} -e "has(\"${key}\")" "${file}" >/dev/null 2>&1; then
-      local joined
-      joined="$(${yq} -r ".${key} | join(\" \")" "${file}" 2>/dev/null)"
-      busybox sed -i "s#^${key}=.*#${key}=(${joined})#" "${settings_file}"
+      tag="$(${yq} -r ".${key} | tag" "${file}" 2>/dev/null)"
+      if [ "${tag}" != "!!seq" ]; then
+        rm -f "${temp_file}"
+        json_error "E_VALIDATION" "设置 ${key} 必须是数组"
+        return 1
+      fi
+      local joined="" item item_json
+      while IFS= read -r item; do
+        [ -n "${item}" ] || continue
+        case "${key}" in
+          cnip_force_proxy_apps)
+            printf '%s' "${item}" | busybox grep -Eq '^([0-9]+:)?[A-Za-z0-9._]+$' || {
+              rm -f "${temp_file}"
+              json_error "E_VALIDATION" "设置 ${key} 包含非法应用包名" "${item}"
+              return 1
+            }
+            ;;
+          force_proxy_cidrs)
+            printf '%s' "${item}" | busybox grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' || {
+              rm -f "${temp_file}"
+              json_error "E_VALIDATION" "设置 ${key} 包含非法 IPv4 网段" "${item}"
+              return 1
+            }
+            ;;
+          force_proxy_cidrs6)
+            case "${item}" in *:*) ;; *)
+              rm -f "${temp_file}"
+              json_error "E_VALIDATION" "设置 ${key} 包含非法 IPv6 网段" "${item}"
+              return 1
+              ;;
+            esac
+            ;;
+          macs_list|wifi_bssids_list)
+            printf '%s' "${item}" | busybox grep -Eiq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || {
+              rm -f "${temp_file}"
+              json_error "E_VALIDATION" "设置 ${key} 包含非法 MAC 地址" "${item}"
+              return 1
+            }
+            ;;
+        esac
+        item_json="$(sh_single_quote "${item}")"
+        joined="${joined}${joined:+ }${item_json}"
+      done <<EOF
+$(${yq} -r ".${key}[]" "${file}" 2>/dev/null)
+EOF
+      replacement="(${joined})"
+      if ! settings_replace_line "${temp_file}" "${key}" "${replacement}"; then
+        rm -f "${temp_file}"
+        json_error "E_IO" "写入设置失败: ${key}"
+        return 1
+      fi
       changed="${changed}${changed:+,}$(json_quote "${key}")"
     fi
   done
+
+  if ${yq} -e 'has("githubtoken")' "${file}" >/dev/null 2>&1; then
+    tag="$(${yq} -r '.githubtoken | tag' "${file}" 2>/dev/null)"
+    if [ "${tag}" != "!!str" ]; then
+      rm -f "${temp_file}"
+      json_error "E_VALIDATION" "设置 githubtoken 必须是字符串"
+      return 1
+    fi
+    value="$(${yq} -r '.githubtoken // ""' "${file}" 2>/dev/null)"
+    replacement="$(sh_single_quote "${value}")"
+    if ! settings_replace_line "${temp_file}" "githubtoken" "${replacement}"; then
+      rm -f "${temp_file}"
+      json_error "E_IO" "写入设置失败: githubtoken"
+      return 1
+    fi
+    changed="${changed}${changed:+,}$(json_quote "githubtoken")"
+  fi
 
   local sh_bin="/system/bin/sh"
   if [ ! -x "${sh_bin}" ]; then
@@ -1127,89 +1580,587 @@ settings_apply_json() {
       sh_bin=""
     fi
   fi
-  if [ -n "${sh_bin}" ] && ! ${sh_bin} -n "${settings_file}" 2>/dev/null; then
-    log Error "settings.ini 语法校验失败，已放弃本次修改"
+  if [ -n "${sh_bin}" ] && ! ${sh_bin} -n "${temp_file}" 2>/dev/null; then
+    rm -f "${temp_file}"
+    json_error "E_VALIDATION" "settings.ini 语法校验失败，已放弃本次修改"
     return 1
   fi
 
-  printf '{"ok":true,"changed":[%s]}\n' "${changed}"
+  if busybox cmp -s "${temp_file}" "${settings_file}"; then
+    rm -f "${temp_file}"
+  else
+    mv "${temp_file}" "${settings_file}" || {
+      rm -f "${temp_file}"
+      json_error "E_IO" "替换 settings.ini 失败"
+      return 1
+    }
+  fi
+
+  printf '{"ok":true,"data":{"changed":[%s]},"meta":{"version":1}}\n' "${changed}"
+}
+
+config_validate_json() {
+  local file="$1"
+  if ! ${yq} -e 'tag == "!!map" and has("proxy-groups") and has("rule-providers") and has("rules")' "${file}" >/dev/null 2>&1; then
+    json_error "E_VALIDATION" "配置必须包含 proxy-groups、rule-providers、rules"
+    return 1
+  fi
+  if ! ${yq} -e '."proxy-groups" | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
+    json_error "E_VALIDATION" "proxy-groups 必须是数组"
+    return 1
+  fi
+  if ! ${yq} -e '."rule-providers" | tag == "!!map"' "${file}" >/dev/null 2>&1; then
+    json_error "E_VALIDATION" "rule-providers 必须是对象"
+    return 1
+  fi
+  if ! ${yq} -e '.rules | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
+    json_error "E_VALIDATION" "rules 必须是数组"
+    return 1
+  fi
+
+  local tmpdir="${box_run_state}/config-validate.$$"
+  rm -rf "${tmpdir}"
+  mkdir -p "${tmpdir}" || {
+    json_error "E_IO" "无法创建配置校验临时目录"
+    return 1
+  }
+
+  ${yq} -r '."proxy-groups"[] | .name // ""' "${file}" > "${tmpdir}/group_names" 2>/dev/null
+  ${yq} -r '."proxy-groups"[] | .type // ""' "${file}" > "${tmpdir}/group_types" 2>/dev/null
+  ${yq} -r '."rule-providers" | to_entries[] | [.key, (.value.type // ""), (.value.behavior // ""), (.value.format // ""), (.value.url // ""), (.value.path // ""), (.value.interval // 0)] | @tsv' "${file}" > "${tmpdir}/provider_meta" 2>/dev/null
+  busybox cut -f1 "${tmpdir}/provider_meta" > "${tmpdir}/provider_names"
+  ${yq} -r '.rules[]' "${file}" > "${tmpdir}/rules" 2>/dev/null
+
+  local group_count name_count
+  group_count="$(${yq} -r '."proxy-groups" | length' "${file}" 2>/dev/null)"
+  name_count="$(busybox awk 'length($0) > 0 { count++ } END { print count + 0 }' "${tmpdir}/group_names" 2>/dev/null)"
+  if [ "${group_count}" != "${name_count}" ]; then
+    rm -rf "${tmpdir}"
+    json_error "E_VALIDATION" "每个策略组必须有非空名称"
+    return 1
+  fi
+
+  local duplicate
+  duplicate="$(busybox sort "${tmpdir}/group_names" | busybox uniq -d | busybox head -n 1)"
+  if [ -n "${duplicate}" ]; then
+    rm -rf "${tmpdir}"
+    json_error "E_VALIDATION" "策略组名称重复: ${duplicate}"
+    return 1
+  fi
+
+  local type
+  while IFS= read -r type; do
+    case "${type}" in
+      select|url-test|fallback|load-balance|relay) ;;
+      *)
+        rm -rf "${tmpdir}"
+        json_error "E_VALIDATION" "不支持的策略组类型: ${type:-空}"
+        return 1
+        ;;
+    esac
+  done < "${tmpdir}/group_types"
+
+  local provider_name provider_type provider_behavior provider_format provider_url provider_path provider_interval
+  while IFS="$(printf '\t')" read -r provider_name provider_type provider_behavior provider_format provider_url provider_path provider_interval; do
+    [ -n "${provider_name}" ] || continue
+    case "${provider_type}" in http|file|inline) ;; *)
+      rm -rf "${tmpdir}"
+      json_error "E_VALIDATION" "规则集 ${provider_name} 的 type 非法"
+      return 1
+    ;; esac
+    case "${provider_behavior}" in domain|ipcidr|classical) ;; *)
+      rm -rf "${tmpdir}"
+      json_error "E_VALIDATION" "规则集 ${provider_name} 的 behavior 非法"
+      return 1
+    ;; esac
+    case "${provider_format}" in yaml|mrs|text|"") ;; *)
+      rm -rf "${tmpdir}"
+      json_error "E_VALIDATION" "规则集 ${provider_name} 的 format 非法"
+      return 1
+    ;; esac
+    case "${provider_interval}" in ''|*[!0-9]*)
+      rm -rf "${tmpdir}"
+      json_error "E_VALIDATION" "规则集 ${provider_name} 的 interval 必须是数字"
+      return 1
+    ;; esac
+    if [ "${provider_type}" = "http" ]; then
+      case "${provider_url}" in
+        http://*|https://*) ;;
+        *)
+          rm -rf "${tmpdir}"
+          json_error "E_VALIDATION" "规则集 ${provider_name} 的 URL 非法"
+          return 1
+          ;;
+      esac
+    fi
+    if [ "${provider_type}" != "inline" ] && [ -z "${provider_path}" ]; then
+      rm -rf "${tmpdir}"
+      json_error "E_VALIDATION" "规则集 ${provider_name} 缺少 path"
+      return 1
+    fi
+  done < "${tmpdir}/provider_meta"
+
+  local rule rule_provider rule_target
+  while IFS= read -r rule; do
+    [ -n "${rule}" ] || continue
+    case "${rule}" in
+      RULE-SET,*)
+        rule_provider="$(printf '%s' "${rule}" | busybox cut -d, -f2)"
+        rule_target="$(printf '%s' "${rule}" | busybox cut -d, -f3)"
+        if ! busybox grep -Fxq "${rule_provider}" "${tmpdir}/provider_names"; then
+          rm -rf "${tmpdir}"
+          json_error "E_VALIDATION" "规则引用了不存在的规则集: ${rule_provider}"
+          return 1
+        fi
+        if ! busybox grep -Fxq "${rule_target}" "${tmpdir}/group_names"; then
+          case "${rule_target}" in
+            DIRECT|REJECT|REJECT-DROP|PASS|COMPATIBLE) ;;
+            *)
+              rm -rf "${tmpdir}"
+              json_error "E_VALIDATION" "规则引用了不存在的策略组: ${rule_target}"
+              return 1
+              ;;
+          esac
+        fi
+        ;;
+      MATCH,*)
+        rule_target="$(printf '%s' "${rule}" | busybox cut -d, -f2)"
+        if ! busybox grep -Fxq "${rule_target}" "${tmpdir}/group_names"; then
+          case "${rule_target}" in
+            DIRECT|REJECT|REJECT-DROP|PASS|COMPATIBLE) ;;
+            *)
+              rm -rf "${tmpdir}"
+              json_error "E_VALIDATION" "MATCH 引用了不存在的策略组: ${rule_target}"
+              return 1
+              ;;
+          esac
+        fi
+        ;;
+    esac
+  done < "${tmpdir}/rules"
+
+  rm -rf "${tmpdir}"
+  return 0
 }
 
 config_get_json() {
   ensure_yq
   if [ ! -f "${mihomo_config}" ]; then
-    log Error "配置文件不存在: ${mihomo_config}"
+    json_error "E_NOT_FOUND" "配置文件不存在: ${mihomo_config}"
     return 1
   fi
-  ${yq} -o=json '{ "proxy-groups": ."proxy-groups", "rule-providers": ."rule-providers", "rules": .rules }' "${mihomo_config}"
+  local data
+  data="$(${yq} -o=json '{ "proxy-groups": (."proxy-groups" // []), "rule-providers": (."rule-providers" // {}), "rules": (.rules // []) }' "${mihomo_config}" 2>/dev/null)" || {
+    json_error "E_IO" "读取配置失败"
+    return 1
+  }
+  json_ok "${data}"
 }
 
 config_apply_json() {
   local file="$1"
   if [ ! -s "${file}" ]; then
-    log Error "config apply: 缺少 JSON 文件"
+    json_error "E_USAGE" "config apply: 缺少 JSON 文件"
     return 1
   fi
   if [ ! -f "${mihomo_config}" ]; then
-    log Error "配置文件不存在: ${mihomo_config}"
+    json_error "E_NOT_FOUND" "配置文件不存在: ${mihomo_config}"
     return 1
   fi
 
   ensure_yq
-
-  if ! ${yq} -e 'has("proxy-groups") and has("rule-providers") and has("rules")' "${file}" >/dev/null 2>&1; then
-    log Error "config apply: JSON 必须包含 proxy-groups、rule-providers、rules"
-    return 1
-  fi
-  if ! ${yq} -e '."proxy-groups" | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
-    log Error "config apply: proxy-groups 必须是数组"
-    return 1
-  fi
-  if ! ${yq} -e '.rules | tag == "!!seq"' "${file}" >/dev/null 2>&1; then
-    log Error "config apply: rules 必须是数组"
-    return 1
-  fi
+  config_validate_json "${file}" || return 1
 
   local backup="${mihomo_config}.bak"
-  cp -f "${mihomo_config}" "${backup}" 2>/dev/null
+  cp -f "${mihomo_config}" "${backup}" 2>/dev/null || {
+    json_error "E_IO" "无法备份配置文件"
+    return 1
+  }
 
   if ! ${yq} -i '."proxy-groups" = (load("'"${file}"'") | ."proxy-groups") | ."rule-providers" = (load("'"${file}"'") | ."rule-providers") | .rules = (load("'"${file}"'") | .rules)' "${mihomo_config}" 2>/dev/null; then
     cp -f "${backup}" "${mihomo_config}" 2>/dev/null
-    log Error "config apply: 写入失败，已还原"
+    json_error "E_IO" "写入配置失败，已还原"
     return 1
   fi
 
   if ! ${yq} '.' "${mihomo_config}" >/dev/null 2>&1; then
     cp -f "${backup}" "${mihomo_config}" 2>/dev/null
-    log Error "config apply: YAML 校验失败，已还原"
+    json_error "E_IO" "YAML 校验失败，已还原"
     return 1
   fi
 
-  printf '{"ok":true}\n'
+  printf '{"ok":true,"data":{"changed":["proxy-groups","rule-providers","rules"]},"meta":{"version":1}}\n'
 }
 
 config_delete_json() {
   if [ ! -f "${mihomo_config}" ]; then
-    log Error "配置文件不存在: ${mihomo_config}"
+    json_error "E_NOT_FOUND" "配置文件不存在: ${mihomo_config}"
     return 1
   fi
   local deleted="${mihomo_config}.deleted.$(date +%Y%m%d%H%M%S)"
-  mv "${mihomo_config}" "${deleted}"
-  printf '{"ok":true,"path":%s}\n' "$(json_quote "${deleted}")"
+  mv "${mihomo_config}" "${deleted}" || {
+    json_error "E_IO" "删除配置失败"
+    return 1
+  }
+  json_ok "$(printf '{"path":%s}' "$(json_quote "${deleted}")")"
 }
 
 logs_clear_json() {
-  local file
+  local file cleared=""
   for file in "${box_run}/runs.log" "${box_run}/tool.log" "${box_run}/${bin_name}.log"; do
-    [ -f "${file}" ] && : > "${file}"
+    if [ -f "${file}" ]; then
+      : > "${file}"
+      cleared="${cleared}${cleared:+,}$(json_quote "${file}")"
+    fi
   done
-  printf '{"ok":true}\n'
+  printf '{"ok":true,"data":{"cleared":[%s]},"meta":{"version":1}}\n' "${cleared}"
 }
 
 reset_subscriptions_json() {
   : > "${subscriptions_file}"
   rm -f "${mihomo_provide_path}"/*.yaml 2>/dev/null
-  printf '{"ok":true}\n'
+  json_ok '{"cleared":true}'
+}
+
+service_json() {
+  local action="$1"
+  case "${action}" in
+    start|stop|restart|reload) ;;
+    *)
+      json_error "E_USAGE" "服务操作必须是 start、stop、restart 或 reload"
+      return 1
+      ;;
+  esac
+
+  local output rc
+  if [ "${action}" = "reload" ]; then
+    output="$(reload 2>&1)"
+    rc=$?
+  else
+    output="$("${scripts_dir}/box.service" "${action}" 2>&1)"
+    rc=$?
+  fi
+  if [ "${rc}" -ne 0 ]; then
+    json_error "E_COMMAND" "服务操作失败: ${action}" "${output}"
+    return 1
+  fi
+  json_ok "$(printf '{"action":%s,"output":%s}' "$(json_quote "${action}")" "$(json_quote "${output}")")"
+}
+
+task_tasks_dir() {
+  printf '%s/tasks' "${box_run}"
+}
+
+task_valid_id() {
+  case "$1" in
+    ''|*[!0-9-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+task_read_value() {
+  local dir="$1"
+  local name="$2"
+  [ -f "${dir}/${name}" ] && cat "${dir}/${name}" 2>/dev/null || true
+}
+
+task_update_interrupted() {
+  local dir="$1"
+  [ -f "${dir}/state" ] || return 0
+  [ "$(cat "${dir}/state" 2>/dev/null)" = "running" ] || return 0
+  local pid
+  pid="$(cat "${dir}/pid" 2>/dev/null)"
+  case "${pid}" in
+    ''|*[!0-9]*)
+      printf 'interrupted\n' > "${dir}/state"
+      date '+%Y-%m-%dT%H:%M:%S%z' > "${dir}/finished_at"
+      return 0
+      ;;
+  esac
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    printf 'interrupted\n' > "${dir}/state"
+    date '+%Y-%m-%dT%H:%M:%S%z' > "${dir}/finished_at"
+  fi
+}
+
+task_running_count() {
+  local dir count=0
+  [ -d "$(task_tasks_dir)" ] || {
+    printf '0'
+    return 0
+  }
+  for dir in "$(task_tasks_dir)"/*; do
+    [ -d "${dir}" ] || continue
+    task_update_interrupted "${dir}"
+    [ "$(cat "${dir}/state" 2>/dev/null)" = "running" ] && count=$((count + 1))
+  done
+  printf '%s' "${count}"
+}
+
+task_running_id() {
+  local dir
+  [ -d "$(task_tasks_dir)" ] || return 0
+  for dir in "$(task_tasks_dir)"/*; do
+    [ -d "${dir}" ] || continue
+    task_update_interrupted "${dir}"
+    if [ "$(cat "${dir}/state" 2>/dev/null)" = "running" ]; then
+      basename "${dir}"
+      return 0
+    fi
+  done
+}
+
+task_cleanup() {
+  local dirs
+  dirs="$(busybox ls -1dt "$(task_tasks_dir)"/* 2>/dev/null | busybox tail -n +21)"
+  for dir in ${dirs}; do
+    rm -rf "${dir}"
+  done
+}
+
+task_json_for_dir() {
+  local dir="$1"
+  local id kind title state pid started finished exit_code cancelable output_size
+  id="$(basename "${dir}")"
+  kind="$(task_read_value "${dir}" "kind")"
+  title="$(task_read_value "${dir}" "title")"
+  state="$(task_read_value "${dir}" "state")"
+  [ -n "${state}" ] || state="unknown"
+  pid="$(task_read_value "${dir}" "pid")"
+  case "${pid}" in ''|*[!0-9]*) pid=null ;; esac
+  started="$(task_read_value "${dir}" "started_at")"
+  finished="$(task_read_value "${dir}" "finished_at")"
+  exit_code="$(task_read_value "${dir}" "exit_code")"
+  case "${exit_code}" in ''|*[!0-9]*) exit_code=null ;; esac
+  cancelable="$(task_read_value "${dir}" "cancelable")"
+  [ "${cancelable}" = "true" ] || cancelable=false
+  output_size=0
+  if [ -f "${dir}/output.log" ]; then
+    output_size="$(busybox wc -c < "${dir}/output.log" 2>/dev/null | busybox tr -d '[:space:]')"
+    [ -n "${output_size}" ] || output_size=0
+  fi
+  printf '{"id":%s,"kind":%s,"title":%s,"state":%s,"pid":%s,"started_at":%s,"finished_at":%s,"exit_code":%s,"cancelable":%s,"output_size":%s}' \
+    "$(json_quote "${id}")" "$(json_quote "${kind}")" "$(json_quote "${title}")" \
+    "$(json_quote "${state}")" "${pid}" "$(json_quote "${started}")" "$(json_quote "${finished}")" \
+    "${exit_code}" "$(json_bool "${cancelable}")" "${output_size}"
+}
+
+task_start_json() {
+  local kind="$1"
+  local arg="${2:-}"
+  local title="" cancelable=true
+
+  case "${kind}" in
+    sub-update)
+      title="更新订阅"
+      ;;
+    upkernel)
+      title="更新 ${arg} 核心"
+      case "${arg}" in mihomo|sing-box|xray|v2fly|hysteria|mihomo_smart|sing-box_ref1nd) ;; *)
+        json_error "E_VALIDATION" "不支持的内核: ${arg:-空}"
+        return 1
+      ;; esac
+      cancelable=false
+      ;;
+    upcnip)
+      title="更新 CNIP 数据"
+      ;;
+    geox)
+      title="更新 Geo 数据"
+      ;;
+    xui)
+      title="更新面板资源"
+      ;;
+    *)
+      json_error "E_VALIDATION" "不支持的任务类型: ${kind:-空}"
+      return 1
+      ;;
+  esac
+
+  local running_id
+  running_id="$(task_running_id)"
+  if [ -n "${running_id}" ]; then
+    json_error "E_BUSY" "已有任务正在运行" "${running_id}"
+    return 1
+  fi
+
+  local tasks_dir id dir
+  tasks_dir="$(task_tasks_dir)"
+  mkdir -p "${tasks_dir}" || {
+    json_error "E_IO" "无法创建任务目录"
+    return 1
+  }
+  task_cleanup
+  id="$(date +%Y%m%d%H%M%S)-$$"
+  dir="${tasks_dir}/${id}"
+  mkdir -p "${dir}" || {
+    json_error "E_IO" "无法创建任务目录"
+    return 1
+  }
+  printf '%s\n' "${kind}" > "${dir}/kind"
+  printf '%s\n' "${title}" > "${dir}/title"
+  printf 'running\n' > "${dir}/state"
+  printf '%s\n' "${cancelable}" > "${dir}/cancelable"
+  printf '%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "${dir}/started_at"
+  [ -n "${arg}" ] && printf '%s\n' "${arg}" > "${dir}/arg"
+
+  local task_shell="/system/bin/sh"
+  if [ ! -x "${task_shell}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+      task_shell="$(command -v bash)"
+    elif command -v mksh >/dev/null 2>&1; then
+      task_shell="$(command -v mksh)"
+    else
+      task_shell="$(command -v sh)"
+    fi
+  fi
+  if command -v nohup >/dev/null 2>&1; then
+    nohup "${task_shell}" "${scripts_dir}/box.tool" task _run "${id}" > "${dir}/runner.log" 2>&1 &
+  else
+    "${task_shell}" "${scripts_dir}/box.tool" task _run "${id}" > "${dir}/runner.log" 2>&1 &
+  fi
+  printf '%s\n' "$!" > "${dir}/pid"
+  json_ok "$(task_json_for_dir "${dir}")"
+}
+
+task_run_internal() {
+  local id="$1"
+  task_valid_id "${id}" || exit 1
+  local dir
+  dir="$(task_tasks_dir)/${id}"
+  [ -d "${dir}" ] || exit 1
+
+  trap 'printf "canceled\n" > "${dir}/state"; date "+%Y-%m-%dT%H:%M:%S%z" > "${dir}/finished_at"; exit 130' TERM INT
+  exec >> "${dir}/output.log" 2>&1
+
+  local kind arg rc
+  kind="$(task_read_value "${dir}" "kind")"
+  arg="$(task_read_value "${dir}" "arg")"
+  case "${kind}" in
+    sub-update) sub_update "${arg}" ;;
+    upkernel) upkernel "${arg}" ;;
+    upcnip) upcnip ;;
+    geox) upgeox ;;
+    xui) upxui ;;
+    *)
+      printf '未知任务类型: %s\n' "${kind}"
+      false
+      ;;
+  esac
+  rc=$?
+  printf '%s\n' "${rc}" > "${dir}/exit_code"
+  printf '%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "${dir}/finished_at"
+  if [ "${rc}" -eq 0 ]; then
+    printf 'success\n' > "${dir}/state"
+  else
+    printf 'failed\n' > "${dir}/state"
+  fi
+}
+
+task_status_json() {
+  local id="$1"
+  if ! task_valid_id "${id}"; then
+    json_error "E_USAGE" "非法任务 ID"
+    return 1
+  fi
+  local dir="$(task_tasks_dir)/${id}"
+  if [ ! -d "${dir}" ]; then
+    json_error "E_NOT_FOUND" "任务不存在: ${id}"
+    return 1
+  fi
+  task_update_interrupted "${dir}"
+  json_ok "$(task_json_for_dir "${dir}")"
+}
+
+task_logs_json() {
+  local id="$1"
+  local count="${2:-200}"
+  case "${count}" in ''|*[!0-9]*) count=200 ;; esac
+  if ! task_valid_id "${id}"; then
+    json_error "E_USAGE" "非法任务 ID"
+    return 1
+  fi
+  local dir="$(task_tasks_dir)/${id}"
+  if [ ! -d "${dir}" ]; then
+    json_error "E_NOT_FOUND" "任务不存在: ${id}"
+    return 1
+  fi
+  local file="${dir}/output.log"
+  printf '{"ok":true,"data":{"id":%s,"file":%s,"lines":[' "$(json_quote "${id}")" "$(json_quote "${file}")"
+  if [ -f "${file}" ]; then
+    tail -n "${count}" "${file}" 2>/dev/null | busybox awk '
+      BEGIN { first = 1 }
+      {
+        line = $0
+        gsub(/\\/, "\\\\", line)
+        gsub(/"/, "\\\"", line)
+        gsub(/\t/, "\\t", line)
+        gsub(/\r/, "", line)
+        if (!first) printf ","
+        printf "\"%s\"", line
+        first = 0
+      }
+      END { print "]" }
+    '
+  else
+    printf ']'
+  fi
+  printf '},"meta":{"version":1}}\n'
+}
+
+task_list_json() {
+  local dir items first=1
+  printf '{"ok":true,"data":{"items":['
+  if [ -d "$(task_tasks_dir)" ]; then
+    for dir in $(busybox ls -1dt "$(task_tasks_dir)"/* 2>/dev/null); do
+      [ -d "${dir}" ] || continue
+      task_update_interrupted "${dir}"
+      [ "${first}" -eq 1 ] || printf ','
+      task_json_for_dir "${dir}"
+      first=0
+    done
+  fi
+  printf ']},"meta":{"version":1}}\n'
+}
+
+task_cancel_json() {
+  local id="$1"
+  if ! task_valid_id "${id}"; then
+    json_error "E_USAGE" "非法任务 ID"
+    return 1
+  fi
+  local dir="$(task_tasks_dir)/${id}"
+  if [ ! -d "${dir}" ]; then
+    json_error "E_NOT_FOUND" "任务不存在: ${id}"
+    return 1
+  fi
+  task_update_interrupted "${dir}"
+  if [ "$(cat "${dir}/state" 2>/dev/null)" != "running" ]; then
+    json_error "E_VALIDATION" "任务已结束，无法取消"
+    return 1
+  fi
+  if [ "$(task_read_value "${dir}" "cancelable")" != "true" ]; then
+    json_error "E_VALIDATION" "该任务不可取消"
+    return 1
+  fi
+  local pid
+  pid="$(cat "${dir}/pid" 2>/dev/null)"
+  case "${pid}" in
+    ''|*[!0-9]*)
+      json_error "E_INTERRUPTED" "任务进程不存在"
+      return 1
+      ;;
+  esac
+  printf 'canceled\n' > "${dir}/cancel_requested"
+  busybox pkill -TERM -P "${pid}" >/dev/null 2>&1 || true
+  kill -TERM "${pid}" >/dev/null 2>&1 || true
+  sleep 1
+  task_update_interrupted "${dir}"
+  if [ "$(cat "${dir}/state" 2>/dev/null)" = "running" ]; then
+    printf 'canceled\n' > "${dir}/state"
+    printf '%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "${dir}/finished_at"
+  fi
+  json_ok "$(task_json_for_dir "${dir}")"
 }
 
 upkernel() {
@@ -1889,6 +2840,23 @@ case "$1" in
       "${scripts_dir}/box.service" status
     fi
     ;;
+  service)
+    if has_json_arg "$@"; then
+      service_json "$2"
+    else
+      case "$2" in
+        reload)
+          reload
+          ;;
+        start|stop|restart)
+          "${scripts_dir}/box.service" "$2"
+          ;;
+        *)
+          log Info "用法: $0 service {start|stop|restart|reload} [--json]"
+          ;;
+      esac
+    fi
+    ;;
   logs)
     if [ "$2" = "clear" ]; then
       logs_clear_json
@@ -1939,10 +2907,61 @@ case "$1" in
         ;;
     esac
     ;;
+  task)
+    case "$2" in
+      start)
+        if [ "$4" = "--json" ]; then
+          task_start_json "$3" ""
+        else
+          task_start_json "$3" "$4"
+        fi
+        ;;
+      status)
+        task_status_json "$3"
+        ;;
+      logs)
+        if [ "$4" = "--json" ]; then
+          task_logs_json "$3" ""
+        else
+          task_logs_json "$3" "$4"
+        fi
+        ;;
+      list)
+        task_list_json
+        ;;
+      cancel)
+        task_cancel_json "$3"
+        ;;
+      _run)
+        task_run_internal "$3"
+        ;;
+      *)
+        json_error "E_USAGE" "用法: $0 task {start|status|logs|list|cancel} ... --json"
+        ;;
+    esac
+    ;;
   sub)
     case "$2" in
       add)
-        sub_add "$3" "$4"
+        if has_json_arg "$@"; then
+          if [ "$4" = "--json" ]; then
+            sub_add_json "$3" ""
+          else
+            sub_add_json "$3" "$4"
+          fi
+        else
+          sub_add "$3" "$4"
+        fi
+        ;;
+      get)
+        sub_get_json "$3"
+        ;;
+      set)
+        if has_json_arg "$@"; then
+          sub_set_json "$3" "$4" "$5"
+        else
+          log Info "用法: $0 sub set <旧名字> <新名字> <订阅地址> --json"
+        fi
         ;;
       list|ls)
         if [ "$3" = "--json" ]; then
@@ -1952,10 +2971,22 @@ case "$1" in
         fi
         ;;
       rm|remove|del)
-        sub_rm "$3"
+        if has_json_arg "$@"; then
+          sub_rm_json "$3"
+        else
+          sub_rm "$3"
+        fi
         ;;
       update|up)
-        sub_update
+        if has_json_arg "$@"; then
+          if [ "$3" = "--json" ]; then
+            sub_update_json ""
+          else
+            sub_update_json "$3"
+          fi
+        else
+          sub_update "$3"
+        fi
         ;;
       *)
         sub_usage
@@ -1999,7 +3030,8 @@ case "$1" in
     ;;
   *)
     log Error "$0 $1 未找到"
-    log Info "用法: $0 {check|memcg|blkio|geosub|geox|subs|sub|upkernel [name]|upkernels [name...]|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|bond0|bond1|all}"
+    log Info "用法: $0 {status|service|settings|config|logs|task|reset|sub|subs|geox|geosub|upkernel|upkernels|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|check|memcg|blkio|bond0|bond1|all}"
+    log Info "JSON 调用统一追加 --json，返回 {ok,data,error} 包络"
     log Info "upkernel 支持的核心: sing-box, mihomo, mihomo_smart, xray, v2fly, hysteria"
     ;;
 esac

@@ -1,3 +1,12 @@
+#### 未发布 - 23-11-2026
+- 全链路重构 KernelSU WebUI：React + TypeScript + Vite + Tailwind + Radix
+- 移动端底部 5 项导航；概览、订阅、策略、规则、设置、日志、任务中心与危险操作重新设计
+- `box.tool --json` 统一 `{ok,data,error}` 包络；配置/设置增加后端校验与原子写入
+- 新增后台任务中心：`box.tool task start|status|logs|list|cancel`
+- 设置支持全部可编辑标量键与数组编辑器；GitHub Token 脱敏
+- 规则支持结构化编辑与高级原文模式
+- 破坏性变更：旧 `--json` 输出不兼容，CLI 文本命令保留
+
 #### Changelog 1.4.0 - 22-11-2026
 - 新增 KernelSU WebUI 管理页面：订阅、服务、策略组、规则、规则集、设置、日志
 - box.tool 新增 status/logs/settings/config JSON 接口
