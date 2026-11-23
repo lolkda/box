@@ -1,3 +1,8 @@
+#### Changelog 1.11.3 - 24-11-2026
+- 兼容官方 KernelSU 3.3.1 的 listPackages/getPackagesInfo 包名接口
+- 包名选择器区分接口不可用、读取失败和空列表，并始终支持手动输入
+- 新 Manager 仍优先使用 ksu.pm()
+
 #### Changelog 1.11.2 - 24-11-2026
 - 模块作者增加 lolkda
 
