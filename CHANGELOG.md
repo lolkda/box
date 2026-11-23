@@ -1,3 +1,8 @@
+#### Changelog 1.9.0 - 23-11-2026
+- 新增订阅自动识别：完整配置聚合自动拆出 proxy-providers；新增 subscription_mode（auto/provider）；订阅页显示派生 provider 数量
+- 移除 renew 覆盖模式；首次升级重置旧设置和默认 config
+- 聚合 provider 逐项下载并保留旧文件；保留 proxy-groups、rules、rule-providers
+
 #### Changelog 1.8.0 - 23-11-2026
 - 设置数据层重构：settings.json 成为唯一用户配置源，自动生成 settings.runtime.sh
 - 旧 settings.ini 不兼容，升级直接重置默认设置
