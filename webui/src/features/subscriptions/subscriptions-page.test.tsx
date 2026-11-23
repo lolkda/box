@@ -15,16 +15,22 @@ function envelope(data: unknown) {
 
 function installSubscriptionMock() {
   const subscriptions = [
-    { name: "机场 A", url_masked: "https://example.com/***", provider: "downloaded", provider_size: 1024, provider_count: 0, updated_at: "2026-11-23T07:00:00+0800" },
+    { name: "机场 A", url_masked: "https://example.com/***", provider: "downloaded", provider_size: 1024, provider_count: 0, updated_at: "2026-11-23T07:00:00+0800", enabled: true },
   ];
   installKsuSpawnMock((command) => {
     let payload: unknown;
-    if (command.includes("'rule-profile' 'get'")) {
+    if (command.includes("'rule-profile' 'list'")) {
+      payload = envelope({ supported: true, items: [] });
+    } else if (command.includes("'rule-profile' 'get'")) {
       payload = envelope({ supported: true, configured: false, url_masked: "", updated_at: "", counts: { groups: 0, rule_providers: 0, rules: 0 } });
     } else if (command.includes("'sub' 'list'")) {
       payload = envelope({ items: subscriptions });
+    } else if (command.includes("'sub' 'disable'")) {
+      const target = subscriptions.find((item) => command.includes(`'${item.name}'`));
+      if (target) target.enabled = false;
+      payload = envelope({ name: target?.name || "机场 A", enabled: false, reloaded: true, missing: false });
     } else if (command.includes("'sub' 'add'")) {
-      subscriptions.push({ name: "测试新增", url_masked: "https://new.example.com/***", provider: "missing", provider_size: 0, provider_count: 0, updated_at: "" });
+      subscriptions.push({ name: "测试新增", url_masked: "https://new.example.com/***", provider: "missing", provider_size: 0, provider_count: 0, updated_at: "", enabled: true });
       payload = envelope({ name: "测试新增", url_masked: "https://new.example.com/***" });
     } else {
       payload = envelope({ items: subscriptions });
@@ -65,7 +71,7 @@ describe("SubscriptionsPage", () => {
     expect(screen.getByRole("button", { name: "添加订阅" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "规则与策略" })).toHaveAttribute("href", "/subscriptions/rule-profile");
     await user.click(screen.getByRole("link", { name: "规则与策略" }));
-    expect(await screen.findByText("规则与策略订阅")).toBeInTheDocument();
+    expect(await screen.findByText("还没有规则订阅")).toBeInTheDocument();
     expect(screen.queryByText("机场 A")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "添加订阅" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "更新全部订阅" })).not.toBeInTheDocument();
@@ -73,6 +79,19 @@ describe("SubscriptionsPage", () => {
     await user.click(screen.getByRole("link", { name: "节点订阅" }));
     expect(await screen.findByText("机场 A")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "添加订阅" })).toBeInTheDocument();
+  });
+
+  it("disables a subscription from the action menu", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("机场 A")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(await screen.findByRole("menuitem", { name: "禁用订阅" }));
+    expect(await screen.findByText("禁用节点订阅「机场 A」？")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "禁用" }));
+
+    expect(await screen.findByText("已禁用")).toBeInTheDocument();
   });
 
   it("adds a subscription through the sheet", async () => {

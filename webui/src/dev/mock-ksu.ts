@@ -1,4 +1,15 @@
-import type { ConfigData, SettingsData, SubscriptionDetail, TaskInfo } from "../api/types";
+import type { ConfigData, RuleProfileCounts, SettingsData, SubscriptionDetail, TaskInfo } from "../api/types";
+
+interface MockRuleProfile {
+  id: string;
+  name: string;
+  url: string;
+  active: boolean;
+  pending: boolean;
+  fetched_at: string;
+  applied_at: string;
+  counts: RuleProfileCounts;
+}
 
 interface MockState {
   running: boolean;
@@ -16,6 +27,7 @@ interface MockState {
   tasks: TaskInfo[];
   ruleProfileUrl: string;
   ruleProfileUpdatedAt: string;
+  ruleProfiles: MockRuleProfile[];
 }
 
 const now = () => new Date().toISOString();
@@ -96,6 +108,7 @@ const state: MockState = {
       provider_size: 184320,
       provider_count: 0,
       updated_at: "2026-11-23T07:42:31+0800",
+      enabled: true,
     },
     {
       name: "备用",
@@ -105,6 +118,7 @@ const state: MockState = {
       provider_size: 0,
       provider_count: 0,
       updated_at: "",
+      enabled: true,
     },
     {
       name: "测试",
@@ -114,6 +128,7 @@ const state: MockState = {
       provider_size: 92160,
       provider_count: 0,
       updated_at: "2026-11-23T07:43:10+0800",
+      enabled: true,
     },
   ],
   config: {
@@ -164,8 +179,30 @@ const state: MockState = {
     ],
   },
   configExists: true,
-  ruleProfileUrl: "",
-  ruleProfileUpdatedAt: "",
+  ruleProfileUrl: "https://clash-proxy.lolkda.top/config.yaml",
+  ruleProfileUpdatedAt: "2026-11-24T02:57:00+0800",
+  ruleProfiles: [
+    {
+      id: "default",
+      name: "默认规则",
+      url: "https://clash-proxy.lolkda.top/config.yaml",
+      active: true,
+      pending: false,
+      fetched_at: "2026-11-24T02:56:55+0800",
+      applied_at: "2026-11-24T02:57:00+0800",
+      counts: { groups: 22, rule_providers: 35, rules: 49 },
+    },
+    {
+      id: "backup",
+      name: "备用规则",
+      url: "https://backup.example/config.yaml",
+      active: false,
+      pending: true,
+      fetched_at: "2026-11-24T02:58:10+0800",
+      applied_at: "",
+      counts: { groups: 8, rule_providers: 12, rules: 18 },
+    },
+  ],
   ...buildSettings(),
   logs: [
     "2026-11-23 07:40:12 [Info]: Box 服务已启动",
@@ -345,7 +382,7 @@ function handle(args: string[]): unknown {
         const url = rest[0] || "";
         const name = rest[1] || new URL(url).hostname;
         if (state.subscriptions.some((item) => item.name === name)) return failure("E_CONFLICT", `订阅已存在: ${name}`);
-        state.subscriptions.push({ name, url, url_masked: url.replace(/\/[^/]*$/, "/***"), provider: "missing", provider_size: 0, provider_count: 0, updated_at: "" });
+        state.subscriptions.push({ name, url, url_masked: url.replace(/\/[^/]*$/, "/***"), provider: "missing", provider_size: 0, provider_count: 0, updated_at: "", enabled: true });
         return envelope({ name, url_masked: url.replace(/\/[^/]*$/, "/***") });
       }
       if (action === "set") {
@@ -361,6 +398,12 @@ function handle(args: string[]): unknown {
         state.subscriptions = state.subscriptions.filter((item) => item.name !== rest[0]);
         return envelope({ name: rest[0] });
       }
+      if (action === "enable" || action === "disable") {
+        const item = state.subscriptions.find((entry) => entry.name === rest[0]);
+        if (!item) return failure("E_NOT_FOUND", `订阅不存在: ${rest[0]}`);
+        item.enabled = action === "enable";
+        return envelope({ name: item.name, enabled: item.enabled, reloaded: state.running, missing: false });
+      }
       if (action === "update") return envelope({ updated: true, partial: false, failed: false });
       break;
     }
@@ -370,41 +413,109 @@ function handle(args: string[]): unknown {
         rule_providers: Object.keys(state.config["rule-providers"]).length,
         rules: state.config.rules.length,
       };
-      const profile = {
+      const mask = (url: string) => url.replace(/\/[^/]*$/, "/***");
+      const item = (profile: MockRuleProfile) => ({
+        id: profile.id,
+        name: profile.name,
+        url_masked: mask(profile.url),
+        active: profile.active,
+        pending: profile.pending,
+        fetched_at: profile.fetched_at,
+        applied_at: profile.applied_at,
+        counts: profile.counts,
+        can_delete: !profile.active,
+      });
+      const find = (id: string) => state.ruleProfiles.find((profile) => profile.id === id);
+      const selected = () => state.ruleProfiles.find((profile) => profile.active) || state.ruleProfiles[0];
+      const legacy = {
         supported: state.core === "mihomo",
-        configured: Boolean(state.ruleProfileUrl),
-        url_masked: state.ruleProfileUrl ? state.ruleProfileUrl.replace(/\/[^/]*$/, "/***") : "",
-        updated_at: state.ruleProfileUpdatedAt,
-        counts,
+        configured: state.ruleProfiles.length > 0,
+        id: selected()?.id || "",
+        name: selected()?.name || "",
+        url_masked: selected() ? mask(selected().url) : "",
+        updated_at: selected()?.applied_at || "",
+        counts: selected()?.counts || counts,
       };
-      if (action === "get") return envelope(profile);
-      if (action === "url") return state.ruleProfileUrl ? envelope({ url: state.ruleProfileUrl }) : failure("E_NOT_FOUND", "还没有配置规则与策略订阅");
+
+      if (action === "list") return envelope({ supported: state.core === "mihomo", items: state.ruleProfiles.map(item) });
+      if (action === "get") return envelope(legacy);
+      if (action === "add") {
+        const [name, url] = rest;
+        if (!name) return failure("E_VALIDATION", "规则订阅名称不能为空");
+        if (!/^https?:\/\//.test(url || "")) return failure("E_VALIDATION", "规则模板地址必须以 http:// 或 https:// 开头");
+        if (state.ruleProfiles.some((profile) => profile.name === name)) return failure("E_VALIDATION", `规则订阅名称已存在: ${name}`);
+        const id = name.replace(/[\\/|\s]/g, "_") || `rule-${state.ruleProfiles.length + 1}`;
+        const profile: MockRuleProfile = { id, name, url, active: false, pending: false, fetched_at: "", applied_at: "", counts: { groups: 0, rule_providers: 0, rules: 0 } };
+        state.ruleProfiles.push(profile);
+        return envelope(item(profile));
+      }
+      if (action === "edit") {
+        const [id, name, url] = rest;
+        const profile = find(id);
+        if (!profile) return failure("E_NOT_FOUND", `规则订阅不存在: ${id}`);
+        if (!name) return failure("E_VALIDATION", "规则订阅名称不能为空");
+        if (state.ruleProfiles.some((entry) => entry.name === name && entry.id !== id)) return failure("E_VALIDATION", `规则订阅名称已存在: ${name}`);
+        profile.name = name;
+        if (profile.url !== url) {
+          profile.url = url;
+          profile.pending = false;
+          profile.fetched_at = "";
+          profile.counts = { groups: 0, rule_providers: 0, rules: 0 };
+          profile.active = false;
+        }
+        return envelope(item(profile));
+      }
+      if (action === "url") {
+        const profile = rest[0] ? find(rest[0]) : selected();
+        return profile ? envelope({ id: profile.id, url: profile.url }) : failure("E_NOT_FOUND", "还没有配置规则与策略订阅");
+      }
+      if (action === "update" || action === "fetch") {
+        const profile = rest.find((value) => !value.startsWith("--")) ? find(rest.find((value) => !value.startsWith("--")) || "") : selected();
+        if (!profile) return failure("E_NOT_FOUND", "没有可更新的规则订阅");
+        profile.pending = true;
+        profile.fetched_at = now();
+        profile.counts = { groups: 22, rule_providers: 33, rules: 49 };
+        return envelope(item(profile));
+      }
+      if (action === "use" || action === "apply") {
+        const profile = rest.find((value) => !value.startsWith("--")) ? find(rest.find((value) => !value.startsWith("--")) || "") : selected();
+        if (!profile) return failure("E_NOT_FOUND", "没有可使用的规则订阅");
+        state.ruleProfiles.forEach((entry) => { entry.active = entry.id === profile.id; });
+        profile.pending = false;
+        profile.applied_at = now();
+        state.ruleProfileUrl = profile.url;
+        state.ruleProfileUpdatedAt = profile.applied_at;
+        return envelope({
+          id: profile.id,
+          name: profile.name,
+          changed: ["proxy-groups", "rule-providers", "rules"],
+          reloaded: rest.includes("--reload") ? state.running : false,
+          updated_at: profile.applied_at,
+          counts: profile.counts,
+        });
+      }
+      if (action === "remove" || action === "rm" || action === "del") {
+        const profile = find(rest[0] || "");
+        if (!profile) return failure("E_NOT_FOUND", "规则订阅不存在");
+        if (profile.active) return failure("E_VALIDATION", "当前使用中的规则订阅不能删除，请先停用或使用另一条");
+        state.ruleProfiles = state.ruleProfiles.filter((entry) => entry.id !== profile.id);
+        return envelope({ removed: true, id: profile.id });
+      }
+      if (action === "deactivate") {
+        state.ruleProfiles.forEach((entry) => { entry.active = false; });
+        return envelope({ active: false });
+      }
       if (action === "set") {
         const url = rest[0] || "";
         if (!/^https?:\/\//.test(url)) return failure("E_VALIDATION", "规则模板地址必须以 http:// 或 https:// 开头");
         state.ruleProfileUrl = url;
-        return envelope({ ...profile, configured: true, url_masked: url.replace(/\/[^/]*$/, "/***") });
+        return envelope(legacy);
       }
       if (action === "clear") {
+        state.ruleProfiles = [];
         state.ruleProfileUrl = "";
         state.ruleProfileUpdatedAt = "";
         return envelope({ cleared: true });
-      }
-      if (action === "fetch") {
-        return envelope({
-          url_masked: profile.url_masked,
-          fetched_at: now(),
-          counts: { groups: 22, rule_providers: 33, rules: 49 },
-        });
-      }
-      if (action === "apply") {
-        state.ruleProfileUpdatedAt = now();
-        return envelope({
-          changed: ["proxy-groups", "rule-providers", "rules"],
-          reloaded: rest.includes("--reload") ? state.running : false,
-          updated_at: state.ruleProfileUpdatedAt,
-          counts,
-        });
       }
       break;
     }

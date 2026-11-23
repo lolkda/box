@@ -7,6 +7,7 @@
 - 最后更新：2026-11-24
 - 实现状态：已实现
 - 验证状态：部分完成（本地自动化与 mock UI 已验，新 Tab 路由未真机验证）
+- 关联文档：[module-rule-profile-multi-subscription.md](module-rule-profile-multi-subscription.md)（单条 URL 模型已扩展为多规则订阅；本文的 Tab、下载、三段替换与 DNS 保留约束继续有效）
 - 关联文档：[module-subscription-auto-provider.md](module-subscription-auto-provider.md)（节点订阅与 provider 拆分）
 - 关联文档：[module-webui-refactor.md](module-webui-refactor.md)（当前管理页实现）
 

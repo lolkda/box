@@ -26,6 +26,7 @@ export interface Subscription {
   provider_size: number;
   provider_count: number;
   updated_at: string;
+  enabled: boolean;
 }
 
 export interface SubscriptionDetail extends Subscription {
@@ -85,9 +86,28 @@ export interface RuleProfileCounts {
 export interface RuleProfileData {
   supported: boolean;
   configured: boolean;
+  id?: string;
+  name?: string;
   url_masked: string;
   updated_at: string;
   counts: RuleProfileCounts;
+}
+
+export interface RuleProfileItem {
+  id: string;
+  name: string;
+  url_masked: string;
+  active: boolean;
+  pending: boolean;
+  fetched_at: string;
+  applied_at: string;
+  counts: RuleProfileCounts;
+  can_delete: boolean;
+}
+
+export interface RuleProfileListData {
+  supported: boolean;
+  items: RuleProfileItem[];
 }
 
 export interface RuleProfileFetched {
@@ -97,6 +117,8 @@ export interface RuleProfileFetched {
 }
 
 export interface RuleProfileApplied {
+  id?: string;
+  name?: string;
   changed: string[];
   reloaded: boolean;
   updated_at: string;

@@ -10,6 +10,8 @@ import type {
   RuleProfileApplied,
   RuleProfileData,
   RuleProfileFetched,
+  RuleProfileItem,
+  RuleProfileListData,
   ServiceAction,
   SettingsData,
   StatusData,
@@ -217,13 +219,38 @@ export const api = {
     runJson<Subscription>(["sub", "set", oldName, newName, url, "--json"]),
 
   removeSubscription: (name: string) => runJson<{ name: string }>(["sub", "rm", name, "--json"]),
+
+  setSubscriptionEnabled: (name: string, enabled: boolean) =>
+    runJson<{ name: string; enabled: boolean; reloaded: boolean; missing: boolean }>([
+      "sub",
+      enabled ? "enable" : "disable",
+      name,
+      "--json",
+    ]),
   config: () => runJson<ConfigData>(["config", "get", "--json"]),
 
   ruleProfile: () => runJson<RuleProfileData>(["rule-profile", "get", "--json"]),
 
+  ruleProfiles: () => runJson<RuleProfileListData>(["rule-profile", "list", "--json"]),
+
+  addRuleProfile: (name: string, url: string) => runJson<RuleProfileItem>(["rule-profile", "add", name, url, "--json"]),
+
+  editRuleProfile: (id: string, name: string, url: string) =>
+    runJson<RuleProfileItem>(["rule-profile", "edit", id, name, url, "--json"]),
+
+  updateRuleProfile: (id: string) => runJson<RuleProfileItem>(["rule-profile", "update", id, "--json"]),
+
+  useRuleProfile: (id: string, reload: boolean) =>
+    runJson<RuleProfileApplied>(["rule-profile", "use", id, ...(reload ? ["--reload"] : []), "--json"]),
+
+  removeRuleProfile: (id: string) => runJson<{ removed: boolean; id: string }>(["rule-profile", "remove", id, "--json"]),
+
+  deactivateRuleProfile: () => runJson<{ active: boolean }>(["rule-profile", "deactivate", "--json"]),
+
   setRuleProfile: (url: string) => runJson<RuleProfileData>(["rule-profile", "set", url, "--json"]),
 
-  ruleProfileUrl: () => runJson<{ url: string }>(["rule-profile", "url", "--json"]),
+  ruleProfileUrl: (id?: string) =>
+    runJson<{ id?: string; url: string }>(id ? ["rule-profile", "url", id, "--json"] : ["rule-profile", "url", "--json"]),
 
   clearRuleProfile: () => runJson<{ cleared: boolean }>(["rule-profile", "clear", "--json"]),
 

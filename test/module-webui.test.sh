@@ -83,6 +83,22 @@ jassert '.data.items[0].name == "香港" and .data.items[0].provider == "missing
 get_json="$(run_tool sub get "香港" --json 2>/dev/null)"
 jassert '.data.url == "https://example.com/sub"' "${get_json}" "sub get 编辑时才返回完整 URL"
 
+disable_json="$(run_tool sub disable "香港" --json 2>/dev/null)"
+jassert '.ok == true and .data.enabled == false and .data.reloaded == false' "${disable_json}" "sub disable 返回禁用状态"
+list_disabled="$(run_tool sub list --json 2>/dev/null)"
+jassert '.data.items[0].enabled == false' "${list_disabled}" "sub list 显示已禁用"
+yq -e '."proxy-providers" | has("香港") | not' "${BOX_HOME}/mihomo/config.yaml" >/dev/null 2>&1 && ok "禁用后移除 proxy-provider" || bad "禁用后移除 proxy-provider"
+enable_json="$(run_tool sub enable "香港" --json 2>/dev/null)"
+jassert '.ok == true and .data.enabled == true' "${enable_json}" "sub enable 返回启用状态"
+list_enabled="$(run_tool sub list --json 2>/dev/null)"
+jassert '.data.items[0].enabled == true' "${list_enabled}" "sub list 显示已启用"
+yq -e '."proxy-providers" | has("香港")' "${BOX_HOME}/mihomo/config.yaml" >/dev/null 2>&1 && ok "启用后恢复 proxy-provider" || bad "启用后恢复 proxy-provider"
+cp "${BOX_HOME}/mihomo/config.yaml" "${WORK}/config-before-use.yaml"
+yq -i '."proxy-groups"[0].use = ["香港"]' "${BOX_HOME}/mihomo/config.yaml"
+disable_ref="$(run_tool sub disable "香港" --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION" and (.error.message | contains("香港"))' "${disable_ref}" "策略组引用 provider 时禁止禁用"
+cp "${WORK}/config-before-use.yaml" "${BOX_HOME}/mihomo/config.yaml"
+
 set_json="$(run_tool sub set "香港" "香港2" "https://example.com/sub2" --json 2>/dev/null)"
 jassert '.ok == true and .data.name == "香港2" and .data.renamed == false' "${set_json}" "sub set 改名并替换 URL"
 
@@ -188,6 +204,12 @@ run_tool sub add "https://aggregate.example/sub" "大杂烩" --json >/dev/null 2
 run_tool sub update --json >/dev/null 2>&1
 jassert '.data.items[0].provider_count == 3 and .data.items[0].provider == "aggregated"' "$(run_tool sub list --json 2>/dev/null)" "聚合订阅显示 3 个 provider"
 jassert '.data.provider_count == 3 and .data.provider == "aggregated"' "$(run_tool sub get "大杂烩" --json 2>/dev/null)" "聚合订阅详情显示 3 个 provider"
+aggregate_disable="$(run_tool sub disable "大杂烩" --json 2>/dev/null)"
+jassert '.ok == true and .data.enabled == false' "${aggregate_disable}" "禁用聚合订阅"
+yq -e '."proxy-providers" | (has("xusx") or has("imagic") or has("bkm")) | not' "${BOX_HOME}/mihomo/config.yaml" >/dev/null 2>&1 && ok "禁用聚合订阅移除派生 provider" || bad "禁用聚合订阅移除派生 provider"
+aggregate_enable="$(run_tool sub enable "大杂烩" --json 2>/dev/null)"
+jassert '.ok == true and .data.enabled == true' "${aggregate_enable}" "启用聚合订阅"
+yq -e '."proxy-providers" | (has("xusx") and has("imagic") and has("bkm"))' "${BOX_HOME}/mihomo/config.yaml" >/dev/null 2>&1 && ok "启用聚合订阅恢复派生 provider" || bad "启用聚合订阅恢复派生 provider"
 assert_eq "3" "$(wc -l < "${BOX_HOME}/run/subscriptions.providers" | tr -d '[:space:]')" "派生 provider 清单有 3 条"
 for provider_name in xusx imagic bkm; do
   [ -s "${BOX_HOME}/mihomo/proxy_provider/${provider_name}.yaml" ] && ok "生成 provider ${provider_name}" || bad "生成 provider ${provider_name}"
@@ -400,6 +422,24 @@ rules:
   - MATCH,节点选择
 EOF
 
+cat > "${WORK}/rule-profile-b.yaml" <<'EOF'
+proxy-groups:
+  - name: 节点选择B
+    type: select
+    include-all: true
+rule-providers:
+  adsB:
+    type: http
+    behavior: domain
+    format: yaml
+    interval: 86400
+    url: https://rules.example/adsB.yaml
+    path: ./rule_provider/adsB.yaml
+rules:
+  - DOMAIN,example.org,节点选择B
+  - MATCH,节点选择B
+EOF
+
 cat > "${WORK}/rule-profile-bad.yaml" <<'EOF'
 proxy-groups:
   - name: 节点选择
@@ -420,6 +460,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "${url}" in
   https://rule-profile.example/config.yaml) cp "${WORK}/rule-profile.yaml" "${out}" ;;
+  https://rule-profile.example/b.yaml) cp "${WORK}/rule-profile-b.yaml" "${out}" ;;
   https://rule-profile.example/bad.yaml) cp "${WORK}/rule-profile-bad.yaml" "${out}" ;;
   https://rule-profile.example/fallback.yaml) exit 22 ;;
   https://rule-profile.example/fail.yaml) exit 22 ;;
@@ -486,6 +527,77 @@ rp_clear="$(run_tool rule-profile clear --json 2>/dev/null)"
 jassert '.ok == true and .data.cleared == true' "${rp_clear}" "rule-profile clear 清除 URL"
 rp_cleared="$(run_tool rule-profile get --json 2>/dev/null)"
 jassert '.data.configured == false and .data.url_masked == ""' "${rp_cleared}" "清除后规则订阅为未配置"
+# 6c. 多规则订阅：添加、暂存、使用、删除保护
+rp_add_a="$(run_tool rule-profile add "规则A" "https://rule-profile.example/config.yaml" --json 2>/dev/null)"
+jassert '.ok == true and .data.name == "规则A" and .data.active == false and .data.pending == false' "${rp_add_a}" "多规则订阅添加规则A"
+rp_add_b="$(run_tool rule-profile add "规则B" "https://rule-profile.example/config.yaml" --json 2>/dev/null)"
+jassert '.ok == true and .data.name == "规则B"' "${rp_add_b}" "多规则订阅添加规则B"
+rp_id_b="$(printf '%s' "${rp_add_b}" | jq -r '.data.id')"
+rp_list="$(run_tool rule-profile list --json 2>/dev/null)"
+jassert '.data.supported == true and (.data.items | length) == 2 and (([.data.items[].name] | sort) == ["规则A","规则B"])' "${rp_list}" "多规则订阅列表"
+jassert '.data.items | map(select(.name == "规则A"))[0].url_masked == "https://rule-profile.example/***"' "${rp_list}" "多规则列表掩码 URL"
+
+rp_multi_before="$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)"
+rp_upd_b="$(run_tool rule-profile update "${rp_id_b}" --json 2>/dev/null)"
+jassert '.ok == true and .data.pending == true and .data.counts.groups == 2 and .data.counts.rules == 2' "${rp_upd_b}" "更新非当前规则只暂存"
+assert_eq "${rp_multi_before}" "$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)" "更新非当前规则不修改 config.yaml"
+
+rp_use_b="$(run_tool rule-profile use "${rp_id_b}" --json 2>/dev/null)"
+jassert '.ok == true and .data.reloaded == false and .data.counts.groups == 2' "${rp_use_b}" "使用指定规则订阅并应用"
+rp_list_used="$(run_tool rule-profile list --json 2>/dev/null)"
+jassert '.data.items | ((map(select(.name == "规则B"))[0].active == true) and (map(select(.name == "规则A"))[0].active == false))' "${rp_list_used}" "多规则当前使用标记"
+rp_remove_active="$(run_tool rule-profile remove "${rp_id_b}" --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${rp_remove_active}" "当前使用规则禁止删除"
+rp_deact_hash="$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)"
+rp_deactivate="$(run_tool rule-profile deactivate --json 2>/dev/null)"
+jassert '.ok == true and .data.active == false' "${rp_deactivate}" "停用当前规则订阅"
+assert_eq "${rp_deact_hash}" "$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)" "停用不修改 config.yaml"
+rp_remove_b="$(run_tool rule-profile remove "${rp_id_b}" --json 2>/dev/null)"
+jassert '.ok == true and .data.removed == true' "${rp_remove_b}" "停用后删除规则B"
+rp_id_a="$(printf '%s' "${rp_add_a}" | jq -r '.data.id')"
+run_tool rule-profile remove "${rp_id_a}" --json >/dev/null 2>&1
+
+rp_edit_add="$(run_tool rule-profile add "规则C" "https://rule-profile.example/config.yaml" --json 2>/dev/null)"
+rp_id_c="$(printf '%s' "${rp_edit_add}" | jq -r '.data.id')"
+rp_edit="$(run_tool rule-profile edit "${rp_id_c}" "规则C改" "https://rule-profile.example/config.yaml" --json 2>/dev/null)"
+jassert '.ok == true and .data.name == "规则C改"' "${rp_edit}" "编辑规则订阅名称"
+rp_url_c="$(run_tool rule-profile url "${rp_id_c}" --json 2>/dev/null)"
+jassert '.ok == true and .data.url == "https://rule-profile.example/config.yaml"' "${rp_url_c}" "按 ID 读取规则订阅完整地址"
+run_tool rule-profile remove "${rp_id_c}" --json >/dev/null 2>&1
+
+rp_add_d="$(run_tool rule-profile add "规则D" "https://rule-profile.example/config.yaml" --json 2>/dev/null)"
+rp_id_d="$(printf '%s' "${rp_add_d}" | jq -r '.data.id')"
+rp_use_d="$(run_tool rule-profile use "${rp_id_d}" --json 2>/dev/null)"
+jassert '.ok == true and .data.counts.groups == 2 and .data.counts.rules == 2' "${rp_use_d}" "无快照时使用自动下载并应用"
+run_tool rule-profile deactivate --json >/dev/null 2>&1
+run_tool rule-profile remove "${rp_id_d}" --json >/dev/null 2>&1
+
+# 6d. 两条规则订阅先后使用，只保留当前一条
+run_tool rule-profile clear --json >/dev/null 2>&1
+rp_no_merge_a="$(run_tool rule-profile add "规则E" "https://rule-profile.example/config.yaml" --json 2>/dev/null)"
+rp_id_e="$(printf '%s' "${rp_no_merge_a}" | jq -r '.data.id')"
+run_tool rule-profile use "${rp_id_e}" --json >/dev/null 2>&1
+rp_no_merge_b="$(run_tool rule-profile add "规则F" "https://rule-profile.example/b.yaml" --json 2>/dev/null)"
+rp_id_f="$(printf '%s' "${rp_no_merge_b}" | jq -r '.data.id')"
+run_tool rule-profile use "${rp_id_f}" --json >/dev/null 2>&1
+grep -q 'DOMAIN,example.org,节点选择B' "${BOX_HOME}/mihomo/config.yaml" && ok "使用规则F写入F的三段" || bad "使用规则F写入F的三段"
+grep -q 'DOMAIN,example.com,节点选择' "${BOX_HOME}/mihomo/config.yaml" && bad "使用规则F不保留规则E" || ok "使用规则F不保留规则E"
+run_tool rule-profile deactivate --json >/dev/null 2>&1
+run_tool rule-profile remove "${rp_id_f}" --json >/dev/null 2>&1
+run_tool rule-profile remove "${rp_id_e}" --json >/dev/null 2>&1
+
+run_tool rule-profile clear --json >/dev/null 2>&1
+mkdir -p "${BOX_HOME}/mihomo" "${BOX_HOME}/run/state"
+printf 'https://legacy.example/config.yaml
+' > "${BOX_HOME}/mihomo/rule-profile.url"
+printf '2026-11-24T03:00:00+0800
+' > "${BOX_HOME}/run/state/rule-profile.updated_at"
+rp_migrated="$(run_tool rule-profile list --json 2>/dev/null)"
+jassert '.data.items | ((length == 1) and (.[0].id == "default") and (.[0].name == "默认规则") and (.[0].active == true))' "${rp_migrated}" "旧单条规则订阅迁移"
+rp_migrated_get="$(run_tool rule-profile get --json 2>/dev/null)"
+jassert '.data.configured == true and .data.id == "default" and .data.updated_at != ""' "${rp_migrated_get}" "迁移后旧 get 仍可用"
+run_tool rule-profile clear --json >/dev/null 2>&1
+
 run_tool rule-profile set "https://secret.example/config.yaml?token=abc123" --json >/dev/null 2>&1
 if grep -Fq 'token=abc123' "${BOX_HOME}/run/tool.log" 2>/dev/null; then
   bad "tool.log 不泄露规则订阅 token"

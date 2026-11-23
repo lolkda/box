@@ -544,7 +544,7 @@ upgeox_all() {
   bin_name=$original_bin_name
 }
 
-# 订阅清单：每行 名字|URL
+# 订阅清单：每行 名字|URL[|enabled]（第三列可选，0 表示禁用）
 subscriptions_file="${subscriptions_file:-${box_dir}/mihomo/subscriptions.list}"
 # 聚合订阅派生出的 provider 清单（内部运行文件）
 subscriptions_providers_file="${subscriptions_providers_file:-${box_run}/subscriptions.providers}"
@@ -562,6 +562,18 @@ subscription_exists() {
   local wanted="$1"
   [ -f "${subscriptions_file}" ] || return 1
   busybox awk -F'|' -v wanted="${wanted}" '$1 == wanted { found = 1 } END { exit(found ? 0 : 1) }' "${subscriptions_file}"
+}
+
+# 订阅默认启用；第三列为 0 时表示禁用
+subscription_enabled() {
+  local wanted="$1" name url enabled
+  [ -f "${subscriptions_file}" ] || return 0
+  while IFS='|' read -r name url enabled; do
+    [ "${name}" = "${wanted}" ] || continue
+    [ "${enabled}" = "0" ] && return 1
+    return 0
+  done < "${subscriptions_file}"
+  return 0
 }
 
 sub_manifest_source_exists() {
@@ -585,16 +597,23 @@ update_mihomo_providers() {
 
   log Debug "开始更新 proxy-providers 配置项..."
   local temp_providers="${mihomo_config}.providers.tmp"
-  local provider_count=0
+  local provider_count=0 provider_name provider_url enabled aggregate_source local_path
+  provider_name=""
+  provider_url=""
+  enabled=""
 
   echo "proxy-providers:" > "${temp_providers}"
 
   if [ -s "${subscriptions_file}" ]; then
-    while IFS='|' read -r provider_name provider_url; do
+    while IFS='|' read -r provider_name provider_url enabled; do
       case "${provider_name}" in
         ''|\#*) continue ;;
       esac
       [ -n "${provider_url}" ] || continue
+      if [ "${enabled}" = "0" ]; then
+        log Debug "跳过已禁用订阅: ${provider_name}"
+        continue
+      fi
 
       if sub_manifest_source_exists "${provider_name}"; then
         log Debug "跳过聚合订阅自身: ${provider_name}"
@@ -633,6 +652,10 @@ EOF
         ''|\#*) continue ;;
       esac
       [ -n "${provider_url}" ] || continue
+      if ! subscription_enabled "${aggregate_source}"; then
+        log Debug "跳过已禁用聚合订阅的 provider: ${aggregate_source}/${provider_name}"
+        continue
+      fi
 
       local safe_name relative_path escaped_url
       safe_name="$(sub_provider_file_name "${provider_name}")"
@@ -1021,10 +1044,14 @@ upsubs() {
       local total_count=0
       local subscription_mode="${subscription_mode:-auto}"
 
-      while IFS='|' read -r provider_name provider_url; do
+      while IFS='|' read -r provider_name provider_url enabled; do
         case "${provider_name}" in
           ''|\#*) continue ;;
         esac
+        if [ "${enabled}" = "0" ] && [ -z "${only_name}" ]; then
+          log Info "跳过已禁用订阅: ${provider_name}"
+          continue
+        fi
 
         if [ -z "${provider_url}" ]; then
           log Warning "订阅地址为空，跳过: ${provider_name}"
@@ -1160,6 +1187,8 @@ sub_usage() {
   box.tool sub list
   box.tool sub rm <名字>
   box.tool sub update [名字]
+  box.tool sub enable <名字> --json
+  box.tool sub disable <名字> --json
 EOF
 }
 
@@ -1226,7 +1255,7 @@ sub_list() {
 
   printf '%-20s %-44s %s\n' "名字" "地址" "节点文件"
 
-  while IFS='|' read -r name url; do
+  while IFS='|' read -r name url enabled; do
     case "${name}" in
       ''|\#*) continue ;;
     esac
@@ -1243,6 +1272,7 @@ sub_list() {
     else
       state="未下载"
     fi
+    [ "${enabled}" = "0" ] && state="已禁用（${state}）"
 
     printf '%-20s %-44s %s\n' "${name}" "$(mask_url "${url}")" "${state}"
   done < "${subscriptions_file}"
@@ -1433,14 +1463,15 @@ sub_list_json() {
   printf '{"ok":true,"data":{"items":['
   local first=1
   if [ -s "${subscriptions_file}" ]; then
-    while IFS='|' read -r name url; do
+    while IFS='|' read -r name url enabled; do
       case "${name}" in
         ''|\#*) continue ;;
       esac
-      local safe_name provider_file state provider_size updated provider_count
+      local safe_name provider_file state provider_size updated provider_count enabled_bool=true
       safe_name="$(sub_provider_file_name "${name}")"
       provider_file="${mihomo_provide_path}/${safe_name}.yaml"
       provider_count="$(sub_provider_count "${name}")"
+      [ "${enabled}" = "0" ] && enabled_bool=false
       if [ "${provider_count}" -gt 0 ]; then
         state="aggregated"
       elif [ -s "${provider_file}" ]; then
@@ -1456,9 +1487,9 @@ sub_list_json() {
         updated="$(busybox stat -c '%y' "${provider_file}" 2>/dev/null | busybox cut -d. -f1 || true)"
       fi
       [ "${first}" -eq 1 ] || printf ','
-      printf '{"name":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s}' \
+      printf '{"name":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s,"enabled":%s}' \
         "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")" "$(json_quote "${state}")" \
-        "${provider_size}" "${provider_count}" "$(json_quote "${updated}")"
+        "${provider_size}" "${provider_count}" "$(json_quote "${updated}")" "$(json_bool "${enabled_bool}")"
       first=0
     done < "${subscriptions_file}"
   fi
@@ -1476,10 +1507,11 @@ sub_get_json() {
     return 1
   fi
 
-  local name url found=1 safe_name provider_file provider_size provider_count updated
-  while IFS='|' read -r name url; do
+  local name url enabled found=1 safe_name provider_file provider_size provider_count updated enabled_bool=true
+  while IFS='|' read -r name url enabled; do
     [ "${name}" = "${wanted}" ] || continue
     found=0
+    [ "${enabled}" = "0" ] && enabled_bool=false
     safe_name="$(sub_provider_file_name "${name}")"
     provider_file="${mihomo_provide_path}/${safe_name}.yaml"
     provider_count="$(sub_provider_count "${name}")"
@@ -1490,10 +1522,10 @@ sub_get_json() {
       [ -n "${provider_size}" ] || provider_size=0
       updated="$(busybox stat -c '%y' "${provider_file}" 2>/dev/null | busybox cut -d. -f1 || true)"
     fi
-    json_ok "$(printf '{"name":%s,"url":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s}' \
+    json_ok "$(printf '{"name":%s,"url":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s,"enabled":%s}' \
       "$(json_quote "${name}")" "$(json_quote "${url}")" "$(json_quote "$(mask_url "${url}")")" \
       "$(json_quote "$([ "${provider_count}" -gt 0 ] && printf aggregated || { [ -s "${provider_file}" ] && printf downloaded || printf missing; })")" \
-      "${provider_size}" "${provider_count}" "$(json_quote "${updated}")")"
+      "${provider_size}" "${provider_count}" "$(json_quote "${updated}")" "$(json_bool "${enabled_bool}")")"
     return 0
   done < "${subscriptions_file}"
 
@@ -1501,6 +1533,102 @@ sub_get_json() {
     json_error "E_NOT_FOUND" "订阅不存在: ${wanted}"
     return 1
   fi
+}
+
+sub_set_enabled_json() {
+  local name="$1" enabled="$2" refs providers p provider_file missing=false reloaded=false reload_output temp_file derived=false
+  if [ -z "${name}" ]; then
+    json_error "E_USAGE" "缺少订阅名字"
+    return 1
+  fi
+  case "${enabled}" in
+    0|1) ;;
+    *)
+      json_error "E_USAGE" "启用状态必须是 0 或 1"
+      return 1
+      ;;
+  esac
+  if ! subscription_exists "${name}"; then
+    json_error "E_NOT_FOUND" "订阅不存在: ${name}"
+    return 1
+  fi
+  if [ "${auto_modify_config}" != "true" ]; then
+    json_error "E_VALIDATION" "auto_modify_config 未启用，无法自动更新 proxy-providers"
+    return 1
+  fi
+  ensure_yq
+
+  if [ "${enabled}" = "0" ]; then
+    refs="$(${yq} -r '.proxy-groups[]? | (.use // [])[]?' "${mihomo_config}" 2>/dev/null || true)"
+    providers=""
+    if [ -s "${subscriptions_providers_file}" ]; then
+      providers="$(busybox awk -F'|' -v source="${name}" '$1 == source { print $2 }' "${subscriptions_providers_file}")"
+    fi
+    [ -n "${providers}" ] || providers="${name}"
+    while IFS= read -r p; do
+      [ -n "${p}" ] || continue
+      if [ -n "${refs}" ] && printf '%s\n' "${refs}" | busybox grep -Fxq "${p}"; then
+        json_error "E_VALIDATION" "策略组仍显式引用 provider: ${p}，请先修改规则模板"
+        return 1
+      fi
+    done <<EOF
+${providers}
+EOF
+  fi
+
+  temp_file="${subscriptions_file}.tmp.$$"
+  if ! busybox awk -F'|' -v name="${name}" -v enabled="${enabled}" '
+    BEGIN { OFS = "|"; found = 0 }
+    $1 == name { $3 = enabled; found = 1 }
+    { print }
+    END { exit(found ? 0 : 1) }
+  ' "${subscriptions_file}" > "${temp_file}"; then
+    rm -f "${temp_file}"
+    json_error "E_IO" "更新订阅启用状态失败"
+    return 1
+  fi
+  mv "${temp_file}" "${subscriptions_file}" || {
+    rm -f "${temp_file}"
+    json_error "E_IO" "写入订阅清单失败"
+    return 1
+  }
+
+  if ! update_mihomo_providers >/dev/null 2>&1; then
+    json_error "E_IO" "订阅状态已保存，但 proxy-providers 更新失败"
+    return 1
+  fi
+
+  if [ -s "${subscriptions_providers_file}" ]; then
+    while IFS='|' read -r aggregate_source provider_name provider_url local_path; do
+      [ "${aggregate_source}" = "${name}" ] || continue
+      derived=true
+      provider_file="${mihomo_provide_path}/$(sub_provider_file_name "${provider_name}").yaml"
+      [ -s "${provider_file}" ] || missing=true
+    done < "${subscriptions_providers_file}"
+  fi
+  if [ "${derived}" != "true" ]; then
+    provider_file="${mihomo_provide_path}/$(sub_provider_file_name "${name}").yaml"
+    [ -s "${provider_file}" ] || missing=true
+  fi
+
+  if is_box_running; then
+    if reload_output="$(reload 2>&1)"; then
+      reloaded=true
+    else
+      json_error "E_RELOAD" "proxy-providers 已更新，但 mihomo 重载失败" "${reload_output}"
+      return 1
+    fi
+  fi
+
+  json_ok "$(printf '{"name":%s,"enabled":%s,"reloaded":%s,"missing":%s}'     "$(json_quote "${name}")" "$([ "${enabled}" = "1" ] && printf true || printf false)"     "$(json_bool "${reloaded}")" "$(json_bool "${missing}")")"
+}
+
+sub_enable_json() {
+  sub_set_enabled_json "$1" "1"
+}
+
+sub_disable_json() {
+  sub_set_enabled_json "$1" "0"
 }
 
 sub_add_json() {
@@ -1521,7 +1649,7 @@ sub_add_json() {
     json_error "E_VALIDATION" "添加订阅失败" "$(printf '%s' "${output}" | busybox sed -E 's/^[0-9-]+ [0-9:]+ \[[A-Za-z]+\]: //')"
     return 1
   fi
-  json_ok "$(printf '{"name":%s,"url_masked":%s,"provider":"missing","provider_size":0,"provider_count":0,"updated_at":""}' \
+  json_ok "$(printf '{"name":%s,"url_masked":%s,"provider":"missing","provider_size":0,"provider_count":0,"updated_at":"","enabled":true}' \
     "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")")"
 }
 
@@ -2481,7 +2609,7 @@ config_delete_json() {
 }
 
 # ---------------------------------------------------------------------------
-# 全局规则与策略订阅
+# 规则与策略订阅（多订阅）
 # ---------------------------------------------------------------------------
 
 rule_profile_url_file() {
@@ -2494,6 +2622,150 @@ rule_profile_updated_file() {
 
 rule_profile_pending_file() {
   printf '%s/rule-profile.pending.yaml' "${box_run_state}"
+}
+
+rule_profiles_dir() {
+  printf '%s/rule-profiles' "${mihomo_config%/*}"
+}
+
+rule_profiles_active_file() {
+  printf '%s/active' "$(rule_profiles_dir)"
+}
+
+rule_profile_entry_file() {
+  printf '%s/%s.%s' "$(rule_profiles_dir)" "$1" "$2"
+}
+
+rule_profile_safe_id() {
+  local base
+  base="$(sub_provider_file_name "$1")"
+  [ -n "${base}" ] || base="rule"
+  printf '%s' "${base}"
+}
+
+rule_profile_validate_name() {
+  case "$1" in
+    ''|*'|'*)
+      json_error "E_VALIDATION" "规则订阅名称不能为空，也不能包含 |"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+rule_profile_id_exists() {
+  [ -s "$(rule_profile_entry_file "$1" url)" ]
+}
+
+rule_profile_active_id() {
+  local id
+  id="$(cat "$(rule_profiles_active_file)" 2>/dev/null)"
+  [ -n "${id}" ] || return 0
+  if rule_profile_id_exists "${id}"; then
+    printf '%s' "${id}"
+  fi
+}
+
+rule_profile_selected_id() {
+  local id file
+  rule_profile_ensure_layout || return 1
+  id="$(rule_profile_active_id)"
+  if [ -n "${id}" ]; then
+    printf '%s' "${id}"
+    return 0
+  fi
+  for file in "$(rule_profiles_dir)"/*.url; do
+    [ -s "${file}" ] || continue
+    id="${file##*/}"
+    printf '%s' "${id%.url}"
+    return 0
+  done
+  return 1
+}
+
+rule_profile_name_exists() {
+  local wanted="$1" exclude="$2" file id
+  for file in "$(rule_profiles_dir)"/*.name; do
+    [ -s "${file}" ] || continue
+    id="${file##*/}"
+    id="${id%.name}"
+    [ "${id}" = "${exclude}" ] && continue
+    [ "$(cat "${file}" 2>/dev/null)" = "${wanted}" ] && return 0
+  done
+  return 1
+}
+
+rule_profile_unique_id() {
+  local base candidate count
+  base="$(rule_profile_safe_id "$1")"
+  candidate="${base}"
+  count=2
+  while rule_profile_id_exists "${candidate}"; do
+    candidate="${base}-${count}"
+    count=$((count + 1))
+  done
+  printf '%s' "${candidate}"
+}
+
+rule_profile_write_entry() {
+  local dest="$1" value="$2" tmp
+  tmp="${dest}.tmp.$$"
+  printf '%s\n' "${value}" > "${tmp}" || return 1
+  chmod 0600 "${tmp}" >/dev/null 2>&1 || true
+  mv "${tmp}" "${dest}" || {
+    rm -f "${tmp}" 2>/dev/null
+    return 1
+  }
+  return 0
+}
+
+rule_profile_remove_entry() {
+  local id="$1" suffix
+  for suffix in url name pending.yaml pending.yaml.bak fetched_at applied_at counts; do
+    rm -f "$(rule_profile_entry_file "${id}" "${suffix}")" 2>/dev/null
+  done
+}
+
+rule_profile_ensure_layout() {
+  local dir legacy_url legacy_pending legacy_updated
+  dir="$(rule_profiles_dir)"
+  mkdir -p "${dir}" || {
+    json_error "E_IO" "无法创建规则订阅目录"
+    return 1
+  }
+  chmod 0700 "${dir}" >/dev/null 2>&1 || true
+
+  legacy_url="$(rule_profile_url_file)"
+  legacy_pending="$(rule_profile_pending_file)"
+  legacy_updated="$(rule_profile_updated_file)"
+
+  if [ -s "${legacy_url}" ] && [ ! -s "${dir}/default.url" ]; then
+    rule_profile_write_entry "${dir}/default.name" "默认规则" || return 1
+    cp "${legacy_url}" "${dir}/default.url" 2>/dev/null || return 1
+    chmod 0600 "${dir}/default.url" >/dev/null 2>&1 || true
+    if [ -s "${legacy_pending}" ]; then
+      cp "${legacy_pending}" "${dir}/default.pending.yaml" 2>/dev/null || return 1
+      chmod 0600 "${dir}/default.pending.yaml" >/dev/null 2>&1 || true
+    fi
+    if [ -s "${legacy_updated}" ]; then
+      rule_profile_write_entry "${dir}/default.applied_at" "$(cat "${legacy_updated}" 2>/dev/null)" || return 1
+      rule_profile_write_entry "$(rule_profiles_active_file)" "default" || return 1
+    fi
+  fi
+
+  if [ -s "${legacy_url}" ] && [ -s "${dir}/default.url" ]; then
+    rm -f "${legacy_url}" "${legacy_pending}" "${legacy_updated}" 2>/dev/null
+  fi
+  if [ -s "${dir}/default.url" ] && [ ! -s "${dir}/default.name" ]; then
+    rule_profile_write_entry "${dir}/default.name" "默认规则" || return 1
+  fi
+
+  local active
+  active="$(cat "$(rule_profiles_active_file)" 2>/dev/null)"
+  if [ -n "${active}" ] && ! rule_profile_id_exists "${active}"; then
+    rm -f "$(rule_profiles_active_file)" 2>/dev/null
+  fi
+  return 0
 }
 
 rule_profile_counts_json() {
@@ -2510,28 +2782,87 @@ rule_profile_counts_json() {
   printf '{"groups":%s,"rule_providers":%s,"rules":%s}' "${groups}" "${providers}" "${rules}"
 }
 
+rule_profile_item_counts() {
+  local id="$1" pending counts
+  pending="$(rule_profile_entry_file "${id}" pending.yaml)"
+  if [ -s "${pending}" ]; then
+    rule_profile_counts_json "${pending}"
+    return 0
+  fi
+  if [ "$(rule_profile_active_id)" = "${id}" ]; then
+    rule_profile_counts_json "${mihomo_config}"
+    return 0
+  fi
+  counts="$(rule_profile_entry_file "${id}" counts)"
+  if [ -s "${counts}" ]; then
+    cat "${counts}" 2>/dev/null
+    return 0
+  fi
+  printf '{"groups":0,"rule_providers":0,"rules":0}'
+}
+
+rule_profile_item_json() {
+  local id="$1" name url active=false pending=false fetched applied counts
+  ensure_yq
+  name="$(cat "$(rule_profile_entry_file "${id}" name)" 2>/dev/null)"
+  [ -n "${name}" ] || name="${id}"
+  url="$(cat "$(rule_profile_entry_file "${id}" url)" 2>/dev/null)"
+  [ "$(rule_profile_active_id)" = "${id}" ] && active=true
+  [ -s "$(rule_profile_entry_file "${id}" pending.yaml)" ] && pending=true
+  fetched="$(cat "$(rule_profile_entry_file "${id}" fetched_at)" 2>/dev/null)"
+  applied="$(cat "$(rule_profile_entry_file "${id}" applied_at)" 2>/dev/null)"
+  counts="$(rule_profile_item_counts "${id}")"
+  printf '{"id":%s,"name":%s,"url_masked":%s,"active":%s,"pending":%s,"fetched_at":%s,"applied_at":%s,"counts":%s,"can_delete":%s}' \
+    "$(json_quote "${id}")" "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")" \
+    "$(json_bool "${active}")" "$(json_bool "${pending}")" \
+    "$(json_quote "${fetched}")" "$(json_quote "${applied}")" "${counts}" \
+    "$(json_bool "$([ "${active}" = true ] && printf false || printf true)")"
+}
+
+rule_profile_list_json() {
+  local supported=false items="" file id item
+  [ "${bin_name}" = "mihomo" ] && supported=true
+  ensure_yq
+  if ! rule_profile_ensure_layout; then
+    return 1
+  fi
+  for file in "$(rule_profiles_dir)"/*.url; do
+    [ -s "${file}" ] || continue
+    id="${file##*/}"
+    id="${id%.url}"
+    item="$(rule_profile_item_json "${id}")" || return 1
+    items="${items}${items:+,}${item}"
+  done
+  json_ok "$(printf '{"supported":%s,"items":[%s]}' "$(json_bool "${supported}")" "${items}")"
+}
+
 rule_profile_get_json() {
   ensure_yq
-  local supported=false
+  local supported=false id configured=false name="" url_masked="" updated="" counts='{"groups":0,"rule_providers":0,"rules":0}'
   [ "${bin_name}" = "mihomo" ] && supported=true
-  local url_file configured=false url_masked=""
-  url_file="$(rule_profile_url_file)"
-  if [ -s "${url_file}" ]; then
-    configured=true
-    url_masked="$(mask_url "$(cat "${url_file}" 2>/dev/null)")"
+  if ! rule_profile_ensure_layout; then
+    return 1
   fi
-  local updated=""
-  [ -f "$(rule_profile_updated_file)" ] && updated="$(cat "$(rule_profile_updated_file)" 2>/dev/null)"
-  local data
-  data="$(printf '{"supported":%s,"configured":%s,"url_masked":%s,"updated_at":%s,"counts":%s}' \
+  id="$(rule_profile_selected_id 2>/dev/null || true)"
+  if [ -n "${id}" ]; then
+    configured=true
+    name="$(cat "$(rule_profile_entry_file "${id}" name)" 2>/dev/null)"
+    [ -n "${name}" ] || name="${id}"
+    url_masked="$(mask_url "$(cat "$(rule_profile_entry_file "${id}" url)" 2>/dev/null)")"
+    updated="$(cat "$(rule_profile_entry_file "${id}" applied_at)" 2>/dev/null)"
+    counts="$(rule_profile_item_counts "${id}")"
+    if [ ! -s "$(rule_profile_entry_file "${id}" pending.yaml)" ] && [ ! -s "$(rule_profile_entry_file "${id}" counts)" ]; then
+      counts="$(rule_profile_counts_json "${mihomo_config}")"
+    fi
+  fi
+  json_ok "$(printf '{"supported":%s,"configured":%s,"id":%s,"name":%s,"url_masked":%s,"updated_at":%s,"counts":%s}' \
     "$(json_bool "${supported}")" "$(json_bool "${configured}")" \
-    "$(json_quote "${url_masked}")" "$(json_quote "${updated}")" \
-    "$(rule_profile_counts_json)")"
-  json_ok "${data}"
+    "$(json_quote "${id}")" "$(json_quote "${name}")" "$(json_quote "${url_masked}")" \
+    "$(json_quote "${updated}")" "${counts}")"
 }
 
 rule_profile_set_json() {
-  local url="$1"
+  local url="$1" id
   if [ "${bin_name}" != "mihomo" ]; then
     json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
     return 1
@@ -2543,43 +2874,111 @@ rule_profile_set_json() {
       return 1
       ;;
   esac
-  local url_file tmp_file
-  url_file="$(rule_profile_url_file)"
-  mkdir -p "$(dirname "${url_file}")" || {
-    json_error "E_IO" "无法创建规则订阅目录"
-    return 1
-  }
-  tmp_file="${url_file}.tmp.$$"
-  printf '%s\n' "${url}" > "${tmp_file}" || {
+  ensure_yq
+  rule_profile_ensure_layout || return 1
+  id="$(rule_profile_selected_id 2>/dev/null || true)"
+  if [ -z "${id}" ]; then
+    id="default"
+    rule_profile_write_entry "$(rule_profile_entry_file "${id}" name)" "默认规则" || {
+      json_error "E_IO" "无法保存规则订阅名称"
+      return 1
+    }
+  fi
+  rule_profile_write_entry "$(rule_profile_entry_file "${id}" url)" "${url}" || {
     json_error "E_IO" "无法保存规则模板地址"
     return 1
   }
-  chmod 0600 "${tmp_file}" >/dev/null 2>&1 || true
-  mv "${tmp_file}" "${url_file}" || {
-    rm -f "${tmp_file}"
-    json_error "E_IO" "无法保存规则模板地址"
-    return 1
-  }
-  rm -f "$(rule_profile_pending_file)" "$(rule_profile_pending_file).bak" 2>/dev/null
+  rm -f "$(rule_profile_entry_file "${id}" pending.yaml)" "$(rule_profile_entry_file "${id}" pending.yaml.bak)" \
+    "$(rule_profile_entry_file "${id}" fetched_at)" "$(rule_profile_entry_file "${id}" counts)" 2>/dev/null
   rule_profile_get_json
 }
 
-rule_profile_clear_json() {
-  local url_file
-  url_file="$(rule_profile_url_file)"
-  rm -f "${url_file}" "$(rule_profile_updated_file)" \
-    "$(rule_profile_pending_file)" "$(rule_profile_pending_file).bak" 2>/dev/null
-  json_ok '{"cleared":true}'
-}
-
 rule_profile_url_json() {
-  local url_file
-  url_file="$(rule_profile_url_file)"
-  if [ ! -s "${url_file}" ]; then
+  local id="$1" url
+  rule_profile_ensure_layout || return 1
+  [ -n "${id}" ] || id="$(rule_profile_selected_id 2>/dev/null || true)"
+  if [ -z "${id}" ] || ! rule_profile_id_exists "${id}"; then
     json_error "E_NOT_FOUND" "还没有配置规则与策略订阅"
     return 1
   fi
-  json_ok "$(printf '{"url":%s}' "$(json_quote "$(cat "${url_file}" 2>/dev/null)")")"
+  url="$(cat "$(rule_profile_entry_file "${id}" url)" 2>/dev/null)"
+  json_ok "$(printf '{"id":%s,"url":%s}' "$(json_quote "${id}")" "$(json_quote "${url}")")"
+}
+
+rule_profile_add_json() {
+  local name="$1" url="$2" id
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
+    return 1
+  fi
+  rule_profile_validate_name "${name}" || return 1
+  case "${url}" in
+    http://*|https://*) ;;
+    *)
+      json_error "E_VALIDATION" "规则模板地址必须以 http:// 或 https:// 开头"
+      return 1
+      ;;
+  esac
+  ensure_yq
+  rule_profile_ensure_layout || return 1
+  if rule_profile_name_exists "${name}" ""; then
+    json_error "E_VALIDATION" "规则订阅名称已存在: ${name}"
+    return 1
+  fi
+  id="$(rule_profile_unique_id "${name}")"
+  rule_profile_write_entry "$(rule_profile_entry_file "${id}" name)" "${name}" || {
+    json_error "E_IO" "无法保存规则订阅名称"
+    return 1
+  }
+  rule_profile_write_entry "$(rule_profile_entry_file "${id}" url)" "${url}" || {
+    rule_profile_remove_entry "${id}"
+    json_error "E_IO" "无法保存规则模板地址"
+    return 1
+  }
+  json_ok "$(rule_profile_item_json "${id}")"
+}
+
+rule_profile_edit_json() {
+  local id="$1" name="$2" url="$3" old_url
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
+    return 1
+  fi
+  rule_profile_ensure_layout || return 1
+  if ! rule_profile_id_exists "${id}"; then
+    json_error "E_NOT_FOUND" "规则订阅不存在: ${id}"
+    return 1
+  fi
+  rule_profile_validate_name "${name}" || return 1
+  case "${url}" in
+    http://*|https://*) ;;
+    *)
+      json_error "E_VALIDATION" "规则模板地址必须以 http:// 或 https:// 开头"
+      return 1
+      ;;
+  esac
+  if rule_profile_name_exists "${name}" "${id}"; then
+    json_error "E_VALIDATION" "规则订阅名称已存在: ${name}"
+    return 1
+  fi
+  ensure_yq
+  old_url="$(cat "$(rule_profile_entry_file "${id}" url)" 2>/dev/null)"
+  rule_profile_write_entry "$(rule_profile_entry_file "${id}" name)" "${name}" || {
+    json_error "E_IO" "无法保存规则订阅名称"
+    return 1
+  }
+  if [ "${old_url}" != "${url}" ]; then
+    rule_profile_write_entry "$(rule_profile_entry_file "${id}" url)" "${url}" || {
+      json_error "E_IO" "无法保存规则模板地址"
+      return 1
+    }
+    rm -f "$(rule_profile_entry_file "${id}" pending.yaml)" "$(rule_profile_entry_file "${id}" pending.yaml.bak)" \
+      "$(rule_profile_entry_file "${id}" fetched_at)" "$(rule_profile_entry_file "${id}" counts)" 2>/dev/null
+    if [ "$(rule_profile_active_id)" = "${id}" ]; then
+      rm -f "$(rule_profiles_active_file)" "$(rule_profile_entry_file "${id}" applied_at)" 2>/dev/null
+    fi
+  fi
+  json_ok "$(rule_profile_item_json "${id}")"
 }
 
 rule_profile_preserve_dns_providers() {
@@ -2625,21 +3024,19 @@ rule_profile_download_json() {
   return 0
 }
 
-rule_profile_fetch_json() {
-  if [ "${bin_name}" != "mihomo" ]; then
-    json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
+rule_profile_fetch_internal() {
+  local id="$1" url pending tmp_file counts fetched
+  if ! rule_profile_id_exists "${id}"; then
+    json_error "E_NOT_FOUND" "规则订阅不存在: ${id}"
     return 1
   fi
-  local url_file url
-  url_file="$(rule_profile_url_file)"
-  if [ ! -s "${url_file}" ]; then
-    json_error "E_NOT_FOUND" "还没有配置规则与策略订阅"
+  url="$(cat "$(rule_profile_entry_file "${id}" url)" 2>/dev/null)"
+  if [ -z "${url}" ]; then
+    json_error "E_VALIDATION" "规则订阅地址为空"
     return 1
   fi
-  url="$(cat "${url_file}" 2>/dev/null)"
   ensure_yq
-  local pending tmp_file
-  pending="$(rule_profile_pending_file)"
+  pending="$(rule_profile_entry_file "${id}" pending.yaml)"
   tmp_file="${pending}.tmp.$$"
   rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
   if ! rule_profile_download_json "${tmp_file}" "${url}"; then
@@ -2663,25 +3060,51 @@ rule_profile_fetch_json() {
     json_error "E_IO" "无法保存待应用的规则模板"
     return 1
   }
-  local data
-  data="$(printf '{"url_masked":%s,"fetched_at":%s,"counts":%s}' \
-    "$(json_quote "$(mask_url "${url}")")" \
-    "$(json_quote "$(date '+%Y-%m-%dT%H:%M:%S%z')")" \
-    "$(rule_profile_counts_json "${pending}")")"
-  json_ok "${data}"
+  counts="$(rule_profile_counts_json "${pending}")"
+  fetched="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  rule_profile_write_entry "$(rule_profile_entry_file "${id}" counts)" "${counts}" || true
+  rule_profile_write_entry "$(rule_profile_entry_file "${id}" fetched_at)" "${fetched}" || true
+  return 0
 }
 
-rule_profile_apply_json() {
-  local do_reload="${1:-false}"
+rule_profile_update_json() {
+  local id="$1"
   if [ "${bin_name}" != "mihomo" ]; then
     json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
     return 1
   fi
-  local pending apply_output updated
-  pending="$(rule_profile_pending_file)"
-  if [ ! -s "${pending}" ]; then
-    json_error "E_NOT_FOUND" "没有待应用的规则模板，请先更新"
+  rule_profile_ensure_layout || return 1
+  [ -n "${id}" ] || id="$(rule_profile_selected_id 2>/dev/null || true)"
+  if [ -z "${id}" ] || ! rule_profile_id_exists "${id}"; then
+    json_error "E_NOT_FOUND" "没有可更新的规则订阅"
     return 1
+  fi
+  if ! rule_profile_fetch_internal "${id}"; then
+    return 1
+  fi
+  json_ok "$(rule_profile_item_json "${id}")"
+}
+
+rule_profile_use_json() {
+  local id="$1"
+  local do_reload="${2:-false}"
+  local pending apply_output updated counts name reload_output
+  local reloaded=false
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
+    return 1
+  fi
+  rule_profile_ensure_layout || return 1
+  [ -n "${id}" ] || id="$(rule_profile_selected_id 2>/dev/null || true)"
+  if [ -z "${id}" ] || ! rule_profile_id_exists "${id}"; then
+    json_error "E_NOT_FOUND" "没有可使用的规则订阅"
+    return 1
+  fi
+  pending="$(rule_profile_entry_file "${id}" pending.yaml)"
+  if [ ! -s "${pending}" ]; then
+    if ! rule_profile_fetch_internal "${id}"; then
+      return 1
+    fi
   fi
   ensure_yq
   if ! rule_profile_preserve_dns_providers "${pending}"; then
@@ -2697,10 +3120,17 @@ rule_profile_apply_json() {
   fi
   update_mihomo_rulesets >/dev/null 2>&1 || log Warning "规则集前缀更新失败，请手动检查配置文件"
   updated="$(date '+%Y-%m-%dT%H:%M:%S%z')"
-  printf '%s\n' "${updated}" > "$(rule_profile_updated_file)" 2>/dev/null || true
+  counts="$(rule_profile_counts_json "${pending}")"
+  rule_profile_write_entry "$(rule_profile_entry_file "${id}" applied_at)" "${updated}" || true
+  rule_profile_write_entry "$(rule_profile_entry_file "${id}" counts)" "${counts}" || true
+  if ! rule_profile_write_entry "$(rule_profiles_active_file)" "${id}"; then
+    json_error "E_IO" "配置已写入，但无法保存当前使用的规则订阅"
+    return 1
+  fi
   rm -f "${pending}" "${pending}.bak" 2>/dev/null
+  name="$(cat "$(rule_profile_entry_file "${id}" name)" 2>/dev/null)"
+  [ -n "${name}" ] || name="${id}"
 
-  local reloaded=false reload_output data
   if [ "${do_reload}" = "true" ] && is_box_running; then
     if reload_output="$(reload 2>&1)"; then
       reloaded=true
@@ -2710,10 +3140,51 @@ rule_profile_apply_json() {
     fi
   fi
 
-  data="$(printf '{"changed":["proxy-groups","rule-providers","rules"],"reloaded":%s,"updated_at":%s,"counts":%s}' \
-    "$(json_bool "${reloaded}")" "$(json_quote "${updated}")" \
-    "$(rule_profile_counts_json)")"
-  json_ok "${data}"
+  json_ok "$(printf '{"id":%s,"name":%s,"changed":["proxy-groups","rule-providers","rules"],"reloaded":%s,"updated_at":%s,"counts":%s}' \
+    "$(json_quote "${id}")" "$(json_quote "${name}")" "$(json_bool "${reloaded}")" \
+    "$(json_quote "${updated}")" "${counts}")"
+}
+
+rule_profile_remove_json() {
+  local id="$1"
+  rule_profile_ensure_layout || return 1
+  if [ -z "${id}" ] || ! rule_profile_id_exists "${id}"; then
+    json_error "E_NOT_FOUND" "规则订阅不存在"
+    return 1
+  fi
+  if [ "$(rule_profile_active_id)" = "${id}" ]; then
+    json_error "E_VALIDATION" "当前使用中的规则订阅不能删除，请先停用或使用另一条"
+    return 1
+  fi
+  rule_profile_remove_entry "${id}"
+  json_ok "$(printf '{"removed":true,"id":%s}' "$(json_quote "${id}")")"
+}
+
+rule_profile_deactivate_json() {
+  rule_profile_ensure_layout || return 1
+  rm -f "$(rule_profiles_active_file)" 2>/dev/null
+  json_ok '{"active":false}'
+}
+
+rule_profile_clear_json() {
+  # 兼容旧版 WebUI 的全局清除；新 UI 使用 remove/deactivate。
+  local dir
+  rule_profile_ensure_layout || return 1
+  dir="$(rule_profiles_dir)"
+  if [ -n "${dir}" ] && [ "${dir}" != "/" ]; then
+    rm -rf "${dir}" 2>/dev/null
+  fi
+  rm -f "$(rule_profile_url_file)" "$(rule_profile_updated_file)" \
+    "$(rule_profile_pending_file)" "$(rule_profile_pending_file).bak" 2>/dev/null
+  json_ok '{"cleared":true}'
+}
+
+rule_profile_fetch_json() {
+  rule_profile_update_json "$1"
+}
+
+rule_profile_apply_json() {
+  rule_profile_use_json "$1" "${2:-false}"
 }
 
 logs_clear_json() {
@@ -3747,27 +4218,54 @@ case "$1" in
       get)
         rule_profile_get_json
         ;;
+      list|ls)
+        rule_profile_list_json
+        ;;
+      add)
+        rule_profile_add_json "$3" "$4"
+        ;;
+      edit)
+        rule_profile_edit_json "$3" "$4" "$5"
+        ;;
       set)
         rule_profile_set_json "$3"
         ;;
       clear)
         rule_profile_clear_json
         ;;
+      deactivate)
+        rule_profile_deactivate_json
+        ;;
       url)
-        rule_profile_url_json
-        ;;
-      fetch)
-        rule_profile_fetch_json
-        ;;
-      apply)
-        if [ "$3" = "--reload" ]; then
-          rule_profile_apply_json true
+        if [ "$3" = "--json" ] || [ -z "$3" ]; then
+          rule_profile_url_json ""
         else
-          rule_profile_apply_json false
+          rule_profile_url_json "$3"
         fi
         ;;
+      update|fetch)
+        if [ "$3" = "--json" ] || [ -z "$3" ]; then
+          rule_profile_update_json ""
+        else
+          rule_profile_update_json "$3"
+        fi
+        ;;
+      use|apply)
+        if [ "$3" = "--json" ] || [ -z "$3" ]; then
+          rule_profile_use_json "" false
+        elif [ "$3" = "--reload" ]; then
+          rule_profile_use_json "" true
+        elif [ "$4" = "--reload" ]; then
+          rule_profile_use_json "$3" true
+        else
+          rule_profile_use_json "$3" false
+        fi
+        ;;
+      remove|rm|del)
+        rule_profile_remove_json "$3"
+        ;;
       *)
-        json_error "E_USAGE" "用法: $0 rule-profile {get|set <url>|url|clear|fetch|apply [--reload]} --json"
+        json_error "E_USAGE" "用法: $0 rule-profile {get|list|add <name> <url>|edit <id> <name> <url>|url [id]|update [id]|use <id> [--reload]|remove <id>|deactivate|set <url>|clear|fetch [id]|apply [id] [--reload]} --json"
         ;;
     esac
     ;;
@@ -3856,6 +4354,12 @@ case "$1" in
         else
           sub_rm "$3"
         fi
+        ;;
+      enable)
+        sub_enable_json "$3"
+        ;;
+      disable)
+        sub_disable_json "$3"
         ;;
       update|up)
         if has_json_arg "$@"; then

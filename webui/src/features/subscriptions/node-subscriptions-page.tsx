@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { DownloadCloud, Pencil, Plus, RefreshCcw, RadioTower, Trash2 } from "lucide-react";
+import { DownloadCloud, Pencil, Plus, Power, RefreshCcw, RadioTower, Trash2 } from "lucide-react";
 import { api } from "../../api/client";
 import { queryKeys, useSubscriptionsQuery, useTaskStart } from "../../api/queries";
 import type { Subscription } from "../../api/types";
@@ -17,7 +17,7 @@ import { Input } from "../../components/ui/input";
 import { Sheet } from "../../components/ui/sheet";
 import { PageSkeleton } from "../../components/ui/skeleton";
 import { useToast } from "../../components/ui/toast";
-import { formatBytes, formatDateTime, getErrorMessage } from "../../lib/utils";
+import { cn, formatBytes, formatDateTime, getErrorMessage } from "../../lib/utils";
 
 interface SubscriptionForm {
   name: string;
@@ -37,6 +37,8 @@ export function NodeSubscriptionsPage() {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<Subscription | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [toggleTarget, setToggleTarget] = useState<Subscription | null>(null);
+  const [toggling, setToggling] = useState(false);
   const [updatingAll, setUpdatingAll] = useState(false);
 
   useEffect(() => {
@@ -128,6 +130,32 @@ export function NodeSubscriptionsPage() {
     }
   };
 
+  const toggleEnabled = async () => {
+    if (!toggleTarget) return;
+    const next = !toggleTarget.enabled;
+    setToggling(true);
+    try {
+      const result = await api.setSubscriptionEnabled(toggleTarget.name, next);
+      toast({
+        title: next ? "已启用节点订阅" : "已禁用节点订阅",
+        description: next
+          ? result.missing ? "节点文件不存在，请点“立即更新”拉取" : "节点已恢复到 proxy-providers"
+          : "节点已移出 proxy-providers，URL 和本地文件保留",
+        tone: "success",
+      });
+      setToggleTarget(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.subscriptions }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.config }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+      ]);
+    } catch (error) {
+      toast({ title: next ? "启用订阅失败" : "禁用订阅失败", description: getErrorMessage(error), tone: "error" });
+    } finally {
+      setToggling(false);
+    }
+  };
+
   const updateAll = async () => {
     setUpdatingAll(true);
     try {
@@ -171,23 +199,32 @@ export function NodeSubscriptionsPage() {
       ) : (
         <div className="space-y-3">
           {items.map((subscription) => (
-            <Card key={subscription.name} className="overflow-hidden">
+            <Card key={subscription.name} className={cn("overflow-hidden", !subscription.enabled && "opacity-70")}>
               <div className="p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <h2 className="truncate text-[15px] font-semibold text-fg">{subscription.name}</h2>
-                      <Badge tone={subscription.provider === "downloaded" || subscription.provider === "aggregated" ? "success" : "warning"}>
-                        {subscription.provider === "aggregated"
-                          ? `${subscription.provider_count} 个 provider`
-                          : subscription.provider === "downloaded" ? "已下载" : "未下载"}
-                      </Badge>
+                      {subscription.enabled === false ? (
+                        <Badge tone="neutral">已禁用</Badge>
+                      ) : (
+                        <Badge tone={subscription.provider === "downloaded" || subscription.provider === "aggregated" ? "success" : "warning"}>
+                          {subscription.provider === "aggregated"
+                            ? `${subscription.provider_count} 个 provider`
+                            : subscription.provider === "downloaded" ? "已下载" : "未下载"}
+                        </Badge>
+                      )}
                     </div>
                     <p className="mt-1 truncate font-mono text-[11px] text-fg-muted">{subscription.url_masked}</p>
                   </div>
                   <ActionsMenu
                     items={[
-                      { label: "立即更新", icon: <RefreshCcw size={14} />, onSelect: () => void updateOne(subscription) },
+                      ...(subscription.enabled !== false ? [{ label: "立即更新", icon: <RefreshCcw size={14} />, onSelect: () => void updateOne(subscription) }] : []),
+                      {
+                        label: subscription.enabled === false ? "启用订阅" : "禁用订阅",
+                        icon: <Power size={14} />,
+                        onSelect: () => setToggleTarget(subscription),
+                      },
                       { label: "编辑", icon: <Pencil size={14} />, onSelect: () => openEdit(subscription) },
                       { label: "删除", icon: <Trash2 size={14} />, destructive: true, onSelect: () => setDeleting(subscription) },
                     ]}
@@ -245,6 +282,18 @@ export function NodeSubscriptionsPage() {
           </p>
         </div>
       </Sheet>
+
+      <ConfirmDialog
+        open={Boolean(toggleTarget)}
+        onOpenChange={(open) => { if (!open && !toggling) setToggleTarget(null); }}
+        title={toggleTarget?.enabled === false ? `启用节点订阅「${toggleTarget?.name || ""}」？` : `禁用节点订阅「${toggleTarget?.name || ""}」？`}
+        description={toggleTarget?.enabled === false
+          ? "会把该订阅重新加入 proxy-providers；如果本地节点文件不存在，请启用后点“立即更新”。"
+          : "会从 proxy-providers 移除该订阅及其派生 provider，节点不再参与策略组；URL 和本地文件保留。当前策略组显式引用该 provider 时会拒绝禁用。"}
+        confirmLabel={toggleTarget?.enabled === false ? "启用" : "禁用"}
+        loading={toggling}
+        onConfirm={() => void toggleEnabled()}
+      />
 
       <ConfirmDialog
         open={Boolean(deleting)}

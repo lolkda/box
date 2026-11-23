@@ -4,9 +4,9 @@
 
 - 文档标识：module-subscription-auto-provider
 - 规格状态：草稿
-- 最后更新：2026-11-23
+- 最后更新：2026-11-24
 - 实现状态：已实现
-- 验证状态：部分完成（本地 shell 85/85、前端 15/15、类型检查、WebUI 与模块包构建通过；安装器首次重置未执行真机验证）
+- 验证状态：部分完成（本地 shell 138/138、前端 28/28、类型检查、WebUI 与模块包构建通过；安装器首次重置未执行真机验证）
 - 关联文档：[module-subscription.md](module-subscription.md)（现有 provider 订阅链路历史规格）
 - 关联文档：[module-settings-json.md](module-settings-json.md)（settings.json 数据层）
 
@@ -170,6 +170,7 @@
   - 订阅列表仍只显示一条聚合订阅
   - 显示该聚合订阅的派生 provider 数量
   - 普通 provider 订阅仍显示原有节点文件状态
+  - 已禁用订阅显示“已禁用”，操作菜单提供“启用订阅”；启用订阅提供“禁用订阅”
   - 聚合更新失败时显示明确错误，不显示为成功
 - 输出或状态变化：订阅页可见聚合 provider 数量
 - 边界与失败行为：派生清单不存在时显示 `0` 或 `未展开`，不崩溃
@@ -198,10 +199,23 @@
 - 输出或状态变化：没有订阅时 mihomo 不产生无效 provider URL 错误
 - 边界与失败行为：不删除用户已有自定义 groups/rules（首次重置除外）
 
+### R-011：启用/禁用节点订阅
+
+- 参与者或触发方：订阅页操作菜单、`box.tool sub enable/disable --json`。
+- 前置条件与输入：订阅存在；服务可能运行中。
+- 必须满足的行为：
+  - 禁用为软禁用：保留 URL 和本地 provider 文件，从 `proxy-providers` 移除该订阅（聚合订阅移除其全部派生 provider），停止自动更新。
+  - 启用后重新加入 `proxy-providers`；本地文件存在时恢复节点，文件缺失时返回 `missing=true`，提示用户更新。
+  - 修改后立即重建 `proxy-providers`；服务运行中立即 reload，重载失败保留已写入配置并返回 `E_RELOAD`。
+  - 如果任何策略组的 `use` 显式引用待移除的 provider，拒绝禁用并返回 `E_VALIDATION`。
+  - 状态写入 `subscriptions.list` 可选第三列，`0` 表示禁用；缺省视为启用。
+- 输出或状态变化：`sub list/get --json` 返回 `enabled`；配置和运行状态更新。
+- 边界与失败行为：`auto_modify_config=false` 时拒绝；更新 `proxy-providers` 失败返回 `E_IO`；不得删除订阅 URL 或 provider 文件。
+
 ### 相关约束
 
 - 订阅和 provider URL 都可能包含 token，日志、错误详情和测试输出必须掩码。
-- `subscriptions.list` 用户格式保持每行 `名字|URL`。
+- `subscriptions.list` 用户格式前两列保持 `名字|URL`，第三列可选 `enabled`；缺省为启用。
 - 派生清单是内部运行文件，不改变用户订阅格式。
 - 不修改 `proxy-groups`、`rules`、`rule-providers` 是硬约束。
 - Q-001、Q-002 未决期间，不实现 provider 收缩或删除聚合订阅的自动清理。
@@ -279,6 +293,15 @@
 - 考虑过的备选：只删 renew；每次升级重置；只替换配置占位。
 - 未采用原因：只删 renew 需要兼容逻辑；每次重置丢设置；占位替换不足以清空旧配置。
 - 影响范围：R-009、R-010、AC-007、AC-008。
+
+### D-009：软禁用而非删除
+
+- 状态：已确认
+- 结论：禁用只从 `proxy-providers` 移除并停止自动更新，保留 URL 和本地文件；策略组 `use` 显式引用时拒绝禁用；服务运行中立即重载。
+- 理由：临时停用不应丢数据，也不应产生悬空 provider 引用。
+- 考虑过的备选：只暂停更新；允许悬空引用；自动删除 `use` 引用。
+- 未采用原因：只暂停更新节点仍可用；悬空引用会导致重载失败；自动改模板不可控。
+- 影响范围：R-011、AC-010。
 
 ## 6. 验收标准
 
@@ -362,6 +385,15 @@
 - 预期结果：只有 `proxy-providers` 段变化；其他段完全保持
 - 验证状态：通过
 - 验证证据：`test/module-webui.test.sh` 聚合前后 groups/rules 哈希比较通过
+
+### AC-010：启用/禁用节点订阅
+
+- 对应规则：R-011
+- 前置条件：订阅已添加；服务未运行或运行中。
+- 操作或输入：禁用订阅；检查 `proxy-providers`；启用；检查配置；让策略组 `use` 引用 provider 后再次禁用。
+- 预期结果：禁用后 provider 条目移除，URL 和文件保留；启用后恢复；`enabled` 在列表/详情中正确；显式 `use` 引用时返回 `E_VALIDATION`。
+- 验证状态：通过
+- 验证证据：`test/module-webui.test.sh` 覆盖普通订阅禁用/启用、聚合订阅派生 provider 移除/恢复、`use` 引用阻止；前端测试覆盖禁用菜单和“已禁用”徽标；截图：[禁用节点订阅](../design/node-subscription-disabled.png)。
 
 ## 7. 未决问题与假设
 
@@ -485,6 +517,7 @@ else:
 - `webui/src/lib/settings.ts` 增加“订阅模式”选择项，取值为 `auto`、`provider`。
 - `renew` 从设置字段列表移除。
 - 订阅页在聚合订阅行显示派生 provider 数量，数量来自 `box.tool sub list --json` 的扩展字段。
+- 订阅卡片操作菜单增加“禁用订阅/启用订阅”，禁用状态显示“已禁用”徽标；禁用/启用前显示确认对话框。
 - 不新增独立页面，不展开派生 provider 为用户条目。
 
 ### 8.7 测试设计

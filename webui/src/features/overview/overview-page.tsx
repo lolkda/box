@@ -15,15 +15,15 @@ import {
 } from "lucide-react";
 import { api } from "../../api/client";
 import type { ServiceAction } from "../../api/types";
-import { queryKeys, useLogsQuery, useStatusQuery } from "../../api/queries";
+import { queryKeys, useStatusQuery } from "../../api/queries";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
-import { Card, CardBody, CardHeader } from "../../components/ui/card";
+import { Card } from "../../components/ui/card";
 import { ErrorState } from "../../components/ui/error-state";
 import { PageSkeleton } from "../../components/ui/skeleton";
 import { PageTitle } from "../../components/ui/page-title";
 import { useToast } from "../../components/ui/toast";
-import { cn, formatClock, getErrorMessage } from "../../lib/utils";
+import { cn, getErrorMessage } from "../../lib/utils";
 
 const actionLabels: Record<ServiceAction, string> = {
   start: "启动",
@@ -34,7 +34,6 @@ const actionLabels: Record<ServiceAction, string> = {
 
 export function OverviewPage() {
   const statusQuery = useStatusQuery({ live: true });
-  const logsQuery = useLogsQuery({ interval: 5000 });
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();
@@ -46,7 +45,6 @@ export function OverviewPage() {
       await api.service(action);
       toast({ title: `服务${actionLabels[action]}成功`, tone: "success" });
       await queryClient.invalidateQueries({ queryKey: queryKeys.status });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.logs });
     } catch (error) {
       toast({
         title: `服务${actionLabels[action]}失败`,
@@ -59,13 +57,12 @@ export function OverviewPage() {
   };
 
   const status = statusQuery.data;
-  const recentLogs = (logsQuery.data?.lines || []).slice(-5).reverse();
 
   return (
     <div className="space-y-4">
       <PageTitle
         title="概览"
-        description="运行状态、快捷操作与最近日志"
+        description="运行状态与快捷操作"
         action={
           <Button
             variant="secondary"
@@ -73,7 +70,6 @@ export function OverviewPage() {
             aria-label="刷新概览"
             onClick={() => {
               void queryClient.invalidateQueries({ queryKey: queryKeys.status });
-              void queryClient.invalidateQueries({ queryKey: queryKeys.logs });
             }}
           >
             <RefreshCcw size={17} />
@@ -224,32 +220,6 @@ export function OverviewPage() {
               <p className="mt-0.5 text-xs text-fg-muted">最近运行记录</p>
             </button>
           </div>
-
-          <Card>
-            <CardHeader
-              title="最近日志"
-              description={logsQuery.data?.file}
-              action={
-                <Button size="sm" variant="ghost" onClick={() => navigate("/logs")} icon={<ArrowUpRight size={14} />}>
-                  查看全部
-                </Button>
-              }
-            />
-            <CardBody className="p-0">
-              {recentLogs.length ? (
-                <div className="divide-y divide-border">
-                  {recentLogs.map((line, index) => (
-                    <div key={`${line}-${index}`} className="flex gap-3 px-4 py-2.5">
-                      <span className="mt-0.5 shrink-0 font-mono text-[10px] text-fg-subtle">{formatClock(line.slice(0, 19))}</span>
-                      <p className="min-w-0 break-all font-mono text-[11px] leading-5 text-fg-muted">{line.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s*/, "")}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="px-4 py-6 text-center text-xs text-fg-muted">暂无日志</p>
-              )}
-            </CardBody>
-          </Card>
 
           <div className="flex items-center justify-between rounded-2xl border border-border bg-surface px-4 py-3 text-xs text-fg-muted">
             <span className="flex items-center gap-2"><Gauge size={16} /> 核心 {status.core}</span>

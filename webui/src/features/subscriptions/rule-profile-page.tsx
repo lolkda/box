@@ -1,5 +1,5 @@
-import { RuleProfileCard } from "./rule-profile-card";
+import { RuleProfileList } from "./rule-profile-list";
 
 export function RuleProfilePage() {
-  return <RuleProfileCard />;
+  return <RuleProfileList />;
 }

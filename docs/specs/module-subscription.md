@@ -18,7 +18,7 @@
 
 ### 目标
 
-- 用 `box/mihomo/subscriptions.list`（每行 `名字|URL`）作为订阅唯一来源，删除两个旧数组。
+- 用 `box/mihomo/subscriptions.list`（每行 `名字|URL[|enabled]`，第三列可选）作为订阅唯一来源，删除两个旧数组。
 - 提供 `box.tool sub add|list|rm|update`，并保留 `subs` 作为全量更新。
 - 订阅下载失败或解析失败时保留上一个可用 provider 文件，并返回非零状态。
 - `settings.ini` 新增 `ruleset_prefix`，默认空表示使用官方地址，非空时给规则集 URL 加前缀。
@@ -44,8 +44,8 @@
 ### R-001：订阅清单作为唯一来源
 
 - 参与者或触发方：模块脚本与用户
-- 前置条件与输入：`box/mihomo/subscriptions.list`，每行 `名字|URL`
-- 必须满足的行为：忽略空行和以 `#` 开头的行；按第一个 `|` 分割名字与 URL；名字不能为空
+- 前置条件与输入：`box/mihomo/subscriptions.list`，每行 `名字|URL[|enabled]`
+- 必须满足的行为：忽略空行和以 `#` 开头的行；按 `|` 分割名字、URL 和可选 enabled；前两列必须存在，第三列为 `0` 时禁用；名字不能为空
 - 输出或状态变化：`settings.ini` 不再包含 `subscription_url_mihomo` 与 `name_provide_mihomo_config`
 - 边界与失败行为：清单不存在或为空时，`upsubs` 记录警告并返回 0，不视为失败
 
