@@ -5,6 +5,8 @@ import { PageSkeleton } from "../components/ui/skeleton";
 
 const OverviewPage = lazy(() => import("../features/overview/overview-page").then((module) => ({ default: module.OverviewPage })));
 const SubscriptionsPage = lazy(() => import("../features/subscriptions/subscriptions-page").then((module) => ({ default: module.SubscriptionsPage })));
+const NodeSubscriptionsPage = lazy(() => import("../features/subscriptions/node-subscriptions-page").then((module) => ({ default: module.NodeSubscriptionsPage })));
+const RuleProfilePage = lazy(() => import("../features/subscriptions/rule-profile-page").then((module) => ({ default: module.RuleProfilePage })));
 const GroupsPage = lazy(() => import("../features/groups/groups-page").then((module) => ({ default: module.GroupsPage })));
 const RulesPage = lazy(() => import("../features/rules/rules-page").then((module) => ({ default: module.RulesPage })));
 const MorePage = lazy(() => import("../features/more/more-page").then((module) => ({ default: module.MorePage })));
@@ -27,7 +29,14 @@ export const router = createHashRouter([
     errorElement: <RouteError />,
     children: [
       { index: true, element: withSuspense(<OverviewPage />) },
-      { path: "subscriptions", element: withSuspense(<SubscriptionsPage />) },
+      {
+        path: "subscriptions",
+        element: withSuspense(<SubscriptionsPage />),
+        children: [
+          { index: true, element: withSuspense(<NodeSubscriptionsPage />) },
+          { path: "rule-profile", element: withSuspense(<RuleProfilePage />) },
+        ],
+      },
       { path: "groups", element: withSuspense(<GroupsPage />) },
       { path: "rules", element: withSuspense(<RulesPage />) },
       { path: "more", element: withSuspense(<MorePage />) },

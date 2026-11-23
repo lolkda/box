@@ -6,7 +6,7 @@
 - 规格状态：已确认
 - 最后更新：2026-11-24
 - 实现状态：已实现
-- 验证状态：部分完成（本地自动化与 mock UI 已验证，真机未验证）
+- 验证状态：部分完成（本地自动化与 mock UI 已验，新 Tab 路由未真机验证）
 - 关联文档：[module-subscription-auto-provider.md](module-subscription-auto-provider.md)（节点订阅与 provider 拆分）
 - 关联文档：[module-webui-refactor.md](module-webui-refactor.md)（当前管理页实现）
 
@@ -23,7 +23,7 @@
 - 增加全局规则模板 URL 的配置、读取和清除。
 - 下载并校验规则模板 YAML，只接受 `proxy-groups`、`rule-providers`、`rules` 三段。
 - 应用时替换 `config.yaml` 的这三段，保留 `proxy-providers`、端口、DNS、TUN 等其他配置。
-- 订阅页新增“规则与策略订阅”卡片，显示掩码 URL、更新时间、当前策略组/规则集/规则数量和跳转入口。
+- 订阅页拆为“节点订阅 / 规则与策略”双 Tab；规则 Tab 显示掩码 URL、更新时间、当前策略组/规则集/规则数量和跳转入口。
 - 每次应用前询问“仅保存”或“保存并重载”。
 - 节点订阅行为保持不变。
 
@@ -81,10 +81,10 @@
 ### R-005：订阅页入口与展示
 
 - 参与者或触发方：订阅页。
-- 前置条件与输入：mihomo 核心。
-- 必须满足的行为：在订阅页顶部或节点订阅列表之前显示“规则与策略订阅”卡片；显示掩码 URL、最近应用时间、策略组/规则集/规则数量；提供配置/修改地址、更新、清除入口；提供进入策略组、规则、规则集、核心配置页面的链接。
-- 输出或状态变化：未配置时显示说明和“配置规则订阅”；已配置时显示更新按钮；非 mihomo 核心时隐藏或显示不支持说明。
-- 边界与失败行为：规则模板查询失败不阻塞节点订阅列表，只在卡片内显示错误；模板更新失败保留原卡片数据。
+- 前置条件与输入：用户从底部“订阅”进入；mihomo 或 sing-box 核心。
+- 必须满足的行为：订阅页分为“节点订阅”和“规则与策略”两个独立 Tab；`/subscriptions` 为节点 Tab 且默认进入，`/subscriptions/rule-profile` 为规则 Tab；两个路由下底部“订阅”都保持选中；Android/浏览器返回从规则 Tab 回到节点 Tab。节点 Tab 只显示节点列表、添加、更新全部、单条编辑/删除；规则 Tab 显示掩码 URL、最近应用时间、策略组/规则集/规则数量、配置/修改地址、更新、清除入口，以及进入策略组、规则、规则集、核心配置页面的链接。
+- 输出或状态变化：未配置时规则 Tab 显示说明和“配置规则订阅”；已配置时显示更新按钮和数量；非 mihomo 核心时规则 Tab 入口保留，但内容显示“仅 mihomo”说明，不阻塞节点 Tab。
+- 边界与失败行为：规则模板查询失败不阻塞节点列表，只在规则 Tab 内显示错误；模板更新失败保留原数据；节点订阅的添加/更新/删除操作不得出现在规则 Tab。
 
 ### R-006：安全与兼容
 
@@ -139,14 +139,15 @@
 - 未采用原因：全量合并会保留无关旧内容；删除 DNS 引用会改变解析行为；只补 DNS 依赖是最小且可验证的保留范围。
 - 影响范围：R-003、AC-003、AC-007。
 
-### D-004：订阅页独立卡片
+### D-004：订阅页双 Tab + 独立子路由
 
 - 状态：已确认
-- 结论：在订阅页新增“规则与策略订阅”卡片，并链接现有策略、规则、规则集和核心配置页面。
-- 理由：符合用户对“订阅里包含规则和策略”的预期，也保留现有页面的完整编辑能力。
-- 考虑过的备选：底部新增配置导航；仅放在更多页。
-- 未采用原因：会改变底部导航或继续降低可发现性。
-- 影响范围：R-005。
+- 结论：保留“订阅”一级入口，内部拆为“节点订阅”和“规则与策略”两个独立 Tab；`/subscriptions` 为节点 Tab，`/subscriptions/rule-profile` 为规则 Tab，默认进入节点 Tab。节点订阅操作只放在节点 Tab，规则订阅完整界面只放在规则 Tab。
+- 理由：规则/策略订阅与节点订阅是两类来源，不能混排；双 Tab 保留“订阅”的可发现性，独立子路由让 Android 返回、刷新和深链接行为可预测，同时无需改动底部五项导航。
+- 考虑过的备选：订阅页顶部单卡片；移到“更多”；放到“策略”页顶部；把底部“更多”改成“配置”。
+- 未采用原因：单卡片仍与节点混排；更多入口过深；策略页只覆盖策略组，不能代表规则和规则集；改底部导航影响面最大且与现有五项导航冲突。
+- 影响范围：R-005、AC-006。
+- 入口对比图：[四个入口方案](../design/rule-profile-entry-options.png)；已选 A。
 
 ### D-005：独立更新，不进入任务中心
 
@@ -222,14 +223,15 @@
 - 验证状态：已执行（本地）
 - 验证证据：shell 回归确认缺少 `rules` 的模板返回 `E_VALIDATION`，配置文件哈希不变。
 
-### AC-006：订阅页入口与链接
+### AC-006：订阅页双 Tab、路由与链接
 
 - 对应规则：R-005
 - 前置条件：mihomo 核心，规则模板已应用。
-- 操作或输入：打开订阅页。
-- 预期结果：显示“规则与策略订阅”卡片、掩码 URL、最近应用时间和三类数量；可进入策略、规则、规则集和核心配置页面。
-- 验证状态：已执行（本地 mock）
-- 验证证据：Vite mock 在约 1920×953 和 500×844 视口手动验证卡片、配置、更新确认、仅保存、保存并重载和清除流程。
+- 操作或输入：打开 `/subscriptions`；点击“规则与策略”；点击浏览器/Android 返回；再进入规则 Tab 并访问已有规则订阅。
+- 预期结果：默认显示节点 Tab；规则 Tab 的 URL 为 `/subscriptions/rule-profile`；两个 Tab 下底部“订阅”都选中；节点 Tab 不出现规则订阅控件，规则 Tab 不出现节点添加/更新控件；返回后回到节点 Tab；规则 Tab 显示掩码 URL、最近应用时间、三类数量和输出链接。
+- 验证状态：已执行（本地 mock + 自动化）
+- 验证证据：Vitest 覆盖默认节点 Tab、切换到规则 Tab、返回节点 Tab；Vite mock 在约 500×844 视口手动验证路由、返回、底部选中态、节点/规则操作隔离和输出链接；桌面宽度下内容仍居中。
+- 实现截图：[节点 Tab](../design/subscriptions-tabs-node.png)、[规则 Tab](../design/subscriptions-tabs-rule.png)、[规则 Tab 已配置](../design/subscriptions-tabs-configured.png)。
 
 ### AC-007：保留 DNS 引用的规则集
 
@@ -297,16 +299,21 @@
 
 ### 8.2 前端组件
 
-- 新增 `webui/src/features/subscriptions/rule-profile-card.tsx`。
-- 订阅页顶部渲染；`supported` 为 true 时显示完整卡片，否则显示“仅 mihomo”提示。
-- 卡片内提供 URL 配置 Sheet、清除确认、更新按钮和应用确认 Sheet。
-- 应用确认 Sheet 显示模板数量与覆盖警告，footer 提供“取消 / 仅保存 / 保存并重载”。
+- `webui/src/features/subscriptions/subscriptions-page.tsx`：订阅页布局，渲染页面标题、两个 Tab 和 `<Outlet />`。
+- `webui/src/features/subscriptions/node-subscriptions-page.tsx`：节点 Tab，承接原订阅列表、添加、更新全部、编辑/删除、Sheet 和确认对话框。
+- `webui/src/features/subscriptions/rule-profile-page.tsx`：规则 Tab 容器。
+- `webui/src/features/subscriptions/rule-profile-card.tsx`：规则订阅完整界面；`supported` 为 true 时显示 URL、数量和操作，否则显示“仅 mihomo”提示。
+- 路由：`/subscriptions` 的子路由 `index` 渲染节点 Tab，`rule-profile` 渲染规则 Tab；`pageMeta` 为 `/subscriptions/rule-profile` 提供“订阅”标题，底部导航依靠 `/subscriptions` 前缀保持选中。
+- 规则卡片内提供 URL 配置 Sheet、清除确认、更新按钮和应用确认 Sheet；应用确认显示模板数量与覆盖警告，footer 提供“取消 / 仅保存 / 保存并重载”。
 - 使用 `queryKeys.ruleProfile`、`useRuleProfileQuery`，应用后刷新 `config`、`coreConfig`、`status` 和 `ruleProfile`。
 
 ### 8.3 交互流程
 
 ```text
-配置 URL
+打开订阅页
+  -> 默认 /subscriptions（节点 Tab）
+  -> 点击 /subscriptions/rule-profile（规则 Tab）
+  -> 配置 URL
   -> 保存 URL
   -> 更新规则与策略
   -> 解析真实 IPv4 并以 root:net_admin 下载（绕过 tproxy/fake-ip）
@@ -322,7 +329,7 @@
 ### 8.4 测试
 
 - Shell：URL 配置/清除、合法模板 fetch/apply、非法 YAML 拒绝、保留 `proxy-providers`、生成 `.bak`、不泄露完整 URL。
-- 前端：卡片未配置/已配置状态、配置 URL、更新确认、仅保存/重载分支、错误展示、链接跳转。
+- 前端：默认节点 Tab、Tab 路由切换、返回节点 Tab、底部“订阅”选中态、节点/规则操作隔离；规则卡片未配置/已配置状态、配置 URL、更新确认、仅保存/重载分支、错误展示、链接跳转。
 - 下载链路：curl 使用真实 IPv4 与 `root:net_admin`，失败回退 wget；失败返回 `E_DOWNLOAD` 详情。
 - DNS 依赖：应用模板时保留 `dns.fake-ip-filter` / `dns.nameserver-policy` 引用的旧规则集。
 - 构建：`npm run typecheck`、`npm test`、`npm run build`、`bash test/module-webui.test.sh`。
@@ -332,6 +339,6 @@
 - 2026-11-24：`bash test/module-webui.test.sh` 通过 108 项，覆盖 URL 配置/清除、模板 fetch/apply、保留 `proxy-providers` 与 `mixed-port`、保留 DNS 引用的规则集、curl 失败回退 wget、下载失败返回 `E_DOWNLOAD`、生成 `config.yaml.bak`、非法模板拒绝、sing-box 不支持状态，以及 `tool.log` 不泄露规则订阅 token。
 - 2026-11-24：真实示例模板在临时 `BOX_HOME` 通过 `config apply`，得到 22 个策略组、33 个规则集、49 条规则；真机应用时因 DNS 引用额外保留 2 个规则集，最终为 35 个规则集。
 - 2026-11-24：真机 1.10.1 复现 `curl: (35)`；原因是 tproxy + fake-ip 下 root shell 下载命中 fake-ip 且被代理，规则模板和节点订阅均失败。修正后的下载链路在真机成功获取模板；规则模板应用后服务启动成功，代理请求返回 HTTP 204。
-- 2026-11-24：`npm run typecheck`、`npm test`（7 个文件、23 项测试）和 `npm run build` 通过。
+- 2026-11-24：订阅页入口改为双 Tab + 独立子路由；`npm run typecheck`、`npm test`（7 个文件、24 项测试）和 `npm run build` 通过。
 - 2026-11-24：Vite mock 手动验证约 1920×953 与 500×844 视口；配置、更新确认、仅保存、保存并重载、清除流程均可操作。
 - 尚未执行：真机安装 1.10.2 后的完整 UI 流程、真机 mihomo reload 成功/失败路径、真机安全区与 WebView 性能复测。

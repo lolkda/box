@@ -12,6 +12,7 @@ import { Button } from "../components/ui/button";
 const pageMeta: Record<string, { title: string; back?: string }> = {
   "/": { title: "概览" },
   "/subscriptions": { title: "订阅" },
+  "/subscriptions/rule-profile": { title: "订阅" },
   "/groups": { title: "策略" },
   "/rules": { title: "规则" },
   "/more": { title: "更多" },
