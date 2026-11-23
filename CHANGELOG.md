@@ -1,3 +1,9 @@
+#### Changelog 1.7.0 - 23-11-2026
+- mihomo /ui 固定为 zashboard
+- 模块包内置最新 dist-no-fonts
+- 升级强制部署 zashboard 并清理 external-ui-url
+- 核心配置页新增一键更新面板
+
 #### Changelog 1.6.0 - 23-11-2026
 - 新增 mihomo 核心配置页与原始 YAML 编辑
 - 新增应用与网络列表编辑

@@ -1,6 +1,6 @@
 id=box_for_root
 name=Box for Magisk/KernelSU
-version=1.6.0
+version=1.7.0
 versionCode=20261123
 author=boxproxy,taamarin
 description=📦 Box for Root - 为Android设备提供透明代理工具箱 🚀 基于 mihomo 与 sing-box 的透明代理管理模块，内置 zashboard 面板
