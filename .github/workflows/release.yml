@@ -39,9 +39,19 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # 2. Generate version date
+      # versionCode 使用本地日期（UTC+8）并保证单调递增，避免 UTC 日期导致同一天重复。
       - name: Get Version
         id: get_version
-        run: echo "date=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+        run: |
+          CURRENT_CODE=$(jq -r '.versionCode // "0"' update.json 2>/dev/null || echo "0")
+          case "${CURRENT_CODE}" in
+            ''|*[!0-9]*) CURRENT_CODE=0 ;;
+          esac
+          DATE_CODE=$(TZ=Asia/Shanghai date +%Y%m%d)
+          if [ "${DATE_CODE}" -le "${CURRENT_CODE}" ]; then
+            DATE_CODE=$((CURRENT_CODE + 1))
+          fi
+          echo "date=${DATE_CODE}" >> "$GITHUB_OUTPUT"
 
       # 3. Generate changelog
       - name: Generate changelog
@@ -87,7 +97,7 @@ jobs:
         run: |
           VERSION="${{ github.event.inputs.tag }}"
           DATE_NUM="${{ steps.get_version.outputs.date }}"
-          DATE_HUMAN=$(date +%d-%m-%Y)
+          DATE_HUMAN=$(TZ=Asia/Shanghai date +%d-%m-%Y)
           dos2unix module.prop || true
 
           # update.json
