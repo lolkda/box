@@ -1,3 +1,8 @@
+#### Changelog 1.10.1 - 24-11-2026
+- 修复 1.10.0 的 versionCode 仍按 UTC 日期生成、与 1.9.2 冲突的问题
+- versionCode 改为 Asia/Shanghai 日期并保证单调递增
+- 包含 1.10.0 的全局规则与策略订阅功能
+
 #### Changelog 1.10.0 - 23-11-2026
 - 订阅页新增全局规则与策略订阅
 - 支持从独立 config.yaml 导入 proxy-groups、rule-providers、rules
