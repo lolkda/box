@@ -1,3 +1,10 @@
+#### Changelog 1.6.0 - 23-11-2026
+- 新增 mihomo 核心配置页与原始 YAML 编辑
+- 新增应用与网络列表编辑
+- 设置页补齐 CNIP 与 sing-box 订阅配置
+- 清理死代码并修复 settings、GitHub Token、eBPF 热更新
+- 不再支持 xray/v2fly/hysteria 核心
+
 #### 未发布 - 23-11-2026
 - 核心精简：仅保留 mihomo + sing-box；安装/升级移除 xray、v2fly、hysteria 并清理旧文件
 - 新增 mihomo 核心配置页：安全运行层表单 + 完整 YAML 高级编辑
