@@ -36,6 +36,16 @@ fi
 
 ui_print "- 正在安装 Box for Magisk/KernelSU/APatch"
 unzip -o "$ZIPFILE" -x 'META-INF/*' -x 'webroot/*' -d "$MODPATH" >&2
+
+# 先把构建时内置的 zashboard 暂存到安装临时目录，避免恢复旧 mihomo 数据时被覆盖。
+if [ ! -d "$MODPATH/box/mihomo/dashboard" ] || [ ! -f "$MODPATH/box/mihomo/dashboard/index.html" ]; then
+  ui_print "! 模块包缺少内置 zashboard，安装中止"
+  abort "-----------------------------------------------------------"
+fi
+ZASHBOARD_STAGE="$MODPATH/zashboard"
+mkdir -p "$ZASHBOARD_STAGE"
+cp -a "$MODPATH/box/mihomo/dashboard/." "$ZASHBOARD_STAGE/"
+
 if [ -d "/data/adb/box" ]; then
   ui_print "- 备份现有 box 数据"
   temp_bak=$(mktemp -d -p "/data/adb/box" box.XXXXXXXXXX)
@@ -317,6 +327,20 @@ if [ "${backup_box}" = "true" ]; then
   fi
 fi
 
+# 所有安装路径都强制使用模块内置 zashboard，并清理旧面板路径/下载地址。
+ui_print "- 部署内置 zashboard"
+rm -rf "/data/adb/box/mihomo/dashboard"
+mkdir -p "/data/adb/box/mihomo/dashboard"
+cp -a "${ZASHBOARD_STAGE}/." "/data/adb/box/mihomo/dashboard/"
+if [ -f "/data/adb/box/mihomo/config.yaml" ]; then
+  if grep -qE '^[[:space:]]*external-ui:' "/data/adb/box/mihomo/config.yaml"; then
+    sed -i -E 's|^[[:space:]]*external-ui:.*|external-ui: ./dashboard|' "/data/adb/box/mihomo/config.yaml"
+  else
+    printf '\nexternal-ui: ./dashboard\n' >> "/data/adb/box/mihomo/config.yaml"
+  fi
+  sed -i '/^[[:space:]]*external-ui-url:/d' "/data/adb/box/mihomo/config.yaml"
+fi
+
 # 旧核心已移除：清理旧二进制与配置目录，并迁移非法 bin_name
 ui_print "- 清理已移除的 xray / v2fly / hysteria 核心"
 for legacy_bin in xray v2fly hysteria; do
@@ -356,7 +380,7 @@ fi
 unzip -o "$ZIPFILE" 'webroot/*' -d "$MODPATH" >&2
 
 ui_print "- 清理残留文件"
-rm -rf /data/adb/box/bin/.bin $MODPATH/box $MODPATH/box_service.sh
+rm -rf /data/adb/box/bin/.bin $MODPATH/box $MODPATH/box_service.sh "$MODPATH/zashboard"
 
 if [ "$backup_box" = "true" ] && [ -n "$temp_dir" ] && [ -d "$temp_dir" ]; then
   ui_print " "

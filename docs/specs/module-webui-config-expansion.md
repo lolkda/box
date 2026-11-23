@@ -10,6 +10,7 @@
 - 关联文档：[module-webui-refactor.md](module-webui-refactor.md)（已完成的管理页重构规格；本规格记录其后的配置扩展与核心精简）
 - 关联文档：[module-webui.md](module-webui.md)（旧 WebUI 历史规格，仅作历史参考）
 - 关联文档：[module-subscription.md](module-subscription.md)
+- 关联文档：[module-dashboard-zashboard.md](module-dashboard-zashboard.md)（mihomo 面板固定为 zashboard 的后续规格）
 
 ## 2. 目标与范围
 

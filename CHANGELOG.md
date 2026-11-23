@@ -6,6 +6,7 @@
 - 不再支持 xray/v2fly/hysteria 核心
 
 #### 未发布 - 23-11-2026
+- mihomo `/ui` 固定为 zashboard：模块包内置最新 `dist-no-fonts`，升级强制部署、清理旧 `external-ui-url`，核心配置页支持一键更新
 - 核心精简：仅保留 mihomo + sing-box；安装/升级移除 xray、v2fly、hysteria 并清理旧文件
 - 新增 mihomo 核心配置页：安全运行层表单 + 完整 YAML 高级编辑
 - 新增应用与网络页：应用包（支持 UID:包名）、GID、接口 allow/ignore 清单

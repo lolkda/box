@@ -62,7 +62,7 @@ su -c "/data/adb/box/scripts/box.tool sub update"
 - 概览：运行状态、启动/停止/重启/重载、关键指标与最近日志
 - 订阅：掩码列表、添加/编辑/删除、单条与全部更新
 - 策略组、规则、规则集：仅 mihomo，可视化增删改；规则支持结构化构建与高级原文模式
-- 核心配置：mihomo 安全运行层表单 + 完整 YAML 高级编辑
+- 核心配置：mihomo 安全运行层表单 + 完整 YAML 高级编辑；`external-ui` 固定为 `./dashboard` 并支持一键更新 zashboard 面板
 - 应用与网络：`package.list.cfg` / `gid.list.cfg` / `ap.list.cfg` 可视化清单
 - 设置：全部可编辑标量键、数组编辑器、应用包名选择与 GitHub Token 脱敏；sing-box 订阅地址在对应核心下显示
 - 日志：自动刷新、级别过滤、搜索、复制与清空
@@ -77,7 +77,7 @@ su -c "/data/adb/box/scripts/box.tool sub update"
 cd webui && npm install && npm run build
 ```
 
-构建产物输出到 `webroot/`，模块打包时直接包含该目录。
+构建产物输出到 `webroot/`，模块打包时直接包含该目录。模块包同时内置 zashboard（构建时获取最新 `dist-no-fonts`），安装/升级后 mihomo 的 `/ui` 固定由 zashboard 提供；`box.tool upxui` 或核心配置页的「更新面板」可手动更新。规格见 [module-dashboard-zashboard.md](docs/specs/module-dashboard-zashboard.md)。
 
 ## 文档与社区
 

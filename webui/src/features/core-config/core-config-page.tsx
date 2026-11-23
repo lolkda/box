@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Code2, Save, ShieldAlert, SlidersHorizontal } from "lucide-react";
+import { Code2, RefreshCw, Save, ShieldAlert, SlidersHorizontal } from "lucide-react";
 import { api } from "../../api/client";
 import { queryKeys, useCoreConfigQuery, useStatusQuery } from "../../api/queries";
 import type { MihomoStructuredConfig } from "../../api/types";
@@ -43,6 +43,7 @@ export function CoreConfigPage() {
   const [form, setForm] = useState<MihomoStructuredConfig | null>(null);
   const [raw, setRaw] = useState("");
   const [saving, setSaving] = useState(false);
+  const [updatingDashboard, setUpdatingDashboard] = useState(false);
 
   useEffect(() => {
     if (!coreQuery.data) return;
@@ -80,6 +81,19 @@ export function CoreConfigPage() {
     }
   };
 
+  const updateDashboard = async () => {
+    setUpdatingDashboard(true);
+    try {
+      await api.taskStart("xui");
+      toast({ title: "已开始更新面板", description: "任务完成后刷新 /ui 查看 zashboard", tone: "info" });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
+    } catch (error) {
+      toast({ title: "启动面板更新失败", description: getErrorMessage(error), tone: "error" });
+    } finally {
+      setUpdatingDashboard(false);
+    }
+  };
+
   const rawDirty = Boolean(original && raw !== original.raw);
   const structuredDirty = Boolean(original && form && JSON.stringify(form) !== JSON.stringify(original.structured));
   const canSave = tab === "raw" ? rawDirty : structuredDirty;
@@ -110,7 +124,14 @@ export function CoreConfigPage() {
       <PageTitle
         title={title}
         description={coreQuery.data.file}
-        action={<Badge tone={dirty ? "warning" : "neutral"}>{dirty ? "未保存" : "已同步"}</Badge>}
+        action={
+          <>
+            <Button variant="secondary" size="sm" onClick={() => void updateDashboard()} loading={updatingDashboard} icon={<RefreshCw size={15} />}>
+              更新面板
+            </Button>
+            <Badge tone={dirty ? "warning" : "neutral"}>{dirty ? "未保存" : "已同步"}</Badge>
+          </>
+        }
       />
 
       <div className="grid grid-cols-2 rounded-xl bg-surface-muted p-1">
@@ -164,8 +185,8 @@ export function CoreConfigPage() {
               <Field label="外部控制地址" htmlFor="core-controller">
                 <Input id="core-controller" value={form["external-controller"]} onChange={(event) => updateField("external-controller", event.currentTarget.value)} />
               </Field>
-              <Field label="外部 UI 路径" htmlFor="core-ui">
-                <Input id="core-ui" value={form["external-ui"]} onChange={(event) => updateField("external-ui", event.currentTarget.value)} />
+              <Field label="外部 UI 路径" htmlFor="core-ui" hint="固定为 ./dashboard，由模块内置 zashboard 提供">
+                <Input id="core-ui" value={form["external-ui"]} readOnly className="bg-surface-muted text-fg-muted" />
               </Field>
               <Field label="进程匹配模式" htmlFor="core-find-process">
                 <Select

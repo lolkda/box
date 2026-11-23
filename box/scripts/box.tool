@@ -2731,101 +2731,122 @@ xkernel() {
   bin_name=$original_bin_name
 }
 upxui() {
-  if [[ "${bin_name}" == @(mihomo|sing-box) ]]; then
-    local ui_path
-    local ui_url
-    if [ "${bin_name}" = "mihomo" ]; then
-      ui_path=$(busybox awk '!/^ *#/ && /^external-ui:/ {print $2; exit}' "${mihomo_config}" | sed "s/[\"']//g")
-      ui_url=$(busybox awk '!/^ *#/ && /^external-ui-url:/ {print $2; exit}' "${mihomo_config}" 2>/dev/null | sed "s/[\"']//g")
-    else
-      ui_path=$(busybox awk -F '"' '/"external_ui"/ {print $4}' "${sing_config}" | head -n 1)
-      ui_url=$(busybox awk -F '"' '/"external_ui_download_url"/ {print $4; exit}' "${sing_config}" 2>/dev/null)
-    fi
-    
-    if [ -z "${ui_path}" ]; then
-      ui_path="./dashboard"
-      log Warning "配置文件中未找到 external-ui/external_ui 字段，使用默认路径: ${ui_path}"
-    fi
-    log Debug "配置文件中的 UI 路径: ${ui_path}"
-    
-    local dashboard_dir
-    if [[ "${ui_path}" == ./* ]]; then
-      dashboard_dir="${box_dir}/${bin_name}/${ui_path#./}"
-    elif [[ "${ui_path}" == /* ]]; then
-      dashboard_dir="${ui_path}"
-    else
-      dashboard_dir="${box_dir}/${bin_name}/${ui_path}"
-    fi
-    log Info "Dashboard 目标目录: ${dashboard_dir}"
-    
-    file_dashboard="${box_dir}/${bin_name}_dashboard.zip"
-    if [ -n "${ui_url}" ]; then
-      url="${ui_url}"
-    else
-      url="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
-    fi
-    
-    if upfile "${file_dashboard}" "${url}"; then
-      if [ ! -d "${dashboard_dir}" ]; then
-        log Info "面板文件夹不存在, 正在创建: ${dashboard_dir}"
-        mkdir -p "${dashboard_dir}"
-      else
-        log Debug "清理现有面板文件: ${dashboard_dir}"
-        rm -rf "${dashboard_dir}/"*
-      fi
-      
-      if command -v unzip >/dev/null; then
-        unzip_command="unzip"
-      else
-        unzip_command="busybox unzip"
-      fi
-      
-      log Info "正在解压 Dashboard..."
-      local temp_extract_dir="${box_dir}/${bin_name}_dashboard_temp"
-      rm -rf "${temp_extract_dir}"
-      mkdir -p "${temp_extract_dir}"
-      
-      if "${unzip_command}" -oq "${file_dashboard}" -d "${temp_extract_dir}"; then
-        local html_path
-        html_path=$(busybox find "${temp_extract_dir}" -maxdepth 3 -type f -name index.html | head -n 1)
-        if [ -n "${html_path}" ]; then
-          local html_dir
-          html_dir="${html_path%/*}"
-          mv -f "${html_dir}"/* "${dashboard_dir}/"
-        else
-          local top_dir
-          top_dir=$(find "${temp_extract_dir}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-          if [ -n "${top_dir}" ] && [ -z "$(find "${temp_extract_dir}" -mindepth 1 -maxdepth 1 -type d | sed -n '2p')" ]; then
-            mv -f "${top_dir}"/* "${dashboard_dir}/"
-          else
-            mv -f "${temp_extract_dir}"/* "${dashboard_dir}/"
-          fi
-        fi
-      else
-        log Error "解压 Dashboard 失败"
-        rm -f "${file_dashboard}"
-        rm -rf "${temp_extract_dir}"
-        return 1
-      fi
-
-      if [ -z "$(find "${dashboard_dir}" -mindepth 1 -maxdepth 1 | head -n 1)" ]; then
-        log Error "Dashboard 目录为空，更新失败"
-        rm -f "${file_dashboard}"
-        rm -rf "${temp_extract_dir}"
-        return 1
-      fi
-      rm -f "${file_dashboard}"
-      rm -rf "${temp_extract_dir}"
-      log Info "Dashboard 更新成功 → ${dashboard_dir}"
-    else
-      log Error "下载 Dashboard 失败"
-      return 1
-    fi
-    return 0
-  else
+  if [[ "${bin_name}" != @(mihomo|sing-box) ]]; then
     log Debug "${bin_name} 不支持面板"
     return 1
   fi
+
+  local ui_path
+  local ui_url
+  if [ "${bin_name}" = "mihomo" ]; then
+    # mihomo 面板固定为 zashboard，不再读取旧 external-ui-url，避免回落到 MetacubeXD。
+    ui_path="./dashboard"
+    ui_url="https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip"
+  else
+    ui_path=$(busybox awk -F '"' '/"external_ui"/ {print $4}' "${sing_config}" | head -n 1)
+    ui_url=$(busybox awk -F '"' '/"external_ui_download_url"/ {print $4; exit}' "${sing_config}" 2>/dev/null)
+    if [ -z "${ui_url}" ]; then
+      ui_url="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
+    fi
+  fi
+
+  if [ -z "${ui_path}" ]; then
+    ui_path="./dashboard"
+    log Warning "配置文件中未找到 external-ui/external_ui 字段，使用默认路径: ${ui_path}"
+  fi
+  log Debug "配置文件中的 UI 路径: ${ui_path}"
+
+  local dashboard_dir
+  if [[ "${ui_path}" == ./* ]]; then
+    dashboard_dir="${box_dir}/${bin_name}/${ui_path#./}"
+  elif [[ "${ui_path}" == /* ]]; then
+    dashboard_dir="${ui_path}"
+  else
+    dashboard_dir="${box_dir}/${bin_name}/${ui_path}"
+  fi
+  log Info "Dashboard 目标目录: ${dashboard_dir}"
+
+  local file_dashboard="${box_dir}/${bin_name}_dashboard.zip"
+  local temp_extract_dir="${box_dir}/${bin_name}_dashboard_temp.$$"
+  local stage_dir="${dashboard_dir}.stage.$$"
+  local backup_dir="${dashboard_dir}.backup.$$"
+
+  if ! upfile "${file_dashboard}" "${ui_url}"; then
+    log Error "下载 Dashboard 失败"
+    return 1
+  fi
+
+  rm -rf "${temp_extract_dir}" "${stage_dir}" "${backup_dir}"
+  mkdir -p "${temp_extract_dir}" "${stage_dir}"
+
+  local unzip_command="unzip"
+  if ! command -v unzip >/dev/null 2>&1; then
+    unzip_command="busybox unzip"
+  fi
+
+  log Info "正在解压 Dashboard..."
+  if ! "${unzip_command}" -oq "${file_dashboard}" -d "${temp_extract_dir}"; then
+    log Error "解压 Dashboard 失败，保留当前面板"
+    rm -f "${file_dashboard}"
+    rm -rf "${temp_extract_dir}" "${stage_dir}"
+    return 1
+  fi
+
+  local html_path
+  html_path=$(busybox find "${temp_extract_dir}" -maxdepth 3 -type f -name index.html | head -n 1)
+  if [ -z "${html_path}" ]; then
+    log Error "Dashboard 中未找到 index.html，保留当前面板"
+    rm -f "${file_dashboard}"
+    rm -rf "${temp_extract_dir}" "${stage_dir}"
+    return 1
+  fi
+  if [ "${bin_name}" = "mihomo" ] && ! grep -qi 'zashboard' "${html_path}"; then
+    log Error "下载内容不是 zashboard，保留当前面板"
+    rm -f "${file_dashboard}"
+    rm -rf "${temp_extract_dir}" "${stage_dir}"
+    return 1
+  fi
+
+  local html_dir
+  html_dir="${html_path%/*}"
+  if ! cp -a "${html_dir}/." "${stage_dir}/" || [ ! -f "${stage_dir}/index.html" ]; then
+    log Error "准备 Dashboard 文件失败，保留当前面板"
+    rm -f "${file_dashboard}"
+    rm -rf "${temp_extract_dir}" "${stage_dir}"
+    return 1
+  fi
+
+  if [ -d "${dashboard_dir}" ]; then
+    mv "${dashboard_dir}" "${backup_dir}" || {
+      log Error "备份当前 Dashboard 失败，保留原状态"
+      rm -f "${file_dashboard}"
+      rm -rf "${temp_extract_dir}" "${stage_dir}"
+      return 1
+    }
+  fi
+  if ! mv "${stage_dir}" "${dashboard_dir}"; then
+    log Error "替换 Dashboard 失败，恢复当前面板"
+    if [ -d "${backup_dir}" ]; then
+      mv "${backup_dir}" "${dashboard_dir}"
+    fi
+    rm -f "${file_dashboard}"
+    rm -rf "${temp_extract_dir}"
+    return 1
+  fi
+  rm -rf "${backup_dir}" "${temp_extract_dir}"
+  rm -f "${file_dashboard}"
+
+  if [ "${bin_name}" = "mihomo" ] && [ -f "${mihomo_config}" ]; then
+    if grep -qE '^[[:space:]]*external-ui:' "${mihomo_config}"; then
+      sed -i -E 's|^[[:space:]]*external-ui:.*|external-ui: ./dashboard|' "${mihomo_config}"
+    else
+      printf '\nexternal-ui: ./dashboard\n' >> "${mihomo_config}"
+    fi
+    sed -i '/^[[:space:]]*external-ui-url:/d' "${mihomo_config}"
+  fi
+
+  log Info "Dashboard 更新成功 → ${dashboard_dir}"
+  return 0
 }
 
 cgroup_blkio() {

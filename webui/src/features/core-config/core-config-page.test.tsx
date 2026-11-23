@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { CoreConfigPage } from "./core-config-page";
 import { ToastProvider } from "../../components/ui/toast";
@@ -65,5 +65,15 @@ describe("CoreConfigPage", () => {
     expect(await screen.findByText("安全运行层")).toBeInTheDocument();
     expect(screen.getByText("外部控制地址")).toBeInTheDocument();
     expect(screen.getByText("高级 YAML")).toBeInTheDocument();
+  });
+
+  it("keeps external-ui readonly and exposes dashboard update", async () => {
+    renderPage();
+    const externalUi = await screen.findByLabelText("外部 UI 路径");
+    expect(externalUi).toHaveAttribute("readonly");
+    expect(externalUi).toHaveValue("./dashboard");
+
+    fireEvent.click(screen.getByRole("button", { name: "更新面板" }));
+    expect(await screen.findByText("已开始更新面板")).toBeInTheDocument();
   });
 });
