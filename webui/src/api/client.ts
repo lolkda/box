@@ -305,26 +305,116 @@ export const api = {
     runJsonWithFile<{ changed: string[] }>(["lists", "apply"], payload),
 };
 
-interface KsuPackageBridge {
-  listPackages(type: string): string;
-  getPackagesInfo(packages: string): string;
+type PackageBridgeMethod = (value: string) => unknown;
+
+interface PackageBridgeMethods {
+  listPackages: PackageBridgeMethod;
+  getPackagesInfo: PackageBridgeMethod;
+}
+
+interface KsuPackageHost {
+  pm?: PackageBridgeMethods | (() => PackageBridgeMethods | undefined);
+  listPackages?: PackageBridgeMethod;
+  getPackagesInfo?: PackageBridgeMethod;
+}
+
+export type PackageBridgeKind = "pm" | "legacy";
+
+export interface ResolvedPackageBridge {
+  kind: PackageBridgeKind;
+  listPackages: PackageBridgeMethod;
+  getPackagesInfo: PackageBridgeMethod;
+}
+
+export type PackageBridgeErrorCode =
+  | "PACKAGE_BRIDGE_UNAVAILABLE"
+  | "PACKAGE_BRIDGE_ERROR"
+  | "PACKAGE_BRIDGE_BAD_RESPONSE";
+
+export class PackageBridgeError extends Error {
+  readonly code: PackageBridgeErrorCode;
+
+  constructor(code: PackageBridgeErrorCode, message: string) {
+    super(message);
+    this.name = "PackageBridgeError";
+    this.code = code;
+  }
+}
+
+function getKsuPackageHost(): KsuPackageHost | undefined {
+  return (window as Window & { ksu?: KsuPackageHost }).ksu;
+}
+
+function hasPackageMethods(value: unknown): value is PackageBridgeMethods {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<PackageBridgeMethods>;
+  return typeof candidate.listPackages === "function" && typeof candidate.getPackagesInfo === "function";
+}
+
+export function resolvePackageBridge(): ResolvedPackageBridge | null {
+  const ksu = getKsuPackageHost();
+  if (!ksu) return null;
+
+  try {
+    const pmFunction = ksu.pm;
+    const pm = typeof pmFunction === "function" ? pmFunction() : pmFunction;
+    if (hasPackageMethods(pm)) {
+      return {
+        kind: "pm",
+        listPackages: (type) => pm.listPackages(type),
+        getPackagesInfo: (packages) => pm.getPackagesInfo(packages),
+      };
+    }
+  } catch {
+    // pm() may exist but be unavailable on older managers; fall through to legacy.
+  }
+
+  if (typeof ksu.listPackages === "function" && typeof ksu.getPackagesInfo === "function") {
+    return {
+      kind: "legacy",
+      listPackages: (type) => ksu.listPackages?.(type),
+      getPackagesInfo: (packages) => ksu.getPackagesInfo?.(packages),
+    };
+  }
+
+  return null;
 }
 
 export function packageManagerAvailable(): boolean {
-  const ksu = (window as Window & { ksu?: { pm?: () => KsuPackageBridge } }).ksu;
-  return typeof ksu?.pm === "function";
+  return resolvePackageBridge() !== null;
+}
+
+function parseBridgeArray(value: unknown): unknown[] {
+  let parsed: unknown = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value) as unknown;
+    } catch {
+      throw new PackageBridgeError("PACKAGE_BRIDGE_BAD_RESPONSE", "应用列表返回了无法解析的数据");
+    }
+  }
+  if (!Array.isArray(parsed)) {
+    throw new PackageBridgeError("PACKAGE_BRIDGE_BAD_RESPONSE", "应用列表返回格式不正确");
+  }
+  return parsed;
 }
 
 export async function listInstalledPackages(): Promise<PackageInfo[]> {
-  const ksu = (window as Window & { ksu?: { pm?: () => KsuPackageBridge } }).ksu;
-  if (typeof ksu?.pm !== "function") return [];
+  const resolved = resolvePackageBridge();
+  if (!resolved) {
+    throw new PackageBridgeError("PACKAGE_BRIDGE_UNAVAILABLE", "当前管理器未提供包列表接口");
+  }
+
   try {
-    const bridge = ksu.pm();
-    const names = JSON.parse(bridge.listPackages("user")) as string[];
-    if (!Array.isArray(names) || names.length === 0) return [];
-    const raw = JSON.parse(bridge.getPackagesInfo(JSON.stringify(names))) as Array<Record<string, unknown>>;
+    const namesRaw = parseBridgeArray(resolved.listPackages("user"));
+    const names = [...new Set(namesRaw.filter((value): value is string => typeof value === "string" && value.length > 0))];
+    if (names.length === 0) return [];
+
+    const raw = parseBridgeArray(resolved.getPackagesInfo(JSON.stringify(names)));
     const unique = new Map<string, PackageInfo>();
-    for (const item of raw) {
+    for (const value of raw) {
+      if (!value || typeof value !== "object") continue;
+      const item = value as Record<string, unknown>;
       const packageName = String(item.packageName || "");
       if (!packageName || item.error) continue;
       if (unique.has(packageName)) continue;
@@ -337,7 +427,8 @@ export async function listInstalledPackages(): Promise<PackageInfo[]> {
       });
     }
     return [...unique.values()].sort((a, b) => a.appLabel.localeCompare(b.appLabel, "zh-CN"));
-  } catch {
-    return [];
+  } catch (error) {
+    if (error instanceof PackageBridgeError) throw error;
+    throw new PackageBridgeError("PACKAGE_BRIDGE_ERROR", "读取应用列表失败");
   }
 }

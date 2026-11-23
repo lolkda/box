@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ApiError, execCommand, parseEnvelope, shellQuote } from "./client";
+import { ApiError, execCommand, listInstalledPackages, parseEnvelope, resolvePackageBridge, shellQuote } from "./client";
 import { clearKsuSpawnMock, installKsuSpawnMock } from "../test/ksu-spawn-mock";
 
 describe("parseEnvelope", () => {
@@ -56,5 +56,55 @@ describe("execCommand", () => {
     (window as Window & { ksu?: unknown }).ksu = { exec() {} };
 
     await expect(execCommand("true")).rejects.toMatchObject({ code: "E_UNSUPPORTED" });
+  });
+});
+
+
+describe("package bridge", () => {
+  const originalKsu = (window as Window & { ksu?: unknown }).ksu;
+
+  afterEach(() => {
+    if (originalKsu === undefined) delete (window as Window & { ksu?: unknown }).ksu;
+    else (window as Window & { ksu?: unknown }).ksu = originalKsu;
+  });
+
+  it("uses the new pm bridge when available", async () => {
+    const pm = {
+      listPackages: () => JSON.stringify(["com.example.app", "com.example.app"]),
+      getPackagesInfo: () => JSON.stringify([{ packageName: "com.example.app", appLabel: "示例", uid: 10001, isSystem: false }]),
+    };
+    (window as Window & { ksu?: unknown }).ksu = { pm: () => pm };
+
+    expect(resolvePackageBridge()?.kind).toBe("pm");
+    await expect(listInstalledPackages()).resolves.toEqual([
+      { packageName: "com.example.app", appLabel: "示例", versionName: "", isSystem: false, uid: 10001 },
+    ]);
+  });
+
+  it("falls back to the legacy listPackages/getPackagesInfo bridge", async () => {
+    (window as Window & { ksu?: unknown }).ksu = {
+      listPackages: () => JSON.stringify(["com.android.settings"]),
+      getPackagesInfo: () => JSON.stringify([{ packageName: "com.android.settings", appLabel: "设置", isSystem: true }]),
+    };
+
+    expect(resolvePackageBridge()?.kind).toBe("legacy");
+    await expect(listInstalledPackages()).resolves.toEqual([
+      { packageName: "com.android.settings", appLabel: "设置", versionName: "", isSystem: true, uid: null },
+    ]);
+  });
+
+  it("reports unavailable instead of a fake empty list", async () => {
+    (window as Window & { ksu?: unknown }).ksu = {};
+
+    await expect(listInstalledPackages()).rejects.toMatchObject({ code: "PACKAGE_BRIDGE_UNAVAILABLE" });
+  });
+
+  it("reports malformed bridge data", async () => {
+    (window as Window & { ksu?: unknown }).ksu = {
+      listPackages: () => "not json",
+      getPackagesInfo: () => "[]",
+    };
+
+    await expect(listInstalledPackages()).rejects.toMatchObject({ code: "PACKAGE_BRIDGE_BAD_RESPONSE" });
   });
 });

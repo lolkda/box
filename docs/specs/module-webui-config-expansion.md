@@ -280,7 +280,7 @@
 ### AC-005：应用包清单
 
 - 对应规则：R-004、D-006
-- 前置条件：应用与网络页可用，`pm` API 可用或手动输入。
+- 前置条件：应用与网络页可用，包列表桥接可用或手动输入。
 - 操作或输入：添加 `0:com.example.app`、纯包名 `com.example.other`、带 UID `10:com.example.app`，保存后重新读取。
 - 预期结果：`package.list.cfg` 内容正确；非法包名/UID 被拒绝；列表保留顺序；服务可读取 `packages_list`。
 - 验证状态：通过

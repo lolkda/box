@@ -428,6 +428,8 @@
 - 影响范围：R-008、R-013
 - 是否阻塞：否，不支持时降级为手动输入包名。
 - 决定或验证方式：运行时检测 `pm.support`，并在界面显示降级提示。
+- 状态：已解决（2026-11-24）
+- 结论：已在 [module-package-picker-bridge.md](module-package-picker-bridge.md) 中修正；官方 3.3.1 没有 `ksu.pm()`，改由旧全局 `listPackages`/`getPackagesInfo` 兜底，`pm` 仍优先。
 
 ### Q-003：旧 JSON 外部消费者
 
@@ -525,7 +527,7 @@ ${box_run}/tasks/<task-id>/
 
 - 真机 KernelSU WebView 不在当前环境，最终真机兼容性由用户复测。
 - 旧 `--json` 字段不兼容，已在 CHANGELOG 中标记 breaking change。
-- 应用包名选择器在 `pm.support=false` 时降级为文本输入。
+- 应用包名选择器优先 `ksu.pm()`，官方 3.3.1 用旧 `listPackages`/`getPackagesInfo` 兜底；两套都不可用时降级为文本输入。
 - 任务取消对子进程采用尽力而为的 TERM；内核替换阶段禁止取消。
 - 前端依赖体积较 Preact 版本增加，但全部本地加载，无 CDN 依赖。
 
