@@ -76,6 +76,32 @@ export interface LogsData {
   file: string;
   lines: string[];
 }
+export interface RuleProfileCounts {
+  groups: number;
+  rule_providers: number;
+  rules: number;
+}
+
+export interface RuleProfileData {
+  supported: boolean;
+  configured: boolean;
+  url_masked: string;
+  updated_at: string;
+  counts: RuleProfileCounts;
+}
+
+export interface RuleProfileFetched {
+  url_masked: string;
+  fetched_at: string;
+  counts: RuleProfileCounts;
+}
+
+export interface RuleProfileApplied {
+  changed: string[];
+  reloaded: boolean;
+  updated_at: string;
+  counts: RuleProfileCounts;
+}
 
 export type TaskState = "running" | "success" | "failed" | "canceled" | "interrupted" | "unknown";
 

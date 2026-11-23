@@ -17,7 +17,9 @@ function installSubscriptionMock() {
   ];
   installKsuSpawnMock((command) => {
     let payload: unknown;
-    if (command.includes("'sub' 'list'")) {
+    if (command.includes("'rule-profile' 'get'")) {
+      payload = envelope({ supported: true, configured: false, url_masked: "", updated_at: "", counts: { groups: 0, rule_providers: 0, rules: 0 } });
+    } else if (command.includes("'sub' 'list'")) {
       payload = envelope({ items: subscriptions });
     } else if (command.includes("'sub' 'add'")) {
       subscriptions.push({ name: "测试新增", url_masked: "https://new.example.com/***", provider: "missing", provider_size: 0, provider_count: 0, updated_at: "" });

@@ -59,7 +59,9 @@ divider() {
   [ -n "$box_log" ] && log Info "----------------------------------------" >/dev/null
 }
 trap divider EXIT
-log Info "执行命令: $0 $*"
+_log_command="$*"
+_log_command="$(printf '%s' "${_log_command}" | sed -E 's#https?://[^[:space:]]+#<url>#g')"
+log Info "执行命令: $0 ${_log_command}"
 
 # 更新文件
 upfile() {
@@ -2408,6 +2410,189 @@ config_delete_json() {
   json_ok "$(printf '{"path":%s}' "$(json_quote "${deleted}")")"
 }
 
+# ---------------------------------------------------------------------------
+# 全局规则与策略订阅
+# ---------------------------------------------------------------------------
+
+rule_profile_url_file() {
+  printf '%s/rule-profile.url' "${mihomo_config%/*}"
+}
+
+rule_profile_updated_file() {
+  printf '%s/rule-profile.updated_at' "${box_run_state}"
+}
+
+rule_profile_pending_file() {
+  printf '%s/rule-profile.pending.yaml' "${box_run_state}"
+}
+
+rule_profile_counts_json() {
+  local file="${1:-${mihomo_config}}"
+  local groups=0 providers=0 rules=0
+  if [ -f "${file}" ]; then
+    groups="$(${yq} -r '."proxy-groups" | length' "${file}" 2>/dev/null)" || groups=0
+    providers="$(${yq} -r '."rule-providers" | length' "${file}" 2>/dev/null)" || providers=0
+    rules="$(${yq} -r '.rules | length' "${file}" 2>/dev/null)" || rules=0
+  fi
+  case "${groups}" in ''|*[!0-9]*) groups=0 ;; esac
+  case "${providers}" in ''|*[!0-9]*) providers=0 ;; esac
+  case "${rules}" in ''|*[!0-9]*) rules=0 ;; esac
+  printf '{"groups":%s,"rule_providers":%s,"rules":%s}' "${groups}" "${providers}" "${rules}"
+}
+
+rule_profile_get_json() {
+  ensure_yq
+  local supported=false
+  [ "${bin_name}" = "mihomo" ] && supported=true
+  local url_file configured=false url_masked=""
+  url_file="$(rule_profile_url_file)"
+  if [ -s "${url_file}" ]; then
+    configured=true
+    url_masked="$(mask_url "$(cat "${url_file}" 2>/dev/null)")"
+  fi
+  local updated=""
+  [ -f "$(rule_profile_updated_file)" ] && updated="$(cat "$(rule_profile_updated_file)" 2>/dev/null)"
+  local data
+  data="$(printf '{"supported":%s,"configured":%s,"url_masked":%s,"updated_at":%s,"counts":%s}' \
+    "$(json_bool "${supported}")" "$(json_bool "${configured}")" \
+    "$(json_quote "${url_masked}")" "$(json_quote "${updated}")" \
+    "$(rule_profile_counts_json)")"
+  json_ok "${data}"
+}
+
+rule_profile_set_json() {
+  local url="$1"
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
+    return 1
+  fi
+  case "${url}" in
+    http://*|https://*) ;;
+    *)
+      json_error "E_VALIDATION" "规则模板地址必须以 http:// 或 https:// 开头"
+      return 1
+      ;;
+  esac
+  local url_file tmp_file
+  url_file="$(rule_profile_url_file)"
+  mkdir -p "$(dirname "${url_file}")" || {
+    json_error "E_IO" "无法创建规则订阅目录"
+    return 1
+  }
+  tmp_file="${url_file}.tmp.$$"
+  printf '%s\n' "${url}" > "${tmp_file}" || {
+    json_error "E_IO" "无法保存规则模板地址"
+    return 1
+  }
+  chmod 0600 "${tmp_file}" >/dev/null 2>&1 || true
+  mv "${tmp_file}" "${url_file}" || {
+    rm -f "${tmp_file}"
+    json_error "E_IO" "无法保存规则模板地址"
+    return 1
+  }
+  rm -f "$(rule_profile_pending_file)" "$(rule_profile_pending_file).bak" 2>/dev/null
+  rule_profile_get_json
+}
+
+rule_profile_clear_json() {
+  local url_file
+  url_file="$(rule_profile_url_file)"
+  rm -f "${url_file}" "$(rule_profile_updated_file)" \
+    "$(rule_profile_pending_file)" "$(rule_profile_pending_file).bak" 2>/dev/null
+  json_ok '{"cleared":true}'
+}
+
+rule_profile_url_json() {
+  local url_file
+  url_file="$(rule_profile_url_file)"
+  if [ ! -s "${url_file}" ]; then
+    json_error "E_NOT_FOUND" "还没有配置规则与策略订阅"
+    return 1
+  fi
+  json_ok "$(printf '{"url":%s}' "$(json_quote "$(cat "${url_file}" 2>/dev/null)")")"
+}
+
+rule_profile_fetch_json() {
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
+    return 1
+  fi
+  local url_file url
+  url_file="$(rule_profile_url_file)"
+  if [ ! -s "${url_file}" ]; then
+    json_error "E_NOT_FOUND" "还没有配置规则与策略订阅"
+    return 1
+  fi
+  url="$(cat "${url_file}" 2>/dev/null)"
+  ensure_yq
+  local pending tmp_file
+  pending="$(rule_profile_pending_file)"
+  tmp_file="${pending}.tmp.$$"
+  rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
+  if ! LOG_MASK_URL=mask upfile "${tmp_file}" "${url}" "mihomo"; then
+    rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
+    return 1
+  fi
+  rm -f "${tmp_file}.bak" 2>/dev/null
+  if ! config_validate_json "${tmp_file}"; then
+    rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
+    return 1
+  fi
+  mv "${tmp_file}" "${pending}" || {
+    rm -f "${tmp_file}" "${tmp_file}.bak" 2>/dev/null
+    json_error "E_IO" "无法保存待应用的规则模板"
+    return 1
+  }
+  local data
+  data="$(printf '{"url_masked":%s,"fetched_at":%s,"counts":%s}' \
+    "$(json_quote "$(mask_url "${url}")")" \
+    "$(json_quote "$(date '+%Y-%m-%dT%H:%M:%S%z')")" \
+    "$(rule_profile_counts_json "${pending}")")"
+  json_ok "${data}"
+}
+
+rule_profile_apply_json() {
+  local do_reload="${1:-false}"
+  if [ "${bin_name}" != "mihomo" ]; then
+    json_error "E_VALIDATION" "规则与策略订阅仅支持 mihomo"
+    return 1
+  fi
+  local pending apply_output updated
+  pending="$(rule_profile_pending_file)"
+  if [ ! -s "${pending}" ]; then
+    json_error "E_NOT_FOUND" "没有待应用的规则模板，请先更新"
+    return 1
+  fi
+  ensure_yq
+  if ! apply_output="$(config_apply_json "${pending}" 2>/dev/null)"; then
+    if [ -n "${apply_output}" ]; then
+      printf '%s\n' "${apply_output}"
+    else
+      json_error "E_IO" "应用规则模板失败"
+    fi
+    return 1
+  fi
+  update_mihomo_rulesets >/dev/null 2>&1 || log Warning "规则集前缀更新失败，请手动检查配置文件"
+  updated="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  printf '%s\n' "${updated}" > "$(rule_profile_updated_file)" 2>/dev/null || true
+  rm -f "${pending}" "${pending}.bak" 2>/dev/null
+
+  local reloaded=false reload_output data
+  if [ "${do_reload}" = "true" ] && is_box_running; then
+    if reload_output="$(reload 2>&1)"; then
+      reloaded=true
+    else
+      json_error "E_RELOAD" "配置已保存，但 mihomo 重载失败" "${reload_output}"
+      return 1
+    fi
+  fi
+
+  data="$(printf '{"changed":["proxy-groups","rule-providers","rules"],"reloaded":%s,"updated_at":%s,"counts":%s}' \
+    "$(json_bool "${reloaded}")" "$(json_quote "${updated}")" \
+    "$(rule_profile_counts_json)")"
+  json_ok "${data}"
+}
+
 logs_clear_json() {
   local file cleared=""
   for file in "${box_run}/runs.log" "${box_run}/tool.log" "${box_run}/${bin_name}.log"; do
@@ -3434,6 +3619,35 @@ case "$1" in
         ;;
     esac
     ;;
+  rule-profile)
+    case "$2" in
+      get)
+        rule_profile_get_json
+        ;;
+      set)
+        rule_profile_set_json "$3"
+        ;;
+      clear)
+        rule_profile_clear_json
+        ;;
+      url)
+        rule_profile_url_json
+        ;;
+      fetch)
+        rule_profile_fetch_json
+        ;;
+      apply)
+        if [ "$3" = "--reload" ]; then
+          rule_profile_apply_json true
+        else
+          rule_profile_apply_json false
+        fi
+        ;;
+      *)
+        json_error "E_USAGE" "用法: $0 rule-profile {get|set <url>|url|clear|fetch|apply [--reload]} --json"
+        ;;
+    esac
+    ;;
   config)
     case "$2" in
       get)
@@ -3573,7 +3787,7 @@ case "$1" in
     ;;
   *)
     log Error "$0 $1 未找到"
-    log Info "用法: $0 {status|service|settings|config|core|lists|logs|task|reset|sub|subs|geox|geosub|upkernel|upkernels|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|check|memcg|blkio|bond0|bond1|all}"
+    log Info "用法: $0 {status|service|settings|config|rule-profile|core|lists|logs|task|reset|sub|subs|geox|geosub|upkernel|upkernels|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|check|memcg|blkio|bond0|bond1|all}"
     log Info "JSON 调用统一追加 --json，返回 {ok,data,error} 包络"
     log Info "upkernel 支持的核心: sing-box, mihomo, mihomo_smart, sing-box_ref1nd"
     ;;

@@ -8,6 +8,7 @@ export const queryKeys = {
   subscriptions: ["subscriptions"] as const,
   subscription: (name: string) => ["subscriptions", name] as const,
   config: ["config"] as const,
+  ruleProfile: ["rule-profile"] as const,
   settings: ["settings"] as const,
   logs: ["logs"] as const,
   tasks: ["tasks"] as const,
@@ -40,6 +41,16 @@ export function useConfigQuery() {
     queryKey: queryKeys.config,
     queryFn: api.config,
     staleTime: 30_000,
+  });
+}
+
+export function useRuleProfileQuery(options: { enabled?: boolean } = {}) {
+  const { enabled = true } = options;
+  return useQuery({
+    queryKey: queryKeys.ruleProfile,
+    queryFn: api.ruleProfile,
+    enabled,
+    staleTime: 10_000,
   });
 }
 
@@ -123,6 +134,7 @@ export function useInvalidateOperationalQueries() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.status });
     void queryClient.invalidateQueries({ queryKey: queryKeys.subscriptions });
     void queryClient.invalidateQueries({ queryKey: queryKeys.config });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.ruleProfile });
     void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
     void queryClient.invalidateQueries({ queryKey: queryKeys.logs });
     void queryClient.invalidateQueries({ queryKey: queryKeys.tasks });

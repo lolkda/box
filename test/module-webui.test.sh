@@ -372,6 +372,104 @@ jassert '.ok == false and .error.code == "E_VALIDATION"' "${lists_bad}" "lists a
 assert_eq "${before_lists_hash}" "${after_lists_hash}" "lists apply 非法清单不修改文件"
 
 # ---------------------------------------------------------------------------
+# 6b. 全局规则与策略订阅
+# ---------------------------------------------------------------------------
+yq -i '."proxy-providers".test = {"type": "http", "url": "https://nodes.example/test.yaml"}' "${BOX_HOME}/mihomo/config.yaml"
+before_rp_proxy="$(yq -o=json '."proxy-providers"' "${BOX_HOME}/mihomo/config.yaml" | jq -S .)"
+before_rp_port="$(yq -r '."mixed-port"' "${BOX_HOME}/mihomo/config.yaml")"
+before_rp_hash="$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)"
+
+cat > "${WORK}/rule-profile.yaml" <<'EOF'
+proxy-groups:
+  - name: 节点选择
+    type: select
+    include-all: true
+  - name: 直连
+    type: select
+    proxies: [DIRECT]
+rule-providers:
+  ads:
+    type: http
+    behavior: domain
+    format: yaml
+    interval: 86400
+    url: https://rules.example/ads.yaml
+    path: ./rule_provider/ads.yaml
+rules:
+  - RULE-SET,ads,REJECT
+  - MATCH,节点选择
+EOF
+
+cat > "${WORK}/rule-profile-bad.yaml" <<'EOF'
+proxy-groups:
+  - name: 节点选择
+    type: select
+    include-all: true
+rule-providers: {}
+EOF
+
+cat > "${WORK}/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+out=""; url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) shift 2 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "${url}" in
+  https://rule-profile.example/config.yaml) cp "${WORK}/rule-profile.yaml" "${out}" ;;
+  https://rule-profile.example/bad.yaml) cp "${WORK}/rule-profile-bad.yaml" "${out}" ;;
+  *) exit 22 ;;
+esac
+printf '200'
+EOF
+chmod +x "${WORK}/bin/curl"
+
+rp_set="$(run_tool rule-profile set "https://rule-profile.example/config.yaml" --json 2>/dev/null)"
+jassert '.ok == true and .data.supported == true and .data.configured == true and .data.url_masked == "https://rule-profile.example/***"' "${rp_set}" "rule-profile set 返回掩码 URL"
+rp_get="$(run_tool rule-profile get --json 2>/dev/null)"
+jassert '.data.configured == true and .data.counts.groups >= 1 and .data.counts.rule_providers >= 1 and .data.counts.rules >= 1' "${rp_get}" "rule-profile get 返回当前配置计数"
+rp_url="$(run_tool rule-profile url --json 2>/dev/null)"
+jassert '.ok == true and .data.url == "https://rule-profile.example/config.yaml"' "${rp_url}" "rule-profile url 只在编辑时返回完整地址"
+rp_fetch="$(run_tool rule-profile fetch --json 2>/dev/null)"
+jassert '.ok == true and .data.counts.groups == 2 and .data.counts.rule_providers == 1 and .data.counts.rules == 2' "${rp_fetch}" "rule-profile fetch 下载并校验模板"
+assert_eq "${before_rp_hash}" "$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)" "fetch 不修改 config.yaml"
+rp_apply="$(run_tool rule-profile apply --json 2>/dev/null)"
+jassert '.ok == true and .data.reloaded == false and (.data.changed | length) == 3' "${rp_apply}" "rule-profile apply 应用三段"
+rp_after="$(run_tool rule-profile get --json 2>/dev/null)"
+jassert '.data.counts.groups == 2 and .data.counts.rule_providers == 1 and .data.counts.rules == 2 and .data.updated_at != ""' "${rp_after}" "rule-profile apply 更新计数和时间"
+assert_eq "${before_rp_proxy}" "$(yq -o=json '."proxy-providers"' "${BOX_HOME}/mihomo/config.yaml" | jq -S .)" "apply 保留 proxy-providers"
+assert_eq "${before_rp_port}" "$(yq -r '."mixed-port"' "${BOX_HOME}/mihomo/config.yaml")" "apply 保留 mixed-port"
+[ -f "${BOX_HOME}/mihomo/config.yaml.bak" ] && ok "apply 生成 config.yaml.bak" || bad "apply 生成 config.yaml.bak"
+grep -q 'DOMAIN,example.com,国外代理' "${BOX_HOME}/mihomo/config.yaml" && bad "apply 应替换旧规则" || ok "apply 替换旧规则"
+
+rp_fetch_reload="$(run_tool rule-profile fetch --json 2>/dev/null)"
+jassert '.ok == true' "${rp_fetch_reload}" "rule-profile 重新 fetch 成功"
+rp_apply_reload="$(run_tool rule-profile apply --reload --json 2>/dev/null)"
+jassert '.ok == true and .data.reloaded == false' "${rp_apply_reload}" "服务未运行时 apply --reload 返回未重载"
+
+rp_bad_before="$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)"
+run_tool rule-profile set "https://rule-profile.example/bad.yaml" --json >/dev/null 2>&1
+rp_bad_fetch="$(run_tool rule-profile fetch --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${rp_bad_fetch}" "rule-profile 拒绝缺少 rules 的模板"
+assert_eq "${rp_bad_before}" "$(md5sum "${BOX_HOME}/mihomo/config.yaml" | cut -d' ' -f1)" "非法模板不修改 config.yaml"
+
+rp_clear="$(run_tool rule-profile clear --json 2>/dev/null)"
+jassert '.ok == true and .data.cleared == true' "${rp_clear}" "rule-profile clear 清除 URL"
+rp_cleared="$(run_tool rule-profile get --json 2>/dev/null)"
+jassert '.data.configured == false and .data.url_masked == ""' "${rp_cleared}" "清除后规则订阅为未配置"
+run_tool rule-profile set "https://secret.example/config.yaml?token=abc123" --json >/dev/null 2>&1
+if grep -Fq 'token=abc123' "${BOX_HOME}/run/tool.log" 2>/dev/null; then
+  bad "tool.log 不泄露规则订阅 token"
+else
+  ok "tool.log 不泄露规则订阅 token"
+fi
+run_tool rule-profile clear --json >/dev/null 2>&1
+rm -f "${WORK}/bin/curl"
+
+# ---------------------------------------------------------------------------
 # 7. 日志 JSON 接口
 # ---------------------------------------------------------------------------
 mkdir -p "${BOX_HOME}/run"
@@ -455,6 +553,10 @@ core_sing="$(run_tool core get --json 2>/dev/null)"
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${core_sing}" "sing-box 不支持 mihomo 核心配置接口"
 config_sing="$(run_tool config get --json 2>/dev/null)"
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${config_sing}" "sing-box 不支持 mihomo 规则配置接口"
+rp_sing="$(run_tool rule-profile get --json 2>/dev/null)"
+jassert '.ok == true and .data.supported == false' "${rp_sing}" "sing-box 规则订阅返回不支持状态"
+rp_set_sing="$(run_tool rule-profile set "https://rules.example/config.yaml" --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${rp_set_sing}" "sing-box 拒绝配置规则订阅"
 
 # ---------------------------------------------------------------------------
 # 10. runtime 恢复与损坏设置

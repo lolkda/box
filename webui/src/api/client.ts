@@ -7,6 +7,9 @@ import type {
   MihomoStructuredConfig,
   LogsData,
   PackageInfo,
+  RuleProfileApplied,
+  RuleProfileData,
+  RuleProfileFetched,
   ServiceAction,
   SettingsData,
   StatusData,
@@ -215,6 +218,19 @@ export const api = {
 
   removeSubscription: (name: string) => runJson<{ name: string }>(["sub", "rm", name, "--json"]),
   config: () => runJson<ConfigData>(["config", "get", "--json"]),
+
+  ruleProfile: () => runJson<RuleProfileData>(["rule-profile", "get", "--json"]),
+
+  setRuleProfile: (url: string) => runJson<RuleProfileData>(["rule-profile", "set", url, "--json"]),
+
+  ruleProfileUrl: () => runJson<{ url: string }>(["rule-profile", "url", "--json"]),
+
+  clearRuleProfile: () => runJson<{ cleared: boolean }>(["rule-profile", "clear", "--json"]),
+
+  fetchRuleProfile: () => runJson<RuleProfileFetched>(["rule-profile", "fetch", "--json"]),
+
+  applyRuleProfile: (reload: boolean) =>
+    runJson<RuleProfileApplied>(reload ? ["rule-profile", "apply", "--reload", "--json"] : ["rule-profile", "apply", "--json"]),
 
   applyConfig: (config: ConfigData) => runJsonWithFile<{ changed: string[] }>(["config", "apply"], config),
 

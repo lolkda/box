@@ -18,6 +18,7 @@ import { PageTitle } from "../../components/ui/page-title";
 import { Sheet } from "../../components/ui/sheet";
 import { PageSkeleton } from "../../components/ui/skeleton";
 import { useToast } from "../../components/ui/toast";
+import { RuleProfileCard } from "./rule-profile-card";
 import { formatBytes, formatDateTime, getErrorMessage } from "../../lib/utils";
 
 interface SubscriptionForm {
@@ -148,7 +149,7 @@ export function SubscriptionsPage() {
     <div className="space-y-4">
       <PageTitle
         title="订阅"
-        description="订阅地址默认掩码显示，只有编辑时读取完整地址"
+        description="节点订阅与规则策略分开管理，地址默认掩码显示"
         action={
           <>
             <Button variant="secondary" size="icon" aria-label="更新全部订阅" onClick={() => void updateAll()} loading={updatingAll}>
@@ -160,6 +161,8 @@ export function SubscriptionsPage() {
           </>
         }
       />
+
+      <RuleProfileCard />
 
       {subscriptionsQuery.isLoading ? (
         <PageSkeleton />

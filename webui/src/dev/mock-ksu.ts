@@ -14,6 +14,8 @@ interface MockState {
   tokenPreview: string;
   logs: string[];
   tasks: TaskInfo[];
+  ruleProfileUrl: string;
+  ruleProfileUpdatedAt: string;
 }
 
 const now = () => new Date().toISOString();
@@ -162,6 +164,8 @@ const state: MockState = {
     ],
   },
   configExists: true,
+  ruleProfileUrl: "",
+  ruleProfileUpdatedAt: "",
   ...buildSettings(),
   logs: [
     "2026-11-23 07:40:12 [Info]: Box 服务已启动",
@@ -358,6 +362,50 @@ function handle(args: string[]): unknown {
         return envelope({ name: rest[0] });
       }
       if (action === "update") return envelope({ updated: true, partial: false, failed: false });
+      break;
+    }
+    case "rule-profile": {
+      const counts = {
+        groups: state.config["proxy-groups"].length,
+        rule_providers: Object.keys(state.config["rule-providers"]).length,
+        rules: state.config.rules.length,
+      };
+      const profile = {
+        supported: state.core === "mihomo",
+        configured: Boolean(state.ruleProfileUrl),
+        url_masked: state.ruleProfileUrl ? state.ruleProfileUrl.replace(/\/[^/]*$/, "/***") : "",
+        updated_at: state.ruleProfileUpdatedAt,
+        counts,
+      };
+      if (action === "get") return envelope(profile);
+      if (action === "url") return state.ruleProfileUrl ? envelope({ url: state.ruleProfileUrl }) : failure("E_NOT_FOUND", "还没有配置规则与策略订阅");
+      if (action === "set") {
+        const url = rest[0] || "";
+        if (!/^https?:\/\//.test(url)) return failure("E_VALIDATION", "规则模板地址必须以 http:// 或 https:// 开头");
+        state.ruleProfileUrl = url;
+        return envelope({ ...profile, configured: true, url_masked: url.replace(/\/[^/]*$/, "/***") });
+      }
+      if (action === "clear") {
+        state.ruleProfileUrl = "";
+        state.ruleProfileUpdatedAt = "";
+        return envelope({ cleared: true });
+      }
+      if (action === "fetch") {
+        return envelope({
+          url_masked: profile.url_masked,
+          fetched_at: now(),
+          counts: { groups: 22, rule_providers: 33, rules: 49 },
+        });
+      }
+      if (action === "apply") {
+        state.ruleProfileUpdatedAt = now();
+        return envelope({
+          changed: ["proxy-groups", "rule-providers", "rules"],
+          reloaded: rest.includes("--reload") ? state.running : false,
+          updated_at: state.ruleProfileUpdatedAt,
+          counts,
+        });
+      }
       break;
     }
     case "config": {
