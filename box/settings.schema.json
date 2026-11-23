@@ -1,0 +1,363 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Box for Root settings",
+  "description": "User-editable settings. Internal paths and runtime-derived values are not part of this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "auto_modify_config": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "boot_auto_start": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "bin_name": {
+      "type": "string",
+      "enum": [
+        "mihomo",
+        "sing-box"
+      ]
+    },
+    "network_mode": {
+      "type": "string",
+      "enum": [
+        "tun",
+        "tproxy",
+        "ebpf",
+        "redirect",
+        "mixed",
+        "enhance"
+      ]
+    },
+    "tproxy_port": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "redir_port": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "ipv6": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "performance_mode": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "quic": {
+      "type": "string",
+      "enum": [
+        "enable",
+        "disable"
+      ]
+    },
+    "mihomo_dns_forward": {
+      "type": "string",
+      "enum": [
+        "enable",
+        "disable"
+      ]
+    },
+    "proxy_tcp": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "proxy_udp": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "dns_hijack_tcp": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "dns_hijack_udp": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "dns_hijack_mode": {
+      "type": "string",
+      "enum": [
+        "disable",
+        "tproxy",
+        "redirect"
+      ]
+    },
+    "bypass_cn_ip": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "bypass_cn_ip_v4": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "bypass_cn_ip_v6": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "cnip_mode": {
+      "type": "string",
+      "enum": [
+        "ipset",
+        "ebpf"
+      ]
+    },
+    "cn_ip_url": {
+      "type": "string",
+      "pattern": "^(https?://.*)?$"
+    },
+    "cn_ipv6_url": {
+      "type": "string",
+      "pattern": "^(https?://.*)?$"
+    },
+    "proxy_mode": {
+      "type": "string",
+      "enum": [
+        "core",
+        "blacklist",
+        "whitelist"
+      ]
+    },
+    "update_subscription": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "update_geo": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "use_ghproxy": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "url_ghproxy": {
+      "type": "string",
+      "pattern": "^(https?://.*)?$"
+    },
+    "mihomo_stable": {
+      "type": "string",
+      "enum": [
+        "enable",
+        "disable"
+      ]
+    },
+    "singbox_stable": {
+      "type": "string",
+      "enum": [
+        "enable",
+        "disable"
+      ]
+    },
+    "subscription_url_singbox": {
+      "type": "string",
+      "pattern": "^(https?://.*)?$"
+    },
+    "run_crontab": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "interva_update": {
+      "type": "string",
+      "description": "5-field cron expression"
+    },
+    "cgroup_memcg": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "memcg_limit": {
+      "type": "string",
+      "pattern": "^[0-9]+[KMGkmg]?$"
+    },
+    "taskset_cpu": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "allow_cpu": {
+      "type": "string",
+      "pattern": "^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
+    },
+    "cgroup_blkio": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "weight": {
+      "type": "string",
+      "pattern": "^([0-9]+)?$"
+    },
+    "mac_filter": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "mac_mode": {
+      "type": "string",
+      "enum": [
+        "blacklist",
+        "whitelist"
+      ]
+    },
+    "ruleset_prefix": {
+      "type": "string",
+      "pattern": "^(https?://.*)?$"
+    },
+    "subscription_keep_last_good": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "enable_network_service_control": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "use_module_on_wifi": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "use_module_on_wifi_disconnect": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "use_ssid_matching": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "use_wifi_list_mode": {
+      "type": "string",
+      "enum": [
+        "blacklist",
+        "whitelist"
+      ]
+    },
+    "inotify_log_enabled": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "renew": {
+      "type": "string",
+      "enum": [
+        "true",
+        "false"
+      ]
+    },
+    "cnip_force_proxy_apps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^([0-9]+:)?[A-Za-z0-9._]+$"
+      }
+    },
+    "force_proxy_cidrs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^([0-9]{1,3}\\\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+      }
+    },
+    "force_proxy_cidrs6": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[^:]+:.*$"
+      }
+    },
+    "macs_list": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$"
+      }
+    },
+    "wifi_ssids_list": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "wifi_bssids_list": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$"
+      }
+    }
+  }
+}

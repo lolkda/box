@@ -29,7 +29,9 @@
 │   ├── box.iptables    # 透明代理规则管理
 │   └── box.tool        # 更新与维护工具集
 ├── run/                # 运行时状态与日志
-└── settings.ini        # 全局配置文件
+├── settings.json       # 用户设置（唯一配置源）
+├── settings.schema.json # 设置字段约束
+└── settings.base.sh    # 静态内部路径与函数
 ```
 
 ## 核心脚本
@@ -51,7 +53,7 @@ su -c "/data/adb/box/scripts/box.tool sub update"
 
 - 更新订阅会重建 `proxy-providers` 并重载核心。
 - 下载或解析失败时保留上一个可用节点文件，不会清空。
-- `settings.ini` 的 `ruleset_prefix` 可给规则集地址加镜像前缀，留空使用官方地址。
+- `settings.json` 的 `ruleset_prefix` 可给规则集地址加镜像前缀，留空使用官方地址。
 
 ## 管理页面（KernelSU WebUI）
 
@@ -78,6 +80,8 @@ cd webui && npm install && npm run build
 ```
 
 构建产物输出到 `webroot/`，模块打包时直接包含该目录。模块包同时内置 zashboard（构建时获取最新 `dist-no-fonts`），安装/升级后 mihomo 的 `/ui` 固定由 zashboard 提供；`box.tool upxui` 或核心配置页的「更新面板」可手动更新。规格见 [module-dashboard-zashboard.md](docs/specs/module-dashboard-zashboard.md)。
+
+设置数据层使用 `settings.json` + `settings.schema.json`，运行时由 `box.tool` 生成 `run/settings.runtime.sh`；旧 `settings.ini` 不兼容并会在升级时重置。规格见 [module-settings-json.md](docs/specs/module-settings-json.md)。
 
 ## 文档与社区
 

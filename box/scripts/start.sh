@@ -1,11 +1,13 @@
 #!/system/bin/sh
 
 scripts_dir="${0%/*}"
-file_settings="/data/adb/box/settings.ini"
+BOX_DIR="${BOX_HOME:-/data/adb/box}"
 moddir="/data/adb/modules/box_for_root"
 
-if [ -f "$file_settings" ]; then
-    . "$file_settings"
+. "${BOX_DIR}/settings.base.sh"
+if ! settings_load; then
+    log Error "设置加载失败，跳过开机启动"
+    exit 1
 fi
 
 # busybox Magisk/KSU/Apatch
@@ -28,10 +30,6 @@ refresh_box() {
 }
 
 start_service() {
-  if [ -f "$file_settings" ]; then
-    . "$file_settings"
-  fi
-  
   if [ "$boot_auto_start" = "false" ]; then
     log Info "开机自启已禁用，跳过启动核心服务。"
     return 0
@@ -89,7 +87,7 @@ if [ -f "/data/adb/box/manual" ]; then
   exit 1
 fi
 
-if [ -f "$file_settings" ] && [ -r "$file_settings" ] && [ -s "$file_settings" ]; then
+if [ -s "$settings_runtime_file" ]; then
   wait_for_data_ready
   refresh_box
   start_service

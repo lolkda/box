@@ -41,7 +41,11 @@ run_tool() { bash -O extglob "${BOX_HOME}/scripts/box.tool" "$@"; }
 
 setup() {
   mkdir -p "${BOX_HOME}/mihomo" "${BOX_HOME}/sing-box" "${BOX_HOME}/bin" "${BOX_HOME}/scripts" "${WORK}/bin"
-  cp "${ROOT}/box/settings.ini" "${BOX_HOME}/settings.ini"
+  cp "${ROOT}/box/settings.json" "${BOX_HOME}/settings.json"
+  cp "${ROOT}/box/settings.default.json" "${BOX_HOME}/settings.default.json"
+  cp "${ROOT}/box/settings.schema.json" "${BOX_HOME}/settings.schema.json"
+  cp "${ROOT}/box/settings.base.sh" "${BOX_HOME}/settings.base.sh"
+  cp "${ROOT}/box/scripts/settings-gen.awk" "${BOX_HOME}/scripts/settings-gen.awk"
   cp "${ROOT}/box/mihomo/config.yaml" "${BOX_HOME}/mihomo/config.yaml"
   cp "${ROOT}/box/sing-box/config.json" "${BOX_HOME}/sing-box/config.json"
   cp "${ROOT}/box/scripts/box.tool" "${BOX_HOME}/scripts/box.tool"
@@ -92,9 +96,10 @@ jassert '.data.items | length == 0' "${list_json}" "sub rm 删除订阅"
 # 3. 设置 JSON 接口与后端校验
 # ---------------------------------------------------------------------------
 settings_json="$(run_tool settings get --json 2>/dev/null)"
-jassert '.ok == true and (.data.settings | has("network_mode")) and (.data.settings | has("githubtoken") | not)' "${settings_json}" "settings get 不返回 token 明文"
-jassert '(.data.arrays | has("wifi_ssids_list")) and .data.sensitive.githubtoken.set == false' "${settings_json}" "settings get 返回数组和敏感状态"
-jassert '(.data.settings | has("cn_ip_url")) and (.data.settings | has("cn_ipv6_url")) and (.data.settings | has("subscription_url_singbox"))' "${settings_json}" "settings get 返回新增配置键"
+jassert '.ok == true and (.data | has("network_mode")) and (.data | has("githubtoken") | not)' "${settings_json}" "settings get 不返回 token 明文"
+jassert '(.data | has("wifi_ssids_list")) and .data.sensitive.githubtoken.set == false' "${settings_json}" "settings get 返回数组和敏感状态"
+jassert '(.data | has("cn_ip_url")) and (.data | has("cn_ipv6_url")) and (.data | has("subscription_url_singbox"))' "${settings_json}" "settings get 返回新增配置键"
+assert_eq "$(jq -r 'keys[]' "${BOX_HOME}/settings.json" | sort)" "$(jq -r '.properties | keys[]' "${BOX_HOME}/settings.schema.json" | sort)" "默认 settings 与 schema 键一致"
 
 cat > "${WORK}/settings.json" <<'EOF'
 {"network_mode":"tproxy","wifi_ssids_list":["My Home WiFi","Cafe 'Test'"],"githubtoken":"abcdef1234567890"}
@@ -103,10 +108,11 @@ settings_result="$(run_tool settings apply "${WORK}/settings.json" --json 2>/dev
 jassert '.ok == true and (.data.changed | index("network_mode")) != null' "${settings_result}" "settings apply 返回 changed"
 
 settings_after="$(run_tool settings get --json 2>/dev/null)"
-jassert '.data.settings.network_mode == "tproxy" and .data.sensitive.githubtoken.set == true' "${settings_after}" "settings 写入后读取一致"
+jassert '.data.network_mode == "tproxy" and .data.sensitive.githubtoken.set == true' "${settings_after}" "settings 写入后读取一致"
 
 cat > "${WORK}/check-array.sh" <<'EOF'
-source "${BOX_HOME}/settings.ini" >/dev/null 2>&1
+. "${BOX_HOME}/settings.base.sh"
+settings_load
 [ "${#wifi_ssids_list[@]}" -eq 2 ] || exit 1
 [ "${wifi_ssids_list[0]}" = "My Home WiFi" ] || exit 1
 [ "${wifi_ssids_list[1]}" = "Cafe 'Test'" ] || exit 1
@@ -116,17 +122,31 @@ if BOX_HOME="${BOX_HOME}" bash "${WORK}/check-array.sh"; then
 else
   bad "settings 数组正确转义空格与单引号"
 fi
-assert_eq "githubtoken='abcdef1234567890'" "$(grep '^githubtoken=' "${BOX_HOME}/settings.ini")" "settings 写入 githubtoken"
-if bash -n "${BOX_HOME}/settings.ini" 2>/dev/null; then ok "settings.ini 语法可解析"; else bad "settings.ini 语法可解析"; fi
+assert_eq "githubtoken='abcdef1234567890'" "$(grep '^githubtoken=' "${BOX_HOME}/run/settings.runtime.sh")" "settings 写入 githubtoken"
+if bash -n "${BOX_HOME}/run/settings.runtime.sh" 2>/dev/null; then ok "settings.runtime.sh 语法可解析"; else bad "settings.runtime.sh 语法可解析"; fi
 
 cat > "${WORK}/bad-settings.json" <<'EOF'
 {"network_mode":"bad-mode"}
 EOF
-before_hash="$(md5sum "${BOX_HOME}/settings.ini" | cut -d' ' -f1)"
+before_hash="$(md5sum "${BOX_HOME}/settings.json" | cut -d' ' -f1)"
+before_runtime_hash="$(md5sum "${BOX_HOME}/run/settings.runtime.sh" | cut -d' ' -f1)"
 bad_result="$(run_tool settings apply "${WORK}/bad-settings.json" --json 2>/dev/null)"
-after_hash="$(md5sum "${BOX_HOME}/settings.ini" | cut -d' ' -f1)"
+after_hash="$(md5sum "${BOX_HOME}/settings.json" | cut -d' ' -f1)"
+after_runtime_hash="$(md5sum "${BOX_HOME}/run/settings.runtime.sh" | cut -d' ' -f1)"
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_result}" "非法枚举返回 E_VALIDATION"
-assert_eq "${before_hash}" "${after_hash}" "非法设置不修改文件"
+assert_eq "${before_hash}" "${after_hash}" "非法设置不修改 settings.json"
+assert_eq "${before_runtime_hash}" "${after_runtime_hash}" "非法设置不修改 settings.runtime.sh"
+
+cat > "${WORK}/missing-settings.json" <<'EOF'
+{"tproxy_port":"7777"}
+EOF
+run_tool settings apply "${WORK}/missing-settings.json" --json >/dev/null 2>&1
+settings_missing="$(run_tool settings get --json 2>/dev/null)"
+jassert '.data.tproxy_port == "7777" and (.data | has("network_mode")) and (.data | has("wifi_ssids_list"))' "${settings_missing}" "缺失键补默认值"
+
+run_tool settings set use_ghproxy true --json >/dev/null 2>&1
+jassert '.use_ghproxy == "true"' "$(cat "${BOX_HOME}/settings.json")" "settings set 更新 JSON"
+assert_eq "use_ghproxy='true'" "$(grep '^use_ghproxy=' "${BOX_HOME}/run/settings.runtime.sh")" "settings set 同步 runtime"
 
 cat > "${WORK}/unknown-settings.json" <<'EOF'
 {"not_a_real_key":"x"}
@@ -303,11 +323,26 @@ run_tool settings apply "${WORK}/switch-singbox.json" --json >/dev/null 2>&1
 sing_status="$(run_tool status --json 2>/dev/null)"
 jassert '.ok == true and .data.core == "sing-box" and .data.config == "config.json" and .data.config_exists == true' "${sing_status}" "status 正确识别 sing-box 配置"
 settings_sing="$(run_tool settings get --json 2>/dev/null)"
-jassert '.data.settings.subscription_url_singbox == "https://example.com/singbox"' "${settings_sing}" "sing-box 订阅地址写入 settings"
+jassert '.data.subscription_url_singbox == "https://example.com/singbox"' "${settings_sing}" "sing-box 订阅地址写入 settings"
 core_sing="$(run_tool core get --json 2>/dev/null)"
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${core_sing}" "sing-box 不支持 mihomo 核心配置接口"
 config_sing="$(run_tool config get --json 2>/dev/null)"
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${config_sing}" "sing-box 不支持 mihomo 规则配置接口"
+
+# ---------------------------------------------------------------------------
+# 10. runtime 恢复与损坏设置
+# ---------------------------------------------------------------------------
+rm -f "${BOX_HOME}/run/settings.runtime.sh"
+status_regen="$(run_tool status --json 2>/dev/null)"
+jassert '.ok == true and .data.running == false' "${status_regen}" "runtime 缺失时按 settings.json 恢复"
+
+cp "${BOX_HOME}/settings.json" "${WORK}/settings-valid-backup.json"
+printf '{broken-json' > "${BOX_HOME}/settings.json"
+corrupt_result="$(run_tool settings get --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${corrupt_result}" "损坏 settings.json 返回 E_VALIDATION"
+status_corrupt="$(run_tool status --json 2>/dev/null)"
+jassert '.ok == true and .data.running == false' "${status_corrupt}" "损坏 settings.json 时保留旧 runtime"
+mv "${WORK}/settings-valid-backup.json" "${BOX_HOME}/settings.json"
 
 # ---------------------------------------------------------------------------
 # 10. CLI 文本兼容（不带 --json）

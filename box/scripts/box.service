@@ -1,7 +1,12 @@
 #!/system/bin/sh
 
 scripts_dir="${0%/*}"
-source /data/adb/box/settings.ini
+BOX_DIR="${BOX_HOME:-/data/adb/box}"
+. "${BOX_DIR}/settings.base.sh"
+if ! settings_load; then
+  printf 'settings load failed\n' >&2
+  exit 1
+fi
 
 PROPFILE="/data/adb/modules/box_for_root/module.prop"
 
@@ -234,8 +239,7 @@ box_permission() {
   else
     if  [[ "${box_user_group}" != @(root:net_admin|0:3005) ]]; then
       log Error "不支持的用户组 [ \"${box_user_group}\" ]"
-      sed -i "s/box_user_group=.*/box_user_group=\"root:net_admin\"/g" "${settings_file}"
-      log Debug "已自动切换为 [ root:net_admin ]，请重启 box"
+      log Error "box_user_group 必须为 root:net_admin 或 0:3005，请检查 settings.base.sh"
       exit 1
     fi
     log Error "未检测到内核 [ \"${bin_name}\" ]。"
@@ -1179,7 +1183,7 @@ box_cgroup() {
       else
         log Warning "无法为 ${bin_name} 启用 ${cgroup_attr}"
         log Warning "已关闭 cgroups ${cgroup_attr}"
-        sed -i -E "/cgroup_${cgroup_attr}/ s/(true)/false/" "${settings_file}"
+        "${scripts_dir}/box.tool" settings set "cgroup_${cgroup_attr}" "false" --json >/dev/null 2>&1 || true
       fi
     fi
   }

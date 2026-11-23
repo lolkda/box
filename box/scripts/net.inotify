@@ -344,12 +344,15 @@ apply_network_control_policy() {
 
 if [ "${events}" = "w" ]; then
   reset_event_logs
-  if [ ! -f "${BASE_DIR}/settings.ini" ]; then
-    net_log_warn "未找到 settings.ini，跳过本次处理"
+  if [ ! -f "${BASE_DIR}/settings.base.sh" ]; then
+    net_log_warn "未找到 settings.base.sh，跳过本次处理"
     exit 0
   fi
-
-  . "${BASE_DIR}/settings.ini"
+  . "${BASE_DIR}/settings.base.sh"
+  if ! settings_load; then
+    net_log_warn "设置加载失败，跳过本次处理"
+    exit 0
+  fi
   if [ -f "${BOX_PID_FILE}" ]; then
     update_local_ip_rules
   else

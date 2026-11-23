@@ -31,7 +31,11 @@ assert_not_contains() {
 
 setup() {
   mkdir -p "${BOX_HOME}/mihomo/dashboard" "${BOX_HOME}/sing-box" "${BOX_HOME}/scripts" "${WORK}/bin" "${WORK}/fixture/dist"
-  cp "${ROOT}/box/settings.ini" "${BOX_HOME}/settings.ini"
+  cp "${ROOT}/box/settings.json" "${BOX_HOME}/settings.json"
+  cp "${ROOT}/box/settings.default.json" "${BOX_HOME}/settings.default.json"
+  cp "${ROOT}/box/settings.schema.json" "${BOX_HOME}/settings.schema.json"
+  cp "${ROOT}/box/settings.base.sh" "${BOX_HOME}/settings.base.sh"
+  cp "${ROOT}/box/scripts/settings-gen.awk" "${BOX_HOME}/scripts/settings-gen.awk"
   cp "${ROOT}/box/mihomo/config.yaml" "${BOX_HOME}/mihomo/config.yaml"
   cp "${ROOT}/box/sing-box/config.json" "${BOX_HOME}/sing-box/config.json"
   cp "${ROOT}/box/scripts/box.tool" "${BOX_HOME}/scripts/box.tool"

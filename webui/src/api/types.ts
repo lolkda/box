@@ -59,15 +59,16 @@ export interface ConfigData {
   rules: string[];
 }
 
-export interface SettingsData {
-  settings: Record<string, string>;
-  arrays: Record<string, string[]>;
-  sensitive: {
-    githubtoken: {
-      set: boolean;
-      preview: string;
-    };
+export interface SettingsSensitive {
+  githubtoken: {
+    set: boolean;
+    preview: string;
   };
+}
+
+export interface SettingsData {
+  [key: string]: string | string[] | SettingsSensitive;
+  sensitive: SettingsSensitive;
 }
 
 export interface LogsData {

@@ -3,13 +3,23 @@
 scripts_dir="${0%/*}"
 
 user_agent="box_for_root"
-source "${BOX_HOME:-/data/adb/box}/settings.ini"
+BOX_DIR="${BOX_HOME:-/data/adb/box}"
+if [ ! -f "${BOX_DIR}/settings.base.sh" ]; then
+  printf '{"ok":false,"error":{"code":"E_IO","message":"settings.base.sh 不存在","detail":""}}' >&2
+  exit 1
+fi
+. "${BOX_DIR}/settings.base.sh"
 
 for _arg in "$@"; do
   [ "${_arg}" = "--json" ] && export BOX_JSON_MODE=1
 done
 
-# 使用 settings.ini 中提供的 log()
+if ! settings_load; then
+  printf '{"ok":false,"error":{"code":"E_VALIDATION","message":"设置加载失败","detail":"settings.json 或 settings.runtime.sh 不可用"}}' >&2
+  exit 1
+fi
+
+# 使用 settings.base.sh 中提供的 log()
 TOOL_LOG="${box_run}/tool.log"
 busybox mkdir -p "$(dirname "$TOOL_LOG")"
 box_log="$TOOL_LOG"
@@ -1278,29 +1288,6 @@ sub_update_json() {
   json_ok "$(printf '{"updated":true,"partial":false,"failed":false}')"
 }
 
-settings_scalar_keys() {
-  cat <<'EOF'
-auto_modify_config boot_auto_start bin_name network_mode tproxy_port redir_port ipv6 performance_mode quic mihomo_dns_forward proxy_tcp proxy_udp dns_hijack_tcp dns_hijack_udp dns_hijack_mode bypass_cn_ip bypass_cn_ip_v4 bypass_cn_ip_v6 cnip_mode cn_ip_url cn_ipv6_url proxy_mode update_subscription update_geo use_ghproxy url_ghproxy mihomo_stable singbox_stable subscription_url_singbox run_crontab interva_update cgroup_memcg memcg_limit taskset_cpu allow_cpu cgroup_blkio weight mac_filter mac_mode ruleset_prefix subscription_keep_last_good enable_network_service_control use_module_on_wifi use_module_on_wifi_disconnect use_ssid_matching use_wifi_list_mode inotify_log_enabled renew
-EOF
-}
-
-settings_array_keys() {
-  cat <<'EOF'
-cnip_force_proxy_apps force_proxy_cidrs force_proxy_cidrs6 macs_list wifi_ssids_list wifi_bssids_list
-EOF
-}
-
-settings_all_keys() {
-  settings_scalar_keys
-  settings_array_keys
-  printf 'githubtoken\n'
-}
-
-settings_value() {
-  local key="$1"
-  eval "printf '%s' \"\${${key}}\""
-}
-
 settings_validate_scalar() {
   local key="$1"
   local value="$2"
@@ -1368,216 +1355,198 @@ settings_validate_scalar() {
   esac
 }
 
-settings_replace_line() {
-  local file="$1"
-  local key="$2"
-  local replacement="$3"
-  local escaped
-  escaped="$(printf '%s' "${replacement}" | busybox sed 's/[&\\#]/\\&/g')"
-  if busybox grep -q "^${key}=" "${file}"; then
-    busybox sed -i "s#^${key}=.*#${key}=${escaped}#" "${file}" || return 1
-  else
-    printf '%s=%s\n' "${key}" "${replacement}" >> "${file}" || return 1
+
+settings_json_data() {
+  local default_file="${settings_default_file}"
+  local allowed
+
+  [ -f "${settings_json_file}" ] || return 1
+  [ -f "${default_file}" ] || default_file="${settings_json_file}"
+  allowed=" $(settings_allowed_keys | busybox tr '\n' ' ') "
+  busybox awk -v mode=json -v allowed="${allowed}" -f "${box_dir}/scripts/settings-gen.awk" \
+    "${default_file}" "${settings_json_file}" 2>/dev/null
+}
+
+settings_token_value() {
+  if [ -f "${settings_token_file}" ] && [ -s "${settings_token_file}" ]; then
+    cat "${settings_token_file}"
   fi
 }
 
 settings_get_json() {
-  printf '{"ok":true,"data":{"settings":{'
-  local first=1
-  for key in $(settings_scalar_keys); do
-    local value
-    value="$(settings_value "${key}")"
-    [ "${first}" -eq 1 ] || printf ','
-    printf '%s:%s' "$(json_quote "${key}")" "$(json_quote "${value}")"
-    first=0
-  done
-  printf '},"arrays":{'
-  first=1
-  for key in $(settings_array_keys); do
-    [ "${first}" -eq 1 ] || printf ','
-    printf '%s:[' "$(json_quote "${key}")"
-    local items
-    eval "items=(\"\${${key}[@]}\")"
-    local array_first=1
-    for item in "${items[@]}"; do
-      [ "${array_first}" -eq 1 ] || printf ','
-      printf '%s' "$(json_quote "${item}")"
-      array_first=0
-    done
-    printf ']'
-    first=0
-  done
-  local token_set=false token_preview=""
-  if [ -n "${githubtoken}" ]; then
-    token_set=true
-    token_preview="$(mask_secret "${githubtoken}")"
+  local settings_json token token_set=false token_preview=""
+
+  if ! settings_json="$(settings_json_data)"; then
+    json_error "E_VALIDATION" "settings.json 格式或字段不合法" "请通过设置页修复"
+    return 1
   fi
-  printf '},"sensitive":{"githubtoken":{"set":%s,"preview":%s}}},"meta":{"version":1}}\n' \
-    "$(json_bool "${token_set}")" "$(json_quote "${token_preview}")"
+  token="$(settings_token_value)"
+  if [ -n "${token}" ]; then
+    token_set=true
+    token_preview="$(mask_secret "${token}")"
+  fi
+  printf '{"ok":true,"data":%s,"sensitive":{"githubtoken":{"set":%s,"preview":%s}}},"meta":{"version":1}}\n' \
+    "${settings_json%?}" "$(json_bool "${token_set}")" "$(json_quote "${token_preview}")"
+}
+
+settings_validate_array() {
+  local key="$1"
+  local item="$2"
+  case "${key}" in
+    cnip_force_proxy_apps)
+      printf '%s' "${item}" | busybox grep -Eq '^([0-9]+:)?[A-Za-z0-9._]+$' || return 1
+      ;;
+    force_proxy_cidrs)
+      printf '%s' "${item}" | busybox grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' || return 1
+      ;;
+    force_proxy_cidrs6)
+      case "${item}" in *:*) ;; *) return 1 ;; esac
+      ;;
+    macs_list|wifi_bssids_list)
+      printf '%s' "${item}" | busybox grep -Eiq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return 1
+      ;;
+  esac
 }
 
 settings_apply_json() {
   local file="$1"
+  local default_file="${settings_default_file}"
+  local allowed tmp_json tmp_runtime tmp_assign tmp_token token_value
+  local key value item changed="" first=1
+
   if [ ! -s "${file}" ]; then
     json_error "E_USAGE" "settings apply: 缺少 JSON 文件"
     return 1
   fi
-  if [ ! -f "${settings_file}" ]; then
-    json_error "E_IO" "settings.ini 不存在"
+  [ -f "${settings_json_file}" ] || {
+    json_error "E_IO" "settings.json 不存在"
+    return 1
+  }
+  [ -f "${default_file}" ] || default_file="${settings_json_file}"
+  allowed=" $(settings_allowed_keys | busybox tr '\n' ' ') "
+
+  tmp_json="${settings_json_file}.tmp.$$"
+  tmp_runtime="${settings_runtime_file}.tmp.$$"
+  tmp_assign="${box_run}/settings.assign.$$"
+
+  if ! busybox awk -v mode=json -v allowed="${allowed}" -f "${box_dir}/scripts/settings-gen.awk" \
+      "${default_file}" "${file}" > "${tmp_json}" 2>/dev/null; then
+    rm -f "${tmp_json}" "${tmp_assign}"
+    json_error "E_VALIDATION" "设置 JSON 无法解析或包含未知键"
+    return 1
+  fi
+  if ! busybox awk -v allowed="${allowed}" -f "${box_dir}/scripts/settings-gen.awk" \
+      "${default_file}" "${file}" > "${tmp_assign}" 2>/dev/null; then
+    rm -f "${tmp_json}" "${tmp_assign}"
+    json_error "E_VALIDATION" "设置 JSON 无法解析"
     return 1
   fi
 
-  ensure_yq
-
-  if ! ${yq} -e 'tag == "!!map"' "${file}" >/dev/null 2>&1; then
-    json_error "E_VALIDATION" "设置必须是 JSON 对象"
-    return 1
-  fi
-
-  local allowed=" $(settings_all_keys | busybox tr '\n' ' ') "
-  local key
-  for key in $(${yq} -r 'keys | .[]' "${file}" 2>/dev/null); do
-    case "${allowed}" in
-      *" ${key} "*) ;;
-      *)
-        json_error "E_VALIDATION" "未知设置键: ${key}"
-        return 1
-        ;;
-    esac
-  done
-
-  local temp_file="${settings_file}.tmp.$$"
-  cp -p "${settings_file}" "${temp_file}" || {
-    json_error "E_IO" "无法创建 settings.ini 临时文件"
+  settings_token_present=0
+  unset settings_input_token
+  . "${tmp_assign}" || {
+    rm -f "${tmp_json}" "${tmp_assign}"
+    json_error "E_VALIDATION" "设置 JSON 无法加载"
     return 1
   }
 
-  local changed="" value tag replacement
   for key in $(settings_scalar_keys); do
-    if ${yq} -e "has(\"${key}\")" "${file}" >/dev/null 2>&1; then
-      tag="$(${yq} -r ".${key} | tag" "${file}" 2>/dev/null)"
-      if [ "${tag}" != "!!str" ]; then
-        rm -f "${temp_file}"
-        json_error "E_VALIDATION" "设置 ${key} 必须是字符串"
-        return 1
-      fi
-      value="$(${yq} -r ".${key} // \"\"" "${file}" 2>/dev/null)"
-      if ! settings_validate_scalar "${key}" "${value}"; then
-        rm -f "${temp_file}"
-        json_error "E_VALIDATION" "设置 ${key} 的值不合法" "${value}"
-        return 1
-      fi
-      replacement="$(sh_single_quote "${value}")"
-      if ! settings_replace_line "${temp_file}" "${key}" "${replacement}"; then
-        rm -f "${temp_file}"
-        json_error "E_IO" "写入设置失败: ${key}"
-        return 1
-      fi
-      changed="${changed}${changed:+,}$(json_quote "${key}")"
+    eval "value=\${${key}}"
+    if ! settings_validate_scalar "${key}" "${value}"; then
+      rm -f "${tmp_json}" "${tmp_assign}"
+      json_error "E_VALIDATION" "设置 ${key} 的值不合法" "${value}"
+      return 1
     fi
   done
-
   for key in $(settings_array_keys); do
-    if ${yq} -e "has(\"${key}\")" "${file}" >/dev/null 2>&1; then
-      tag="$(${yq} -r ".${key} | tag" "${file}" 2>/dev/null)"
-      if [ "${tag}" != "!!seq" ]; then
-        rm -f "${temp_file}"
-        json_error "E_VALIDATION" "设置 ${key} 必须是数组"
+    eval "items=(\"\${${key}[@]}\")"
+    for item in "${items[@]}"; do
+      if ! settings_validate_array "${key}" "${item}"; then
+        rm -f "${tmp_json}" "${tmp_assign}"
+        json_error "E_VALIDATION" "设置 ${key} 包含非法数组项" "${item}"
         return 1
       fi
-      local joined="" item item_json
-      while IFS= read -r item; do
-        [ -n "${item}" ] || continue
-        case "${key}" in
-          cnip_force_proxy_apps)
-            printf '%s' "${item}" | busybox grep -Eq '^([0-9]+:)?[A-Za-z0-9._]+$' || {
-              rm -f "${temp_file}"
-              json_error "E_VALIDATION" "设置 ${key} 包含非法应用包名" "${item}"
-              return 1
-            }
-            ;;
-          force_proxy_cidrs)
-            printf '%s' "${item}" | busybox grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' || {
-              rm -f "${temp_file}"
-              json_error "E_VALIDATION" "设置 ${key} 包含非法 IPv4 网段" "${item}"
-              return 1
-            }
-            ;;
-          force_proxy_cidrs6)
-            case "${item}" in *:*) ;; *)
-              rm -f "${temp_file}"
-              json_error "E_VALIDATION" "设置 ${key} 包含非法 IPv6 网段" "${item}"
-              return 1
-              ;;
-            esac
-            ;;
-          macs_list|wifi_bssids_list)
-            printf '%s' "${item}" | busybox grep -Eiq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || {
-              rm -f "${temp_file}"
-              json_error "E_VALIDATION" "设置 ${key} 包含非法 MAC 地址" "${item}"
-              return 1
-            }
-            ;;
-        esac
-        item_json="$(sh_single_quote "${item}")"
-        joined="${joined}${joined:+ }${item_json}"
-      done <<EOF
-$(${yq} -r ".${key}[]" "${file}" 2>/dev/null)
-EOF
-      replacement="(${joined})"
-      if ! settings_replace_line "${temp_file}" "${key}" "${replacement}"; then
-        rm -f "${temp_file}"
-        json_error "E_IO" "写入设置失败: ${key}"
-        return 1
-      fi
-      changed="${changed}${changed:+,}$(json_quote "${key}")"
-    fi
+    done
   done
 
-  if ${yq} -e 'has("githubtoken")' "${file}" >/dev/null 2>&1; then
-    tag="$(${yq} -r '.githubtoken | tag' "${file}" 2>/dev/null)"
-    if [ "${tag}" != "!!str" ]; then
-      rm -f "${temp_file}"
-      json_error "E_VALIDATION" "设置 githubtoken 必须是字符串"
+  if [ "${settings_token_present:-0}" = "1" ]; then
+    token_value="${settings_input_token}"
+    if printf '%s' "${token_value}" | busybox grep -q '[[:cntrl:]]'; then
+      rm -f "${tmp_json}" "${tmp_assign}"
+      json_error "E_VALIDATION" "githubtoken 包含非法控制字符"
       return 1
     fi
-    value="$(${yq} -r '.githubtoken // ""' "${file}" 2>/dev/null)"
-    replacement="$(sh_single_quote "${value}")"
-    if ! settings_replace_line "${temp_file}" "githubtoken" "${replacement}"; then
-      rm -f "${temp_file}"
-      json_error "E_IO" "写入设置失败: githubtoken"
+    tmp_token="${settings_token_file}.tmp.$$"
+    printf '%s' "${token_value}" > "${tmp_token}" || {
+      rm -f "${tmp_json}" "${tmp_assign}" "${tmp_token}"
+      json_error "E_IO" "无法写入 githubtoken"
       return 1
-    fi
-    changed="${changed}${changed:+,}$(json_quote "githubtoken")"
+    }
+  else
+    tmp_token="${settings_token_file}"
   fi
 
-  local sh_bin="/system/bin/sh"
-  if [ ! -x "${sh_bin}" ]; then
-    if command -v bash >/dev/null 2>&1; then
-      sh_bin="bash"
-    elif command -v mksh >/dev/null 2>&1; then
-      sh_bin="mksh"
-    else
-      sh_bin=""
-    fi
-  fi
-  if [ -n "${sh_bin}" ] && ! ${sh_bin} -n "${temp_file}" 2>/dev/null; then
-    rm -f "${temp_file}"
-    json_error "E_VALIDATION" "settings.ini 语法校验失败，已放弃本次修改"
+  if ! settings_render_runtime_file "${tmp_json}" "${tmp_runtime}" "${tmp_token}" "${default_file}"; then
+    rm -f "${tmp_json}" "${tmp_assign}" "${tmp_runtime}" "${settings_token_file}.tmp.$$"
+    json_error "E_VALIDATION" "无法生成 settings.runtime.sh"
     return 1
   fi
 
-  if busybox cmp -s "${temp_file}" "${settings_file}"; then
-    rm -f "${temp_file}"
-  else
-    mv "${temp_file}" "${settings_file}" || {
-      rm -f "${temp_file}"
-      json_error "E_IO" "替换 settings.ini 失败"
+  # Two-phase replacement: all temporary artifacts are ready before any target is replaced.
+  mv -f "${tmp_json}" "${settings_json_file}" || {
+    rm -f "${tmp_assign}" "${tmp_runtime}" "${settings_token_file}.tmp.$$"
+    json_error "E_IO" "无法替换 settings.json"
+    return 1
+  }
+  chmod 0600 "${settings_json_file}" >/dev/null 2>&1 || true
+  if [ "${settings_token_present:-0}" = "1" ]; then
+    mv -f "${tmp_token}" "${settings_token_file}" || {
+      rm -f "${tmp_assign}" "${tmp_runtime}"
+      json_error "E_IO" "无法替换 githubtoken"
       return 1
     }
+    chmod 0600 "${settings_token_file}" >/dev/null 2>&1 || true
   fi
+  mv -f "${tmp_runtime}" "${settings_runtime_file}" || {
+    rm -f "${tmp_assign}"
+    json_error "E_IO" "无法替换 settings.runtime.sh"
+    return 1
+  }
+  chmod 0600 "${settings_runtime_file}" >/dev/null 2>&1 || true
+  rm -f "${tmp_assign}"
 
+  for key in $(settings_allowed_keys); do
+    [ -n "${key}" ] || continue
+    if [ "${first}" -eq 1 ]; then
+      changed="$(json_quote "${key}")"
+      first=0
+    else
+      changed="${changed},$(json_quote "${key}")"
+    fi
+  done
   printf '{"ok":true,"data":{"changed":[%s]},"meta":{"version":1}}\n' "${changed}"
+}
+
+settings_set_json() {
+  local key="$1"
+  local value="$2"
+  local file="${box_run}/settings-set.$$.json"
+  case " $(settings_scalar_keys | busybox tr '\n' ' ') " in
+    *" ${key} "*) ;;
+    *)
+      json_error "E_VALIDATION" "未知设置键: ${key}"
+      return 1
+      ;;
+  esac
+  mkdir -p "${box_run}" >/dev/null 2>&1 || true
+  printf '{"%s":%s}' "${key}" "$(json_quote "${value}")" > "${file}" || {
+    json_error "E_IO" "无法创建设置临时文件"
+    return 1
+  }
+  settings_apply_json "${file}"
+  local rc=$?
+  rm -f "${file}"
+  return "${rc}"
 }
 
 config_validate_json() {
@@ -3133,8 +3102,11 @@ case "$1" in
       apply)
         settings_apply_json "$3"
         ;;
+      set)
+        settings_set_json "$3" "$4"
+        ;;
       *)
-        log Info "用法: $0 settings {get|apply <json文件>}"
+        log Info "用法: $0 settings {get|apply <json文件>|set <key> <value>}"
         ;;
     esac
     ;;

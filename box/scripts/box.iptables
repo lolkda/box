@@ -1,6 +1,11 @@
 #!/system/bin/sh
 
-source /data/adb/box/settings.ini
+BOX_DIR="${BOX_HOME:-/data/adb/box}"
+. "${BOX_DIR}/settings.base.sh"
+if ! settings_load; then
+  printf 'settings load failed\n' >&2
+  exit 1
+fi
 
 runtime_iptables_env="${box_run_state}/runtime.iptables.env"
 cnip_force_proxy_uid_list="${box_run_state}/cnip_force_proxy.uid.list"

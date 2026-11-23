@@ -11,6 +11,7 @@
 - 关联文档：[module-webui.md](module-webui.md)（旧 WebUI 历史规格，仅作历史参考）
 - 关联文档：[module-subscription.md](module-subscription.md)
 - 关联文档：[module-dashboard-zashboard.md](module-dashboard-zashboard.md)（mihomo 面板固定为 zashboard 的后续规格）
+- 关联文档：[module-settings-json.md](module-settings-json.md)（后续 settings.json 设置数据层重构规格）
 
 ## 2. 目标与范围
 

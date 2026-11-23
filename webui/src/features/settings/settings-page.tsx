@@ -83,11 +83,14 @@ const settingsSchema = z.object({
 });
 
 function buildValues(data: Awaited<ReturnType<typeof api.settings>>): SettingsFormValues {
-  return {
-    settings: { ...data.settings },
-    arrays: Object.fromEntries(Object.entries(data.arrays).map(([key, value]) => [key, [...value]])),
-    token: "",
-  };
+  const settings: Record<string, string> = {};
+  const arrays: Record<string, string[]> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key === "sensitive" || typeof value !== "string" && !Array.isArray(value)) continue;
+    if (Array.isArray(value)) arrays[key] = [...value];
+    else settings[key] = value;
+  }
+  return { settings, arrays, token: "" };
 }
 
 function errorFor(errors: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -299,7 +302,7 @@ export function SettingsPage() {
     <div className={cn("space-y-4", dirty && "pb-20")}>
       <PageTitle
         title="设置"
-        description="全部可编辑设置项；保存后写入 settings.ini"
+        description="全部可编辑设置项；保存后写入 settings.json"
         action={
           <Badge tone={dirty ? "warning" : "neutral"}>{dirty ? "未保存" : "已同步"}</Badge>
         }
@@ -336,7 +339,7 @@ export function SettingsPage() {
 
           <div className="rounded-2xl border border-border bg-surface p-4 text-[11px] leading-5 text-fg-muted">
             <p className="font-medium text-fg">内部路径与常量</p>
-            <p className="mt-1">box_dir、settings_file、config 路径、bin_list 等内部键不在页面开放，避免误改导致模块无法启动。</p>
+            <p className="mt-1">box_dir、内部路径、config 路径、bin_list 等内部键不在页面开放，避免误改导致模块无法启动。</p>
           </div>
 
           {dirty ? (

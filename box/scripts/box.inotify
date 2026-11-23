@@ -1,12 +1,13 @@
 #!/system/bin/sh
 
 scripts_dir="${0%/*}"
+BOX_DIR="${BOX_HOME:-/data/adb/box}"
 service_path="${scripts_dir}/box.service"
 iptables_path="${scripts_dir}/box.iptables"
-run_path="/data/adb/box/run"
-file_settings="/data/adb/box/settings.ini"
+run_path="${BOX_DIR}/run"
 events="$1"
 monitor_file="$3"
+. "${BOX_DIR}/settings.base.sh"
 
 write_inotify_error() {
   mkdir -p "${run_path}" >/dev/null 2>&1 || true
@@ -29,10 +30,9 @@ service_control() {
 }
 
 mkdir -p "${run_path}" >/dev/null 2>&1 || true
-if [ -f "${file_settings}" ] && [ -r "${file_settings}" ] && [ -s "${file_settings}" ]; then
-  . "${file_settings}"
+if settings_load; then
   service_control
 else
-  write_inotify_error "file /data/adb/box/settings.ini file not found"
+  write_inotify_error "settings.json 不存在或无法加载"
   exit 1
 fi

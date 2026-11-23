@@ -59,6 +59,7 @@ fi
 
 ui_print "- 创建目录"
 mkdir -p /data/adb/box/ /data/adb/box/run/ /data/adb/box/bin/
+chmod 0755 /data/adb/box/scripts/box.tool /data/adb/box/settings.base.sh 2>/dev/null || true
 
 ui_print "- 提取 uninstall.sh 和 box_service.sh"
 unzip -j -o "$ZIPFILE" 'uninstall.sh' -d "$MODPATH" >&2
@@ -68,6 +69,9 @@ ui_print "- 设置权限"
 set_perm_recursive $MODPATH 0 0 0755 0644
 set_perm_recursive /data/adb/box/ 0 3005 0755 0644
 set_perm_recursive /data/adb/box/scripts/ 0 3005 0755 0700
+[ -f /data/adb/box/settings.json ] && set_perm /data/adb/box/settings.json 0 0 0600
+[ -f /data/adb/box/githubtoken ] && set_perm /data/adb/box/githubtoken 0 0 0600
+[ -f /data/adb/box/run/settings.runtime.sh ] && set_perm /data/adb/box/run/settings.runtime.sh 0 0 0600
 set_perm ${service_dir}/box_service.sh 0 0 0755
 set_perm $MODPATH/uninstall.sh 0 0 0755
 chmod ugo+x ${service_dir}/box_service.sh $MODPATH/uninstall.sh /data/adb/box/scripts/*
@@ -182,10 +186,10 @@ if handle_choice "是否需要下载内核或数据文件？" "是，进行下�
 
     if handle_choice "是否使用镜像加速接下来的下载？" "使用加速" "直接下载"; then
         ui_print "- 已启用镜像加速。"
-        sed -i 's/use_ghproxy=.*/use_ghproxy="true"/' /data/adb/box/settings.ini
+        /data/adb/box/scripts/box.tool settings set use_ghproxy true --json >/dev/null 2>&1 || true
     else
         ui_print "- 已禁用镜像加速。"
-        sed -i 's/use_ghproxy=.*/use_ghproxy="false"/' /data/adb/box/settings.ini
+        /data/adb/box/scripts/box.tool settings set use_ghproxy false --json >/dev/null 2>&1 || true
     fi
 
     COMPONENTS_TO_DOWNLOAD=""
@@ -264,27 +268,9 @@ if [ "${backup_box}" = "true" ]; then
   ui_print " "
   ui_print "- 正在恢复用户配置和数据..."
 
-  if [ -f "${temp_dir}/settings.ini" ]; then
-    if [ -f "/data/adb/box/settings.ini" ]; then
-      if handle_choice "检测到旧的 settings.ini，选择如何处理？" "覆盖（使用新版覆盖旧版）" "增量合并（仅把旧值写入新版已有键）"; then
-        ui_print "  - 已选择使用新版 settings.ini（不应用旧版设置）"
-      else
-        mv /data/adb/box/settings.ini /data/adb/box/settings.ini.new
-        grep -E '^[a-zA-Z0-9_]+=' "${temp_dir}/settings.ini" | while IFS='=' read -r key value; do
-          [ -z "${key}" ] && continue
-          echo "${key}" | grep -qE '^[a-zA-Z0-9_]+' || continue
-          if grep -q -E "^${key}=" "/data/adb/box/settings.ini.new"; then
-            escaped_value=$(printf '%s' "${value}" | sed -e 's/[&\\#]/\\&/g')
-            sed -i "s#^${key}=.*#${key}=${escaped_value}#" "/data/adb/box/settings.ini.new"
-          fi
-        done
-        mv /data/adb/box/settings.ini.new /data/adb/box/settings.ini
-        ui_print "  - 已将用户自定义项增量合并至新版 settings.ini"
-      fi
-    else
-      cp -f "${temp_dir}/settings.ini" "/data/adb/box/settings.ini"
-      ui_print "  - 已恢复 settings.ini"
-    fi
+  if [ -f "${temp_dir}/settings.ini" ] || [ -f "/data/adb/box/settings.ini" ]; then
+    ui_print "  - 旧 settings.ini 不迁移，升级后使用默认 settings.json"
+    rm -f "/data/adb/box/settings.ini" 2>/dev/null || true
   fi
 
   restore_config_dir() {
@@ -324,6 +310,7 @@ if [ "${backup_box}" = "true" ]; then
   if [ -d "${temp_dir}/run" ]; then
     ui_print "  - 恢复日志、pid等运行时文件"
     cp -af "${temp_dir}/run/." "/data/adb/box/run/"
+    rm -f "/data/adb/box/run/settings.runtime.sh" 2>/dev/null || true
   fi
 fi
 
@@ -361,12 +348,11 @@ if [ -n "${temp_dir}" ] && [ -d "${temp_dir}" ]; then
     rm -f "${temp_dir}/bin/${legacy_bin}" 2>/dev/null || true
   done
 fi
-# 增量合并可能把旧的 bin_list 带回新版，强制收敛为两项
-sed -i 's|^bin_list=.*|bin_list=("mihomo" "sing-box")|' /data/adb/box/settings.ini 2>/dev/null || true
-if ! grep -qE '^bin_name="(mihomo|sing-box)"' /data/adb/box/settings.ini 2>/dev/null; then
-  sed -i 's/^bin_name=.*/bin_name="mihomo"/' /data/adb/box/settings.ini 2>/dev/null || true
-  ui_print "  - 旧核心配置已迁移到 mihomo"
+# 安装/升级后确保默认 JSON 与运行时文件存在。
+if [ ! -f "/data/adb/box/settings.default.json" ] && [ -f "/data/adb/box/settings.json" ]; then
+  cp -f "/data/adb/box/settings.json" "/data/adb/box/settings.default.json" 2>/dev/null || true
 fi
+/data/adb/box/scripts/box.tool settings get --json >/dev/null 2>&1 || ui_print "  ! 设置运行时初始化失败，请打开设置页检查"
 
 [ -z "$(find /data/adb/box/bin -type f -name '*' ! -name '*.bak')" ] && sed -Ei 's/^description=(\[.*][[:space:]]*)?/description=[ 😱 模块已安装但需手动下载内核 ] /g' $MODPATH/module.prop
 

@@ -384,8 +384,8 @@ function handle(args: string[]): unknown {
     case "settings": {
       if (action === "get") {
         return envelope({
-          settings: state.settings,
-          arrays: state.arrays,
+          ...state.settings,
+          ...state.arrays,
           sensitive: { githubtoken: { set: state.tokenSet, preview: state.tokenPreview } },
         } satisfies SettingsData);
       }

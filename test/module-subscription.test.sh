@@ -21,7 +21,11 @@ assert_eq() {
 
 setup() {
   mkdir -p "${BOX_HOME}/mihomo" "${BOX_HOME}/bin" "${BOX_HOME}/scripts" "${WORK}/bin" "${WORK}/fixtures"
-  cp "${ROOT}/box/settings.ini" "${BOX_HOME}/settings.ini"
+  cp "${ROOT}/box/settings.json" "${BOX_HOME}/settings.json"
+  cp "${ROOT}/box/settings.default.json" "${BOX_HOME}/settings.default.json"
+  cp "${ROOT}/box/settings.schema.json" "${BOX_HOME}/settings.schema.json"
+  cp "${ROOT}/box/settings.base.sh" "${BOX_HOME}/settings.base.sh"
+  cp "${ROOT}/box/scripts/settings-gen.awk" "${BOX_HOME}/scripts/settings-gen.awk"
   cp "${ROOT}/box/mihomo/config.yaml" "${BOX_HOME}/mihomo/config.yaml"
   cp "${ROOT}/box/scripts/box.tool" "${BOX_HOME}/scripts/box.tool"
 
@@ -113,7 +117,7 @@ run_tool sub update >/dev/null 2>&1
 assert_eq "2" "$?" "AC-003 部分成功返回 2"
 
 # AC-005 规则集前缀幂等
-sed -i 's#^ruleset_prefix=.*#ruleset_prefix="https://ghfast.top"#' "${BOX_HOME}/settings.ini"
+run_tool settings set ruleset_prefix "https://ghfast.top" --json >/dev/null 2>&1
 run_tool sub update >/dev/null 2>&1
 prefix_count="$(grep -c 'url: "https://ghfast.top/https://raw.githubusercontent.com' "${BOX_HOME}/mihomo/config.yaml")"
 assert_eq "6" "${prefix_count}" "AC-005 前缀应用 6 条"
@@ -121,7 +125,7 @@ run_tool sub update >/dev/null 2>&1
 double_count="$(grep -c 'ghfast.top/https://ghfast.top' "${BOX_HOME}/mihomo/config.yaml")"
 assert_eq "0" "${double_count}" "AC-005 重复执行不叠加"
 
-sed -i 's#^ruleset_prefix=.*#ruleset_prefix=""#' "${BOX_HOME}/settings.ini"
+run_tool settings set ruleset_prefix "" --json >/dev/null 2>&1
 run_tool sub update >/dev/null 2>&1
 official_count="$(grep -c 'url: "https://raw.githubusercontent.com' "${BOX_HOME}/mihomo/config.yaml")"
 assert_eq "6" "${official_count}" "AC-005 清空前缀恢复官方"
