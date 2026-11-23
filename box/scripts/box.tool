@@ -474,6 +474,8 @@ upgeox_all() {
 
 # 订阅清单：每行 名字|URL
 subscriptions_file="${subscriptions_file:-${box_dir}/mihomo/subscriptions.list}"
+# 聚合订阅派生出的 provider 清单（内部运行文件）
+subscriptions_providers_file="${subscriptions_providers_file:-${box_run}/subscriptions.providers}"
 
 # 把订阅名字转换成安全的 provider 文件名
 sub_provider_file_name() {
@@ -488,6 +490,18 @@ subscription_exists() {
   local wanted="$1"
   [ -f "${subscriptions_file}" ] || return 1
   busybox awk -F'|' -v wanted="${wanted}" '$1 == wanted { found = 1 } END { exit(found ? 0 : 1) }' "${subscriptions_file}"
+}
+
+sub_manifest_source_exists() {
+  local source="$1"
+  [ -s "${subscriptions_providers_file}" ] || return 1
+  busybox awk -F'|' -v source="${source}" '$1 == source { found = 1 } END { exit(found ? 0 : 1) }' "${subscriptions_providers_file}"
+}
+
+sub_provider_count() {
+  local source="$1"
+  [ -s "${subscriptions_providers_file}" ] || { printf '0'; return 0; }
+  busybox awk -F'|' -v source="${source}" '$1 == source && $2 != "" { count++ } END { print count + 0 }' "${subscriptions_providers_file}"
 }
 
 # 更新 mihomo 配置的 proxy-providers
@@ -509,6 +523,11 @@ update_mihomo_providers() {
         ''|\#*) continue ;;
       esac
       [ -n "${provider_url}" ] || continue
+
+      if sub_manifest_source_exists "${provider_name}"; then
+        log Debug "跳过聚合订阅自身: ${provider_name}"
+        continue
+      fi
 
       local safe_name
       safe_name="$(sub_provider_file_name "${provider_name}")"
@@ -534,6 +553,36 @@ update_mihomo_providers() {
 EOF
       provider_count=$((provider_count + 1))
     done < "${subscriptions_file}"
+  fi
+
+  if [ -s "${subscriptions_providers_file}" ]; then
+    while IFS='|' read -r aggregate_source provider_name provider_url local_path; do
+      case "${provider_name}" in
+        ''|\#*) continue ;;
+      esac
+      [ -n "${provider_url}" ] || continue
+
+      local safe_name relative_path escaped_url
+      safe_name="$(sub_provider_file_name "${provider_name}")"
+      relative_path="./$(basename "${mihomo_provide_path}")/${safe_name}.yaml"
+      escaped_url="$(printf '%s' "${provider_url}" | busybox sed 's/\\/\\\\/g; s/"/\\"/g')"
+
+      log Debug "添加派生 provider: ${provider_name} -> ${relative_path} (http)"
+      cat >> "${temp_providers}" <<EOF
+  "${provider_name}":
+    type: http
+    url: "${escaped_url}"
+    path: ${relative_path}
+    interval: 86400
+    health-check:
+      enable: true
+      url: https://cp.cloudflare.com
+      interval: 300
+      timeout: 1000
+      tolerance: 100
+EOF
+      provider_count=$((provider_count + 1))
+    done < "${subscriptions_providers_file}"
   fi
 
   if [ "${provider_count}" -eq 0 ]; then
@@ -626,6 +675,241 @@ update_mihomo_rulesets() {
   return 0
 }
 
+
+# 判断下载内容是否为完整配置聚合：proxies 为空且 proxy-providers 非空
+sub_is_aggregate_file() {
+  local file="$1"
+  local count
+
+  if ${yq} 'has("proxies")' "${file}" >/dev/null 2>&1; then
+    count="$(${yq} '.proxies | length' "${file}" 2>/dev/null || printf '0')"
+    case "${count}" in ''|*[!0-9]*) count=0 ;; esac
+    [ "${count}" -eq 0 ] || return 1
+  fi
+
+  ${yq} 'has("proxy-providers")' "${file}" >/dev/null 2>&1 || return 1
+  count="$(${yq} '.proxy-providers | length' "${file}" 2>/dev/null || printf '0')"
+  case "${count}" in ''|*[!0-9]*) count=0 ;; esac
+  [ "${count}" -gt 0 ]
+}
+
+# 从普通 provider / base64 订阅中提取 proxies，成功时输出节点数
+sub_parse_provider_download() {
+  local temp_file="$1"
+  local provider_name="$2"
+  local provider_file="$3"
+  local proxy_count=0
+  local temp_proxies="${temp_file}.proxies"
+
+  if ${yq} 'has("proxies")' "${temp_file}" >/dev/null 2>&1; then
+    if ${yq} '.proxies' "${temp_file}" > "${temp_proxies}" 2>/dev/null && [ -s "${temp_proxies}" ]; then
+      proxy_count="$(${yq} 'length' "${temp_proxies}" 2>/dev/null || printf '0')"
+      case "${proxy_count}" in ''|*[!0-9]*) proxy_count=0 ;; esac
+      if [ "${proxy_count}" -gt 0 ]; then
+        ${yq} -i '{"proxies": .}' "${temp_proxies}" || {
+          rm -f "${temp_proxies}" "${temp_file}"
+          return 1
+        }
+        mv "${temp_proxies}" "${temp_file}" || {
+          rm -f "${temp_proxies}" "${temp_file}"
+          return 1
+        }
+        mv "${temp_file}" "${provider_file}" || {
+          rm -f "${temp_file}"
+          return 1
+        }
+        printf '%s' "${proxy_count}"
+        return 0
+      fi
+    fi
+    rm -f "${temp_proxies}" "${temp_file}"
+    return 1
+  fi
+
+  if [ -n "$(base64 -d "${temp_file}" 2>/dev/null | busybox grep -E "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://" | head -n 1)" ]; then
+    local decoded_file="${temp_file}.decoded"
+    base64 -d "${temp_file}" > "${decoded_file}" 2>/dev/null || {
+      rm -f "${decoded_file}" "${temp_file}"
+      return 1
+    }
+    proxy_count="$(busybox grep -cE "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://" "${decoded_file}" 2>/dev/null || true)"
+    [ -n "${proxy_count}" ] || proxy_count=0
+    mv "${decoded_file}" "${temp_file}" || {
+      rm -f "${decoded_file}" "${temp_file}"
+      return 1
+    }
+    mv "${temp_file}" "${provider_file}" || {
+      rm -f "${temp_file}"
+      return 1
+    }
+    printf '%s' "${proxy_count}"
+    return 0
+  fi
+
+  rm -f "${temp_proxies}" "${temp_file}"
+  return 1
+}
+
+# provider 名称是否与现有订阅或派生 provider 冲突
+sub_provider_name_conflicts() {
+  local source="$1"
+  local name="$2"
+  local safe_name="$3"
+  local existing_name existing_url
+  local manifest_source manifest_name manifest_url manifest_path
+
+  while IFS='|' read -r existing_name existing_url; do
+    case "${existing_name}" in
+      ''|\#*) continue ;;
+    esac
+    [ "${existing_name}" = "${name}" ] && return 0
+    [ "$(sub_provider_file_name "${existing_name}")" = "${safe_name}" ] && return 0
+  done < "${subscriptions_file}"
+
+  if [ -s "${subscriptions_providers_file}" ]; then
+    while IFS='|' read -r manifest_source manifest_name manifest_url manifest_path; do
+      [ "${manifest_source}" = "${source}" ] && continue
+      [ "${manifest_name}" = "${name}" ] && return 0
+      [ "$(sub_provider_file_name "${manifest_name}")" = "${safe_name}" ] && return 0
+    done < "${subscriptions_providers_file}"
+  fi
+
+  return 1
+}
+
+# 写派生 provider 清单；失败的 provider 保留旧条目，成功 provider 覆盖旧条目
+sub_write_provider_manifest() {
+  local source="$1"
+  local provider_list="$2"
+  local success_lines="$3"
+  local names_file="${provider_list}.names"
+  local success_names="${success_lines}.names"
+  local temp_manifest="${subscriptions_providers_file}.tmp.$$"
+
+  busybox cut -f1 "${provider_list}" > "${names_file}" || return 1
+  busybox cut -d'|' -f2 "${success_lines}" > "${success_names}" || return 1
+  : > "${temp_manifest}" || return 1
+
+  if [ -s "${subscriptions_providers_file}" ]; then
+    busybox awk -F'|' -v source="${source}" -v names="${names_file}" -v success="${success_names}" '
+      BEGIN {
+        while ((getline line < names) > 0) current[line] = 1
+        while ((getline line < success) > 0) updated[line] = 1
+      }
+      {
+        if ($1 != source) {
+          print
+          next
+        }
+        if (updated[$2]) next
+        print
+      }
+    ' "${subscriptions_providers_file}" > "${temp_manifest}" || {
+      rm -f "${names_file}" "${success_names}" "${temp_manifest}"
+      return 1
+    }
+  fi
+
+  [ -s "${success_lines}" ] && cat "${success_lines}" >> "${temp_manifest}"
+  mv "${temp_manifest}" "${subscriptions_providers_file}" || {
+    rm -f "${names_file}" "${success_names}" "${temp_manifest}"
+    return 1
+  }
+  chmod 0600 "${subscriptions_providers_file}" >/dev/null 2>&1 || true
+  rm -f "${names_file}" "${success_names}"
+  return 0
+}
+
+# 更新完整配置聚合中的 provider；0=全部成功，2=部分成功，1=全部失败/格式错误
+sub_update_aggregate() {
+  local source="$1"
+  local temp_file="$2"
+  local provider_list="${temp_file}.providers"
+  local success_lines="${temp_file}.success"
+  local p_name p_url provider_file provider_count success_count failure_count=0 duplicate=""
+
+  ${yq} -r '.proxy-providers | to_entries[] | [.key, (.value.url // "")] | @tsv' "${temp_file}" > "${provider_list}" 2>/dev/null || {
+    log Error "聚合订阅 provider 列表解析失败: ${source}"
+    rm -f "${provider_list}"
+    return 1
+  }
+  if [ ! -s "${provider_list}" ]; then
+    log Error "聚合订阅没有可用的 proxy-providers: ${source}"
+    rm -f "${provider_list}"
+    return 1
+  fi
+
+  duplicate="$(busybox cut -f1 "${provider_list}" | busybox sort | busybox uniq -d | head -n 1)"
+  if [ -n "${duplicate}" ]; then
+    log Error "聚合订阅 provider 名称重复: ${duplicate}"
+    rm -f "${provider_list}"
+    return 1
+  fi
+
+  # 先做全量校验，冲突或非法项不产生任何文件修改
+  while IFS="$(printf '\t')" read -r p_name p_url; do
+    case "${p_name}" in
+      ''|*'|'*) log Error "聚合订阅 provider 名称非法: ${p_name}"; rm -f "${provider_list}"; return 1 ;;
+    esac
+    if printf '%s' "${p_name}" | busybox grep -q '[[:cntrl:]]'; then
+      log Error "聚合订阅 provider 名称包含控制字符: ${p_name}"
+      rm -f "${provider_list}"
+      return 1
+    fi
+    case "${p_url}" in
+      *'|'*) log Error "聚合订阅 provider URL 包含非法字符: ${p_name}"; rm -f "${provider_list}"; return 1 ;;
+      http://*|https://*) ;;
+      *) log Error "聚合订阅 provider URL 非法: ${p_name}"; rm -f "${provider_list}"; return 1 ;;
+    esac
+    if sub_provider_name_conflicts "${source}" "${p_name}" "$(sub_provider_file_name "${p_name}")"; then
+      log Error "聚合订阅 provider 名称冲突: ${p_name}"
+      rm -f "${provider_list}"
+      return 1
+    fi
+  done < "${provider_list}"
+
+  : > "${success_lines}" || {
+    rm -f "${provider_list}"
+    return 1
+  }
+
+  while IFS="$(printf '\t')" read -r p_name p_url; do
+    provider_file="${mihomo_provide_path}/$(sub_provider_file_name "${p_name}").yaml"
+    rm -f "${provider_file}.download"
+    if ! LOG_MASK_URL=mask upfile "${provider_file}.download" "${p_url}" "ClashMeta"; then
+      log Error "provider 下载失败: ${p_name}"
+      rm -f "${provider_file}.download"
+      failure_count=$((failure_count + 1))
+      continue
+    fi
+    if ! provider_count="$(sub_parse_provider_download "${provider_file}.download" "${p_name}" "${provider_file}")"; then
+      log Error "provider 解析失败或 proxies 为空: ${p_name}"
+      rm -f "${provider_file}.download"
+      failure_count=$((failure_count + 1))
+      continue
+    fi
+    printf '%s|%s|%s|%s\n' "${source}" "${p_name}" "${p_url}" "${provider_file}" >> "${success_lines}"
+    success_count=$((success_count + 1))
+    log Info "provider ${p_name} 已更新（${provider_count} 个节点）"
+  done < "${provider_list}"
+
+  if [ "${success_count:-0}" -eq 0 ]; then
+    log Error "聚合订阅全部 provider 失败: ${source}"
+    rm -f "${provider_list}" "${success_lines}"
+    return 1
+  fi
+  if ! sub_write_provider_manifest "${source}" "${provider_list}" "${success_lines}"; then
+    log Error "派生 provider 清单写入失败: ${source}"
+    rm -f "${provider_list}" "${success_lines}"
+    return 1
+  fi
+  rm -f "${provider_list}" "${success_lines}"
+  if [ "${failure_count}" -gt 0 ]; then
+    return 2
+  fi
+  return 0
+}
+
 # 检查并更新订阅
 # 参数: [force] true 时忽略 update_subscription 开关
 upsubs() {
@@ -663,7 +947,7 @@ upsubs() {
       local success_count=0
       local failure_count=0
       local total_count=0
-      local renew_done=false
+      local subscription_mode="${subscription_mode:-auto}"
 
       while IFS='|' read -r provider_name provider_url; do
         case "${provider_name}" in
@@ -687,67 +971,57 @@ upsubs() {
         local temp_file="${provider_file}.download"
 
         log Info "--> 正在处理订阅: ${provider_name}"
-
-        if [ "${renew}" = "true" ] && [ "${renew_done}" = "false" ]; then
-          log Info "检测到 renew=true, 仅使用第一个订阅链接覆盖主配置"
-          if LOG_MASK_URL=mask upfile "${mihomo_config}" "${provider_url}" "ClashMeta"; then
-            log Info "${mihomo_config} 更新成功"
-            reload_if_running
-            log Info "${bin_name} 订阅更新完成 → $(date)"
-            return 0
-          else
-            log Error "${mihomo_config} 更新失败"
-            return 1
-          fi
-        fi
-
         rm -f "${temp_file}"
 
         if ! LOG_MASK_URL=mask upfile "${temp_file}" "${provider_url}" "ClashMeta"; then
           log Error "订阅下载失败: ${provider_name}"
           rm -f "${temp_file}"
-          [ "${subscription_keep_last_good}" = "true" ] || rm -f "${provider_file}"
+          if [ "${subscription_keep_last_good}" != "true" ]; then
+            rm -f "${provider_file}"
+          fi
           failure_count=$((failure_count + 1))
+          continue
+        fi
+
+        if sub_is_aggregate_file "${temp_file}"; then
+          if [ "${subscription_mode}" = "provider" ]; then
+            log Error "订阅 ${provider_name} 是完整配置聚合，请将 subscription_mode 设为 auto"
+            rm -f "${temp_file}"
+            failure_count=$((failure_count + 1))
+            continue
+          fi
+
+          log Info "检测到完整配置聚合，开始拆分 provider: ${provider_name}"
+          sub_update_aggregate "${provider_name}" "${temp_file}"
+          local aggregate_status=$?
+          rm -f "${temp_file}"
+          case "${aggregate_status}" in
+            0)
+              success_count=$((success_count + 1))
+              ;;
+            2)
+              success_count=$((success_count + 1))
+              failure_count=$((failure_count + 1))
+              ;;
+            *)
+              failure_count=$((failure_count + 1))
+              ;;
+          esac
           continue
         fi
 
         local proxy_count=0
-        local valid_subscription=false
-
-        if ${yq} 'has("proxies")' "${temp_file}" >/dev/null 2>&1; then
-          local temp_proxies="${temp_file}.proxies"
-          if ${yq} '.proxies' "${temp_file}" > "${temp_proxies}" 2>/dev/null && [ -s "${temp_proxies}" ]; then
-            proxy_count="$(${yq} 'length' "${temp_proxies}" 2>/dev/null || echo 0)"
-            if [ "${proxy_count}" -gt 0 ] 2>/dev/null; then
-              ${yq} -i '{"proxies": .}' "${temp_proxies}"
-              mv "${temp_proxies}" "${temp_file}"
-              valid_subscription=true
-            else
-              log Error "订阅 proxies 为空: ${provider_name}"
-              rm -f "${temp_proxies}" "${temp_file}"
-            fi
-          else
-            log Error "订阅 proxies 提取失败: ${provider_name}"
-            rm -f "${temp_proxies}" "${temp_file}"
-          fi
-        elif [ -n "$(base64 -d "${temp_file}" 2>/dev/null | grep -E "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://" | head -n 1)" ]; then
-          local decoded_file="${temp_file}.decoded"
-          base64 -d "${temp_file}" > "${decoded_file}" 2>/dev/null
-          proxy_count="$(grep -cE "vless://|vmess://|ss://|hysteria://|hysteria2://|anytls://|trojan://" "${decoded_file}" 2>/dev/null || true)"
-          [ -n "${proxy_count}" ] || proxy_count=0
-          mv "${decoded_file}" "${temp_file}"
-          valid_subscription=true
-        fi
-
-        if [ "${valid_subscription}" != "true" ]; then
-          log Error "订阅格式无法识别或内容为空: ${provider_name}"
+        if ! proxy_count="$(sub_parse_provider_download "${temp_file}" "${provider_name}" "${provider_file}")"; then
+          log Error "订阅格式无法识别或 proxies 为空: ${provider_name}"
           rm -f "${temp_file}"
-          [ "${subscription_keep_last_good}" = "true" ] || rm -f "${provider_file}"
+          if [ "${subscription_keep_last_good}" != "true" ]; then
+            rm -f "${provider_file}"
+          fi
           failure_count=$((failure_count + 1))
           continue
         fi
 
-        mv "${temp_file}" "${provider_file}"
+        rm -f "${temp_file}"
         log Info "订阅 ${provider_name} 已保存（${proxy_count} 个节点）"
         success_count=$((success_count + 1))
       done < "${subscriptions_file}"
@@ -763,7 +1037,7 @@ upsubs() {
       fi
 
       if [ "${failure_count}" -gt 0 ]; then
-        log Error "${failure_count} 个订阅更新失败"
+        log Error "${failure_count} 个订阅/provider 更新失败"
         if [ "${success_count}" -gt 0 ]; then
           return 2
         fi
@@ -885,11 +1159,14 @@ sub_list() {
       ''|\#*) continue ;;
     esac
 
-    local safe_name provider_file state
+    local safe_name provider_file state provider_count
     safe_name="$(sub_provider_file_name "${name}")"
     provider_file="${mihomo_provide_path}/${safe_name}.yaml"
+    provider_count="$(sub_provider_count "${name}")"
 
-    if [ -s "${provider_file}" ]; then
+    if [ "${provider_count}" -gt 0 ]; then
+      state="${provider_count} 个 provider"
+    elif [ -s "${provider_file}" ]; then
       state="已下载"
     else
       state="未下载"
@@ -1088,10 +1365,17 @@ sub_list_json() {
       case "${name}" in
         ''|\#*) continue ;;
       esac
-      local safe_name provider_file state provider_size updated
+      local safe_name provider_file state provider_size updated provider_count
       safe_name="$(sub_provider_file_name "${name}")"
       provider_file="${mihomo_provide_path}/${safe_name}.yaml"
-      if [ -s "${provider_file}" ]; then state="downloaded"; else state="missing"; fi
+      provider_count="$(sub_provider_count "${name}")"
+      if [ "${provider_count}" -gt 0 ]; then
+        state="aggregated"
+      elif [ -s "${provider_file}" ]; then
+        state="downloaded"
+      else
+        state="missing"
+      fi
       provider_size=0
       updated=""
       if [ -f "${provider_file}" ]; then
@@ -1100,9 +1384,9 @@ sub_list_json() {
         updated="$(busybox stat -c '%y' "${provider_file}" 2>/dev/null | busybox cut -d. -f1 || true)"
       fi
       [ "${first}" -eq 1 ] || printf ','
-      printf '{"name":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"updated_at":%s}' \
+      printf '{"name":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s}' \
         "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")" "$(json_quote "${state}")" \
-        "${provider_size}" "$(json_quote "${updated}")"
+        "${provider_size}" "${provider_count}" "$(json_quote "${updated}")"
       first=0
     done < "${subscriptions_file}"
   fi
@@ -1120,12 +1404,13 @@ sub_get_json() {
     return 1
   fi
 
-  local name url found=1 safe_name provider_file provider_size updated
+  local name url found=1 safe_name provider_file provider_size provider_count updated
   while IFS='|' read -r name url; do
     [ "${name}" = "${wanted}" ] || continue
     found=0
     safe_name="$(sub_provider_file_name "${name}")"
     provider_file="${mihomo_provide_path}/${safe_name}.yaml"
+    provider_count="$(sub_provider_count "${name}")"
     provider_size=0
     updated=""
     if [ -f "${provider_file}" ]; then
@@ -1133,10 +1418,10 @@ sub_get_json() {
       [ -n "${provider_size}" ] || provider_size=0
       updated="$(busybox stat -c '%y' "${provider_file}" 2>/dev/null | busybox cut -d. -f1 || true)"
     fi
-    json_ok "$(printf '{"name":%s,"url":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"updated_at":%s}' \
+    json_ok "$(printf '{"name":%s,"url":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s}' \
       "$(json_quote "${name}")" "$(json_quote "${url}")" "$(json_quote "$(mask_url "${url}")")" \
-      "$(json_quote "$([ -s "${provider_file}" ] && printf downloaded || printf missing)")" \
-      "${provider_size}" "$(json_quote "${updated}")")"
+      "$(json_quote "$([ "${provider_count}" -gt 0 ] && printf aggregated || { [ -s "${provider_file}" ] && printf downloaded || printf missing; })")" \
+      "${provider_size}" "${provider_count}" "$(json_quote "${updated}")")"
     return 0
   done < "${subscriptions_file}"
 
@@ -1164,7 +1449,7 @@ sub_add_json() {
     json_error "E_VALIDATION" "添加订阅失败" "$(printf '%s' "${output}" | busybox sed -E 's/^[0-9-]+ [0-9:]+ \[[A-Za-z]+\]: //')"
     return 1
   fi
-  json_ok "$(printf '{"name":%s,"url_masked":%s,"provider":"missing","provider_size":0,"updated_at":""}' \
+  json_ok "$(printf '{"name":%s,"url_masked":%s,"provider":"missing","provider_size":0,"provider_count":0,"updated_at":""}' \
     "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")")"
 }
 
@@ -1295,7 +1580,7 @@ settings_validate_scalar() {
     return 1
   fi
   case "${key}" in
-    auto_modify_config|boot_auto_start|ipv6|performance_mode|proxy_tcp|proxy_udp|dns_hijack_tcp|dns_hijack_udp|bypass_cn_ip|bypass_cn_ip_v4|bypass_cn_ip_v6|update_subscription|update_geo|use_ghproxy|run_crontab|cgroup_memcg|taskset_cpu|cgroup_blkio|mac_filter|subscription_keep_last_good|enable_network_service_control|use_module_on_wifi|use_module_on_wifi_disconnect|use_ssid_matching|inotify_log_enabled|renew)
+    auto_modify_config|boot_auto_start|ipv6|performance_mode|proxy_tcp|proxy_udp|dns_hijack_tcp|dns_hijack_udp|bypass_cn_ip|bypass_cn_ip_v4|bypass_cn_ip_v6|update_subscription|update_geo|use_ghproxy|run_crontab|cgroup_memcg|taskset_cpu|cgroup_blkio|mac_filter|subscription_keep_last_good|enable_network_service_control|use_module_on_wifi|use_module_on_wifi_disconnect|use_ssid_matching|inotify_log_enabled)
       case "${value}" in true|false) return 0 ;; *) return 1 ;; esac
       ;;
     quic|mihomo_dns_forward|mihomo_stable|singbox_stable)
@@ -1303,6 +1588,9 @@ settings_validate_scalar() {
       ;;
     network_mode)
       case "${value}" in tun|tproxy|ebpf|redirect|mixed|enhance) return 0 ;; *) return 1 ;; esac
+      ;;
+    subscription_mode)
+      case "${value}" in auto|provider) return 0 ;; *) return 1 ;; esac
       ;;
     proxy_mode)
       case "${value}" in core|blacklist|whitelist) return 0 ;; *) return 1 ;; esac

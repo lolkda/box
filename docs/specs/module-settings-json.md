@@ -10,6 +10,7 @@
 - 关联文档：[module-webui-refactor.md](module-webui-refactor.md)（管理页重构历史规格）
 - 关联文档：[module-webui-config-expansion.md](module-webui-config-expansion.md)（设置扩展历史规格）
 - 关联文档：[module-subscription.md](module-subscription.md)（订阅设置相关历史规格）
+- 关联文档：[module-subscription-auto-provider.md](module-subscription-auto-provider.md)（节点订阅自动识别与 provider 拆分规格）
 
 ## 2. 目标与范围
 

@@ -18,6 +18,8 @@
 - 不再支持 xray/v2fly/hysteria 核心
 
 #### 未发布 - 23-11-2026
+- 订阅自动识别：完整配置聚合自动拆出 `proxy-providers`，新增 `subscription_mode`（auto/provider），移除 `renew` 覆盖模式
+- 首次升级自动重置旧设置和占位 `config.yaml`，订阅页显示派生 provider 数量
 - 设置数据层重构：settings.json 成为唯一用户配置源，自动生成 settings.runtime.sh；旧 settings.ini 不兼容并直接重置
 - mihomo `/ui` 固定为 zashboard：模块包内置最新 `dist-no-fonts`，升级强制部署、清理旧 `external-ui-url`，核心配置页支持一键更新
 - 核心精简：仅保留 mihomo + sing-box；安装/升级移除 xray、v2fly、hysteria 并清理旧文件

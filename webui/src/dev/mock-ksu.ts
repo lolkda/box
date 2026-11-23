@@ -65,7 +65,7 @@ function buildSettings(): Pick<MockState, "settings" | "arrays" | "tokenSet" | "
       use_ssid_matching: "false",
       use_wifi_list_mode: "blacklist",
       inotify_log_enabled: "true",
-      renew: "false",
+      subscription_mode: "auto",
     },
     arrays: {
       cnip_force_proxy_apps: [],
@@ -92,6 +92,7 @@ const state: MockState = {
       url_masked: "https://example.com/***",
       provider: "downloaded",
       provider_size: 184320,
+      provider_count: 0,
       updated_at: "2026-11-23T07:42:31+0800",
     },
     {
@@ -100,6 +101,7 @@ const state: MockState = {
       url_masked: "https://example.org/***",
       provider: "missing",
       provider_size: 0,
+      provider_count: 0,
       updated_at: "",
     },
     {
@@ -108,6 +110,7 @@ const state: MockState = {
       url_masked: "https://very-long-subscription-provider-domain.example.net/***",
       provider: "downloaded",
       provider_size: 92160,
+      provider_count: 0,
       updated_at: "2026-11-23T07:43:10+0800",
     },
   ],
@@ -338,7 +341,7 @@ function handle(args: string[]): unknown {
         const url = rest[0] || "";
         const name = rest[1] || new URL(url).hostname;
         if (state.subscriptions.some((item) => item.name === name)) return failure("E_CONFLICT", `订阅已存在: ${name}`);
-        state.subscriptions.push({ name, url, url_masked: url.replace(/\/[^/]*$/, "/***"), provider: "missing", provider_size: 0, updated_at: "" });
+        state.subscriptions.push({ name, url, url_masked: url.replace(/\/[^/]*$/, "/***"), provider: "missing", provider_size: 0, provider_count: 0, updated_at: "" });
         return envelope({ name, url_masked: url.replace(/\/[^/]*$/, "/***") });
       }
       if (action === "set") {

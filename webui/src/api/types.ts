@@ -22,8 +22,9 @@ export interface StatusData {
 export interface Subscription {
   name: string;
   url_masked: string;
-  provider: "downloaded" | "missing" | string;
+  provider: "downloaded" | "missing" | "aggregated" | string;
   provider_size: number;
+  provider_count: number;
   updated_at: string;
 }
 

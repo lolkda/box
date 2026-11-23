@@ -4,6 +4,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
+export WORK
 export BOX_HOME="${WORK}/box"
 PASS=0
 FAIL=0
@@ -92,6 +93,131 @@ run_tool sub rm "香港2" --json >/dev/null 2>&1
 list_json="$(run_tool sub list --json 2>/dev/null)"
 jassert '.data.items | length == 0' "${list_json}" "sub rm 删除订阅"
 
+cat > "${WORK}/normal-provider.yaml" <<'EOF'
+proxies:
+  - {name: normal-1, type: ss, server: 127.0.0.1, port: 443, cipher: aes-128-gcm, password: p}
+EOF
+
+# 普通 provider：auto 模式保持原有节点导入
+cat > "${WORK}/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+out=""; url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) shift 2 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "${url}" in
+  https://normal.example/sub) cp "${WORK}/normal-provider.yaml" "${out}" ;;
+  *) exit 22 ;;
+esac
+printf '200'
+EOF
+chmod +x "${WORK}/bin/curl"
+run_tool sub add "https://normal.example/sub" "普通" --json >/dev/null 2>&1
+run_tool sub update --json >/dev/null 2>&1
+[ -s "${BOX_HOME}/mihomo/proxy_provider/普通.yaml" ] && ok "普通 provider 自动导入" || bad "普通 provider 自动导入"
+run_tool sub rm "普通" --json >/dev/null 2>&1
+rm -f "${WORK}/bin/curl"
+
+# 聚合订阅：完整配置中的 proxy-providers 自动拆出节点 provider
+groups_before="$(yq -o=json '.proxy-groups' "${BOX_HOME}/mihomo/config.yaml" | md5sum | cut -d' ' -f1)"
+rules_before="$(yq -o=json '.rules' "${BOX_HOME}/mihomo/config.yaml" | md5sum | cut -d' ' -f1)"
+cat > "${WORK}/aggregate.yaml" <<'EOF'
+proxies: []
+proxy-providers:
+  xusx:
+    type: http
+    url: https://aggregate-provider.example/xusx
+  imagic:
+    type: http
+    url: https://aggregate-provider.example/imagic
+  bkm:
+    type: http
+    url: https://aggregate-provider.example/bkm
+proxy-groups:
+  - name: 保留策略
+    type: select
+    include-all: true
+rules:
+  - MATCH,DIRECT
+EOF
+cat > "${WORK}/provider.yaml" <<'EOF'
+proxies:
+  - {name: node-1, type: ss, server: 127.0.0.1, port: 443, cipher: aes-128-gcm, password: p}
+EOF
+cat > "${WORK}/partial.yaml" <<'EOF'
+proxies: []
+proxy-providers:
+  p1:
+    type: http
+    url: https://partial-provider.example/p1
+  p2:
+    type: http
+    url: https://partial-provider.example/p2
+  p3:
+    type: http
+    url: https://partial-provider.example/p3
+EOF
+cat > "${WORK}/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+out=""
+url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) shift 2 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "${url}" in
+  https://aggregate.example/sub) cp "${WORK}/aggregate.yaml" "${out}" ;;
+  https://aggregate-provider.example/*) cp "${WORK}/provider.yaml" "${out}" ;;
+  https://normal.example/sub) cp "${WORK}/normal-provider.yaml" "${out}" ;;
+  https://partial.example/sub) cp "${WORK}/partial.yaml" "${out}" ;;
+  https://partial-provider.example/p2) exit 22 ;;
+  https://partial-provider.example/*) cp "${WORK}/provider.yaml" "${out}" ;;
+  *) exit 22 ;;
+esac
+printf '200'
+EOF
+chmod +x "${WORK}/bin/curl"
+run_tool sub add "https://aggregate.example/sub" "大杂烩" --json >/dev/null 2>&1
+run_tool sub update --json >/dev/null 2>&1
+jassert '.data.items[0].provider_count == 3 and .data.items[0].provider == "aggregated"' "$(run_tool sub list --json 2>/dev/null)" "聚合订阅显示 3 个 provider"
+jassert '.data.provider_count == 3 and .data.provider == "aggregated"' "$(run_tool sub get "大杂烩" --json 2>/dev/null)" "聚合订阅详情显示 3 个 provider"
+assert_eq "3" "$(wc -l < "${BOX_HOME}/run/subscriptions.providers" | tr -d '[:space:]')" "派生 provider 清单有 3 条"
+for provider_name in xusx imagic bkm; do
+  [ -s "${BOX_HOME}/mihomo/proxy_provider/${provider_name}.yaml" ] && ok "生成 provider ${provider_name}" || bad "生成 provider ${provider_name}"
+done
+grep -q '^  "xusx":' "${BOX_HOME}/mihomo/config.yaml" && ok "主配置包含派生 provider xusx" || bad "主配置包含派生 provider xusx"
+grep -q '^proxy-groups:' "${BOX_HOME}/mihomo/config.yaml" && ok "主配置保留 proxy-groups" || bad "主配置保留 proxy-groups"
+grep -q '^rules:' "${BOX_HOME}/mihomo/config.yaml" && ok "主配置保留 rules" || bad "主配置保留 rules"
+groups_after="$(yq -o=json '.proxy-groups' "${BOX_HOME}/mihomo/config.yaml" | md5sum | cut -d' ' -f1)"
+rules_after="$(yq -o=json '.rules' "${BOX_HOME}/mihomo/config.yaml" | md5sum | cut -d' ' -f1)"
+assert_eq "${groups_before}" "${groups_after}" "聚合更新不改 proxy-groups"
+assert_eq "${rules_before}" "${rules_after}" "聚合更新不改 rules"
+run_tool sub add "https://partial.example/sub" "部分" --json >/dev/null 2>&1
+partial_result="$(run_tool sub update --json 2>/dev/null)"
+jassert '.ok == true and .data.partial == true' "${partial_result}" "单个 provider 失败返回部分成功"
+[ -s "${BOX_HOME}/mihomo/proxy_provider/p1.yaml" ] && [ -s "${BOX_HOME}/mihomo/proxy_provider/p3.yaml" ] && ok "部分成功保留成功 provider" || bad "部分成功保留成功 provider"
+grep -q '^  "p2":' "${BOX_HOME}/mihomo/config.yaml" && bad "失败 provider 不应写入配置" || ok "失败 provider 不写入配置"
+run_tool sub rm "部分" --json >/dev/null 2>&1
+cat > "${WORK}/provider-mode.json" <<'EOF'
+{"subscription_mode":"provider"}
+EOF
+run_tool settings apply "${WORK}/provider-mode.json" --json >/dev/null 2>&1
+provider_mode_result="$(run_tool sub update --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_COMMAND"' "${provider_mode_result}" "provider 模式拒绝完整配置聚合"
+cat > "${WORK}/auto-mode.json" <<'EOF'
+{"subscription_mode":"auto"}
+EOF
+run_tool settings apply "${WORK}/auto-mode.json" --json >/dev/null 2>&1
+run_tool sub rm "大杂烩" --json >/dev/null 2>&1
+rm -f "${WORK}/bin/curl"
+
 # ---------------------------------------------------------------------------
 # 3. 设置 JSON 接口与后端校验
 # ---------------------------------------------------------------------------
@@ -99,6 +225,7 @@ settings_json="$(run_tool settings get --json 2>/dev/null)"
 jassert '.ok == true and (.data | has("network_mode")) and (.data | has("githubtoken") | not)' "${settings_json}" "settings get 不返回 token 明文"
 jassert '(.data | has("wifi_ssids_list")) and .data.sensitive.githubtoken.set == false' "${settings_json}" "settings get 返回数组和敏感状态"
 jassert '(.data | has("cn_ip_url")) and (.data | has("cn_ipv6_url")) and (.data | has("subscription_url_singbox"))' "${settings_json}" "settings get 返回新增配置键"
+jassert '.data.subscription_mode == "auto"' "${settings_json}" "settings get 返回订阅模式默认 auto"
 assert_eq "$(jq -r 'keys[]' "${BOX_HOME}/settings.json" | sort)" "$(jq -r '.properties | keys[]' "${BOX_HOME}/settings.schema.json" | sort)" "默认 settings 与 schema 键一致"
 
 cat > "${WORK}/settings.json" <<'EOF'

@@ -311,11 +311,11 @@
         "false"
       ]
     },
-    "renew": {
+    "subscription_mode": {
       "type": "string",
       "enum": [
-        "true",
-        "false"
+        "auto",
+        "provider"
       ]
     },
     "cnip_force_proxy_apps": {

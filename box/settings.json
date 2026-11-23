@@ -46,7 +46,7 @@
   "use_ssid_matching": "false",
   "use_wifi_list_mode": "blacklist",
   "inotify_log_enabled": "true",
-  "renew": "false",
+  "subscription_mode": "auto",
   "cnip_force_proxy_apps": [],
   "force_proxy_cidrs": [],
   "force_proxy_cidrs6": [],

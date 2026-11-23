@@ -12,7 +12,7 @@ function envelope(data: unknown) {
 
 function installSubscriptionMock() {
   const subscriptions = [
-    { name: "机场 A", url_masked: "https://example.com/***", provider: "downloaded", provider_size: 1024, updated_at: "2026-11-23T07:00:00+0800" },
+    { name: "机场 A", url_masked: "https://example.com/***", provider: "downloaded", provider_size: 1024, provider_count: 0, updated_at: "2026-11-23T07:00:00+0800" },
   ];
   const mock = {
     exec(command: string, _options: string, callbackName: string) {
@@ -20,7 +20,7 @@ function installSubscriptionMock() {
       if (command.includes("'sub' 'list'")) {
         payload = envelope({ items: subscriptions });
       } else if (command.includes("'sub' 'add'")) {
-        subscriptions.push({ name: "测试新增", url_masked: "https://new.example.com/***", provider: "missing", provider_size: 0, updated_at: "" });
+        subscriptions.push({ name: "测试新增", url_masked: "https://new.example.com/***", provider: "missing", provider_size: 0, provider_count: 0, updated_at: "" });
         payload = envelope({ name: "测试新增", url_masked: "https://new.example.com/***" });
       } else {
         payload = envelope({ items: subscriptions });

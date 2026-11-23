@@ -83,6 +83,8 @@ cd webui && npm install && npm run build
 
 设置数据层使用 `settings.json` + `settings.schema.json`，运行时由 `box.tool` 生成 `run/settings.runtime.sh`；旧 `settings.ini` 不兼容并会在升级时重置。规格见 [module-settings-json.md](docs/specs/module-settings-json.md)。
 
+订阅支持普通 provider 和完整配置聚合自动拆分；订阅只管理节点，策略组和规则仍由 `config.yaml` 管理。规格见 [module-subscription-auto-provider.md](docs/specs/module-subscription-auto-provider.md)。
+
 ## 文档与社区
 
 - Wiki: <https://github.com/boxproxy/box/wiki>

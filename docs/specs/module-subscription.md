@@ -8,6 +8,7 @@
 - 实现状态：已实现
 - 验证状态：通过
 - 关联文档：无
+- 关联文档：[module-subscription-auto-provider.md](module-subscription-auto-provider.md)（节点订阅自动识别与 provider 拆分规格）
 
 ## 2. 目标与范围
 

@@ -46,6 +46,11 @@ ZASHBOARD_STAGE="$MODPATH/zashboard"
 mkdir -p "$ZASHBOARD_STAGE"
 cp -a "$MODPATH/box/mihomo/dashboard/." "$ZASHBOARD_STAGE/"
 
+# 保存新方案的默认 mihomo 配置，供旧 renew 设置首次升级时重置使用。
+DEFAULT_CONFIG_STAGE="$MODPATH/default-config.yaml"
+cp -f "$MODPATH/box/mihomo/config.yaml" "$DEFAULT_CONFIG_STAGE" 2>/dev/null || true
+
+legacy_settings="false"
 if [ -d "/data/adb/box" ]; then
   ui_print "- 备份现有 box 数据"
   temp_bak=$(mktemp -d -p "/data/adb/box" box.XXXXXXXXXX)
@@ -53,6 +58,15 @@ if [ -d "/data/adb/box" ]; then
   mv /data/adb/box/* "${temp_dir}/"
   mv "$MODPATH/box/"* /data/adb/box/
   backup_box="true"
+
+  if [ -f "${temp_dir}/settings.json" ] && busybox grep -q '"renew"' "${temp_dir}/settings.json" 2>/dev/null; then
+    legacy_settings="true"
+    ui_print "- 检测到旧 renew 设置，首次升级将重置 settings.json 和 mihomo/config.yaml"
+  elif [ -f "${temp_dir}/settings.json" ]; then
+    cp -f "${temp_dir}/settings.json" /data/adb/box/settings.json 2>/dev/null || true
+  else
+    legacy_settings="true"
+  fi
 else
   mv "$MODPATH/box" /data/adb/
 fi
@@ -284,6 +298,11 @@ if [ "${backup_box}" = "true" ]; then
     restore_config_dir "$dir"
   done
 
+  if [ "${legacy_settings}" = "true" ] && [ -f "${DEFAULT_CONFIG_STAGE}" ]; then
+    ui_print "  - 首次升级：重置 mihomo/config.yaml 为默认配置"
+    cp -f "${DEFAULT_CONFIG_STAGE}" "/data/adb/box/mihomo/config.yaml" 2>/dev/null || true
+  fi
+
   ui_print "  - 恢复根目录配置文件"
   for conf_file in ap.list.cfg package.list.cfg gid.list.cfg crontab.cfg; do
     if [ -f "${temp_dir}/${conf_file}" ]; then
@@ -366,7 +385,7 @@ fi
 unzip -o "$ZIPFILE" 'webroot/*' -d "$MODPATH" >&2
 
 ui_print "- 清理残留文件"
-rm -rf /data/adb/box/bin/.bin $MODPATH/box $MODPATH/box_service.sh "$MODPATH/zashboard"
+rm -rf /data/adb/box/bin/.bin $MODPATH/box $MODPATH/box_service.sh "$MODPATH/zashboard" "$MODPATH/default-config.yaml"
 
 if [ "$backup_box" = "true" ] && [ -n "$temp_dir" ] && [ -d "$temp_dir" ]; then
   ui_print " "

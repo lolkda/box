@@ -182,8 +182,10 @@ export function SubscriptionsPage() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <h2 className="truncate text-[15px] font-semibold text-fg">{subscription.name}</h2>
-                      <Badge tone={subscription.provider === "downloaded" ? "success" : "warning"}>
-                        {subscription.provider === "downloaded" ? "已下载" : "未下载"}
+                      <Badge tone={subscription.provider === "downloaded" || subscription.provider === "aggregated" ? "success" : "warning"}>
+                        {subscription.provider === "aggregated"
+                          ? `${subscription.provider_count} 个 provider`
+                          : subscription.provider === "downloaded" ? "已下载" : "未下载"}
                       </Badge>
                     </div>
                     <p className="mt-1 truncate font-mono text-[11px] text-fg-muted">{subscription.url_masked}</p>
@@ -198,6 +200,7 @@ export function SubscriptionsPage() {
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-fg-subtle">
                   <span>文件 {formatBytes(subscription.provider_size)}</span>
+                  {subscription.provider_count > 0 && <span>派生 {subscription.provider_count} 个 provider</span>}
                   <span>更新 {formatDateTime(subscription.updated_at)}</span>
                 </div>
               </div>
