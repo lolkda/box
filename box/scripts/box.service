@@ -1445,6 +1445,7 @@ stop_box() {
   fi
 
   set_description stopped
+  return 0
 }
 
 stop_cron() {
@@ -1489,6 +1490,10 @@ case "$1" in
     fi
     ;;
   stop)
+    if ! "${scripts_dir}/box.iptables" disable; then
+      log Error "清理透明代理规则失败，已取消停止服务"
+      exit 1
+    fi
     stop_box
     ;;
   restart)

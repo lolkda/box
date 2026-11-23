@@ -657,8 +657,27 @@ bad_array_result="$(run_tool settings apply "${WORK}/bad-array.json" --json 2>/d
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_array_result}" "非法数组项被拒绝"
 
 # ---------------------------------------------------------------------------
-# 9. 服务包装、日志清空与重置
+# 9. 服务停止清理、服务包装、日志清空与重置
 # ---------------------------------------------------------------------------
+cat > "${BOX_HOME}/scripts/box.iptables" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${BOX_HOME}/run/iptables.stub.log"
+exit "${IPTABLES_STUB_EXIT:-0}"
+EOF
+chmod +x "${BOX_HOME}/scripts/box.iptables"
+
+stop_ok_output="$(BOX_HOME="${BOX_HOME}" IPTABLES_STUB_EXIT=0 bash "${BOX_HOME}/scripts/box.service" stop 2>&1)"
+stop_ok_rc=$?
+assert_eq "0" "${stop_ok_rc}" "box.service stop 清理成功后返回成功"
+grep -q '^disable$' "${BOX_HOME}/run/iptables.stub.log" && ok "停止前调用 box.iptables disable" || bad "停止前调用 box.iptables disable"
+printf '%s' "${stop_ok_output}" | grep -q 'mihomo 已关闭' && ok "清理成功后停止核心" || bad "清理成功后停止核心"
+
+stop_fail_output="$(BOX_HOME="${BOX_HOME}" IPTABLES_STUB_EXIT=1 bash "${BOX_HOME}/scripts/box.service" stop 2>&1)"
+stop_fail_rc=$?
+[ "${stop_fail_rc}" -ne 0 ] && ok "清理失败返回非零" || bad "清理失败返回非零"
+printf '%s' "${stop_fail_output}" | grep -q '已取消停止服务' && ok "清理失败取消停止" || bad "清理失败取消停止"
+printf '%s' "${stop_fail_output}" | grep -q 'mihomo 已关闭' && bad "清理失败不停止核心" || ok "清理失败不停止核心"
+
 cat > "${BOX_HOME}/scripts/box.service" <<'EOF'
 #!/usr/bin/env bash
 echo "stub:$1"
