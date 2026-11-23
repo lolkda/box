@@ -1,3 +1,9 @@
+#### Changelog 1.10.2 - 24-11-2026
+- 修复 tproxy + fake-ip 环境下规则模板和节点订阅下载失败
+- 下载前解析真实 IPv4，并使用 root:net_admin 绕过 tproxy
+- curl 失败时回退 wget，失败返回明确 E_DOWNLOAD
+- 应用规则模板时保留 DNS 段引用的旧规则集，避免 mihomo 启动失败
+
 #### Changelog 1.10.1 - 24-11-2026
 - 修复 1.10.0 的 versionCode 仍按 UTC 日期生成、与 1.9.2 冲突的问题
 - versionCode 改为 Asia/Shanghai 日期并保证单调递增
