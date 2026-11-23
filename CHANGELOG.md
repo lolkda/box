@@ -1,3 +1,9 @@
+#### Changelog 1.9.1 - 23-11-2026
+- 修复 WebView 点击与滚动卡顿：命令改用异步 ksu.spawn()
+- 任务仅在有运行中任务时轮询
+- 状态仅在概览页刷新，概览日志改为 5 秒
+- 补充旧版 KernelSU 升级提示、单元测试与性能规格
+
 #### Changelog 1.9.0 - 23-11-2026
 - 新增订阅自动识别：完整配置聚合自动拆出 proxy-providers；新增 subscription_mode（auto/provider）；订阅页显示派生 provider 数量
 - 移除 renew 覆盖模式；首次升级重置旧设置和默认 config
