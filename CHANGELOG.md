@@ -1,3 +1,9 @@
+#### Changelog 1.5.0 - 23-11-2026
+- 全链路重构 KernelSU WebUI：React + TypeScript 新版界面
+- 统一 box.tool JSON 契约与后端校验
+- 新增后台任务中心与设置数组编辑
+- 破坏性变更：旧 --json 输出不兼容
+
 #### 未发布 - 23-11-2026
 - 全链路重构 KernelSU WebUI：React + TypeScript + Vite + Tailwind + Radix
 - 移动端底部 5 项导航；概览、订阅、策略、规则、设置、日志、任务中心与危险操作重新设计
