@@ -1,3 +1,9 @@
+#### Changelog 1.11.7 - 24-11-2026
+- 订阅与 provider 下载改用兼容的 User-Agent，避免转换服务返回不可达节点入口
+- 保留 provider 完整字段合并与 gstatic 默认测速
+- 新增订阅 User-Agent 回归断言
+- 完整 shell 测试 156/156 通过
+
 #### Changelog 1.11.6 - 24-11-2026
 - 合并订阅 proxy-providers 完整定义，保留 health-check/override/exclude-filter/interval；同名整块覆盖、不同名追加；只改写本地 path
 - 保留手动 provider 和订阅中未出现的旧 provider
