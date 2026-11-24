@@ -1,3 +1,9 @@
+#### Changelog 1.11.8 - 24-11-2026
+- 新增全局与按订阅 User-Agent 配置
+- 订阅 UA 支持预设与自定义，留空继承全局
+- 订阅与聚合 provider 下载使用对应 UA
+- 补齐订阅 UA 校验、重命名/删除清理与回归测试
+
 #### Changelog 1.11.7 - 24-11-2026
 - 订阅与 provider 下载改用兼容的 User-Agent，避免转换服务返回不可达节点入口
 - 保留 provider 完整字段合并与 gstatic 默认测速
