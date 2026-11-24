@@ -9,6 +9,7 @@
 - 验证状态：部分完成（本地 shell 138/138、前端 28/28、类型检查、WebUI 与模块包构建通过；安装器首次重置未执行真机验证）
 - 关联文档：[module-subscription.md](module-subscription.md)（现有 provider 订阅链路历史规格）
 - 关联文档：[module-settings-json.md](module-settings-json.md)（settings.json 数据层）
+- 后续变更：2026-11-24 起移除“订阅模式”设置入口；订阅更新始终自动识别 provider 或完整配置聚合，旧的 `subscription_mode=provider` 仅兼容保留但不再影响解析。
 
 ## 2. 目标与范围
 
@@ -25,8 +26,8 @@
 ### 目标
 
 - 把订阅能力限定为**节点订阅管理**：订阅只负责提供节点 provider，策略组和规则继续由模块 `config.yaml` 管理。
-- 增加 `subscription_mode`，取值为 `auto` 和 `provider`，默认 `auto`。
-- `auto` 自动识别普通 provider 与完整配置聚合，并把聚合中的 `proxy-providers` 拆成模块可下载的 provider 文件。
+- 订阅更新自动识别普通 provider 与完整配置聚合，并把聚合中的 `proxy-providers` 拆成模块可下载的 provider 文件。
+- 不再向用户展示“订阅模式”设置；旧 `subscription_mode` 字段仅用于配置兼容。
 - 合并普通订阅与派生 provider，只更新 `config.yaml` 的 `proxy-providers` 段。
 - 订阅页仍显示一条聚合订阅，并显示派生 provider 数量。
 - 首次升级到本方案时重置旧设置和默认占位配置；之后升级保留用户设置。
@@ -48,7 +49,7 @@
 - 需要用户确认：
   - 仅做节点订阅，不导入策略组和规则
   - 完整配置聚合自动拆 provider
-  - `subscription_mode=auto/provider`，默认 `auto`
+  - 不展示订阅模式设置，始终自动识别
   - 不保留 full 覆盖模式，移除 renew
   - provider 使用原始名称，重名拒绝
   - provider 部分失败时成功几个更新几个
@@ -64,23 +65,22 @@
 
 ## 4. 行为要求与约束
 
-### R-001：subscription_mode 设置
+### R-001：订阅更新始终自动识别
 
 - 参与者或触发方：设置页、`settings get`、`settings apply`、`box.tool upsubs`
-- 前置条件与输入：`settings.json` 中存在 `subscription_mode`
+- 前置条件与输入：已下载的订阅临时文件；旧配置可能仍含 `subscription_mode`
 - 必须满足的行为：
-  - 只允许 `auto`、`provider`
-  - 默认值为 `auto`
-  - `renew` 不再是允许的 settings 字段
-  - `subscription_mode=provider` 时只按普通 provider 解析
-  - `subscription_mode=auto` 时自动识别普通 provider 与完整配置聚合
-- 输出或状态变化：设置页显示“订阅模式”选择项；`settings.runtime.sh` 提供 `subscription_mode`
-- 边界与失败行为：缺失时按 `auto`；非法值返回校验错误
+  - 设置页不再显示“订阅模式”
+  - `subscription_mode` 的旧值不再影响解析
+  - 普通 provider、base64 节点列表和完整配置聚合都按内容自动识别
+  - 旧 `subscription_mode=provider` 不得再拒绝完整配置聚合
+- 输出或状态变化：订阅更新统一走自动识别；旧配置继续可读
+- 边界与失败行为：无法识别的订阅格式返回明确错误；旧字段非法不阻断更新解析
 
 ### R-002：auto 模式识别
 
 - 参与者或触发方：`box.tool upsubs`
-- 前置条件与输入：已下载的订阅临时文件，`subscription_mode=auto`
+- 前置条件与输入：已下载的订阅临时文件；不依赖订阅模式设置
 - 必须满足的行为：
   - `proxies` 是非空数组时，按普通 provider 流程处理
   - `proxies` 为空或不存在，且 `proxy-providers` 是非空映射时，按完整配置聚合流程处理
@@ -89,16 +89,16 @@
 - 输出或状态变化：进入 provider 流程或聚合拆分流程
 - 边界与失败行为：解析失败时保留旧 provider 和旧主配置，不修改配置
 
-### R-003：provider 模式
+### R-003：旧 provider 值兼容
 
-- 参与者或触发方：`box.tool upsubs`
-- 前置条件与输入：`subscription_mode=provider`
+- 参与者或触发方：`box.tool upsubs` 与旧 settings
+- 前置条件与输入：旧 `settings.json` 中仍存在 `subscription_mode=provider`
 - 必须满足的行为：
-  - 不尝试解析 `proxy-providers`
-  - 完整配置型订阅因 `proxies` 为空而失败，并提示切换 `auto`
-  - 普通 provider 和 base64 节点订阅保持当前行为
-- 输出或状态变化：provider 文件按现有逻辑更新
-- 边界与失败行为：失败时保留旧 provider 文件，返回失败或部分成功状态
+  - 该值不再强制关闭完整配置聚合解析
+  - 完整配置聚合仍自动拆分 provider
+  - 普通 provider 和 base64 节点订阅保持原有行为
+- 输出或状态变化：provider 文件按自动识别结果更新
+- 边界与失败行为：解析失败时保留旧 provider 文件，返回失败或部分成功状态
 
 ### R-004：聚合 provider 拆分
 
@@ -231,13 +231,13 @@
 - 未采用原因：完整配置会覆盖模块配置，双模式增加复杂度。
 - 影响范围：R-001、R-002、R-007、AC-001。
 
-### D-002：subscription_mode 仅 auto/provider
+### D-002：移除订阅模式入口
 
 - 状态：已确认
-- 结论：增加 `subscription_mode`，仅 `auto` 和 `provider`，默认 `auto`，移除 `renew` 和 full 模式。
-- 理由：无节点、无订阅，不需要兼容完整配置覆盖；自动识别是默认，provider 用于强制旧行为。
-- 考虑过的备选：固定 auto；保留 auto/provider/full。
-- 未采用原因：固定 auto 无法处理特殊 provider；保留 full 与只做节点目标冲突。
+- 结论：订阅更新始终自动识别；设置页移除“订阅模式”，旧 `subscription_mode` 仅保留配置兼容。
+- 理由：自动识别已经同时支持普通 provider、proxies 和完整配置聚合；单独的 provider 强制模式只会造成误配置和聚合更新失败。
+- 考虑过的备选：保留 auto/provider；保留隐藏 CLI 强制模式。
+- 未采用原因：用户不需要两种模式，强制模式与当前能力冲突；隐藏行为会增加理解成本。
 - 影响范围：R-001、R-002、R-003、AC-002、AC-003。
 
 ### D-003：完整配置聚合自动拆 provider
@@ -308,7 +308,7 @@
 ### AC-001：auto 识别完整配置并拆分 provider
 
 - 对应规则：R-002、R-004、R-005、R-007
-- 前置条件：`subscription_mode=auto`，fixture 中 `proxies` 为空、`proxy-providers` 有 3 项
+- 前置条件：fixture 中 `proxies` 为空、`proxy-providers` 有 3 项
 - 操作或输入：执行 `box.tool sub update`
 - 预期结果：生成 3 个本地 provider 文件；`run/subscriptions.providers` 有 3 条；`config.yaml` 的 `proxy-providers` 有 3 项；不生成聚合订阅自身的 provider 条目
 - 验证状态：通过
@@ -317,20 +317,20 @@
 ### AC-002：auto 处理普通 provider
 
 - 对应规则：R-002、R-006
-- 前置条件：`subscription_mode=auto`，fixture 是含非空 `proxies` 的普通 provider
+- 前置条件：fixture 是含非空 `proxies` 的普通 provider
 - 操作或输入：执行 `box.tool sub update`
 - 预期结果：provider 文件更新成功；不生成派生清单；主配置 provider 条目正常更新
 - 验证状态：通过
 - 验证证据：`test/module-webui.test.sh` 普通 provider fixture 通过
 
-### AC-003：provider 模式拒绝完整配置
+### AC-003：旧 provider 值不再拒绝聚合
 
 - 对应规则：R-003
-- 前置条件：`subscription_mode=provider`，fixture 是完整配置聚合
+- 前置条件：旧 `subscription_mode=provider`，fixture 是完整配置聚合
 - 操作或输入：执行 `box.tool sub update`
-- 预期结果：返回失败并提示切换 auto；不修改现有 provider 和主配置
+- 预期结果：仍自动拆分 provider 并成功更新
 - 验证状态：通过
-- 验证证据：`test/module-webui.test.sh` provider 模式聚合拒绝测试通过
+- 验证证据：`旧 provider 模式仍自动识别完整配置聚合` 用例通过
 
 ### AC-004：provider 重名拒绝并保留配置
 
@@ -435,11 +435,11 @@
 
 | 模块 | 职责 |
 |---|---|
-| `box.tool upsubs` | 读取 `subscription_mode`；识别普通 provider / 聚合配置；下载 provider 文件；写派生清单 |
+| `box.tool upsubs` | 自动识别普通 provider / 聚合配置；下载 provider 文件；写派生清单 |
 | `update_mihomo_providers` | 合并普通订阅与派生清单，重写主配置的 `proxy-providers` 段 |
-| `settings.base.sh` / `settings-gen.awk` | 提供并校验 `subscription_mode` |
+| `settings.base.sh` / `settings-gen.awk` | 兼容旧 `subscription_mode` 字段 |
 | `customize.sh` | 首次升级重置旧 settings.json 和 config.yaml |
-| WebUI 设置页 | 显示“订阅模式”（auto/provider） |
+| WebUI 设置页 | 不显示订阅模式 |
 | WebUI 订阅页 | 显示派生 provider 数量 |
 | `box/mihomo/config.yaml` | 默认 `proxy-providers: {}`，不包含 `proxy1` 占位 |
 
@@ -447,10 +447,8 @@
 
 ```text
 box.tool sub update
-  → 读取 subscription_mode
-  → provider: 只走普通 provider / base64 解析
-  → auto:
-      → 下载临时文件
+  → 下载临时文件
+  → 自动识别:
       → 非空 proxies: 普通 provider 流程
       → 空 proxies + 非空 proxy-providers:
           → 提取 provider 名称与 URL

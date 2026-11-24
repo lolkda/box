@@ -1321,7 +1321,6 @@ upsubs() {
       local success_count=0
       local failure_count=0
       local total_count=0
-      local subscription_mode="${subscription_mode:-auto}"
 
       while IFS='|' read -r provider_name provider_url enabled; do
         case "${provider_name}" in
@@ -1374,14 +1373,6 @@ upsubs() {
         fi
 
         if sub_is_aggregate_file "${temp_file}"; then
-          if [ "${subscription_mode}" = "provider" ]; then
-            log Error "订阅 ${provider_name} 是完整配置聚合，请将 subscription_mode 设为 auto"
-            sub_mark_update_failed "${provider_name}"
-            rm -f "${temp_file}"
-            failure_count=$((failure_count + 1))
-            continue
-          fi
-
           log Info "检测到完整配置聚合，开始拆分 provider: ${provider_name}"
           sub_update_aggregate "${provider_name}" "${temp_file}" "${sub_ua}"
           local aggregate_status=$?

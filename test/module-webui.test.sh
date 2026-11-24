@@ -305,7 +305,7 @@ cat > "${WORK}/provider-mode.json" <<'EOF'
 EOF
 run_tool settings apply "${WORK}/provider-mode.json" --json >/dev/null 2>&1
 provider_mode_result="$(run_tool sub update --json 2>/dev/null)"
-jassert '.ok == false and .error.code == "E_COMMAND"' "${provider_mode_result}" "provider 模式拒绝完整配置聚合"
+jassert '.ok == true' "${provider_mode_result}" "旧 provider 模式仍自动识别完整配置聚合"
 cat > "${WORK}/auto-mode.json" <<'EOF'
 {"subscription_mode":"auto"}
 EOF
