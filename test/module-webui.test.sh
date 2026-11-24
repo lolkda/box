@@ -683,8 +683,13 @@ cat > "${BOX_HOME}/scripts/box.service" <<'EOF'
 echo "stub:$1"
 EOF
 chmod +x "${BOX_HOME}/scripts/box.service"
+rm -f "${BOX_HOME}/run/iptables.stub.log"
 service_json="$(run_tool service start --json 2>/dev/null)"
 jassert '.ok == true and .data.action == "start" and (.data.output | contains("stub:start"))' "${service_json}" "service 包装返回统一包络"
+grep -q '^renew$' "${BOX_HOME}/run/iptables.stub.log" && ok "service start 重建透明代理规则" || bad "service start 重建透明代理规则"
+
+service_fail_json="$(IPTABLES_STUB_EXIT=1 run_tool service start --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_COMMAND"' "${service_fail_json}" "service start 规则失败返回错误"
 
 printf 'one\ntwo\n' > "${BOX_HOME}/run/runs.log"
 clear_json="$(run_tool logs clear --json 2>/dev/null)"

@@ -1497,23 +1497,23 @@ case "$1" in
     stop_box
     ;;
   restart)
-    "${scripts_dir}/box.iptables" disable >/dev/null 2>&1 &
-    _r_ipt=$!
+    if ! "${scripts_dir}/box.iptables" disable; then
+      log Error "清理透明代理规则失败，已取消重启"
+      exit 1
+    fi
     stop_box
-    wait "${_r_ipt}" 2>/dev/null
-
-    start_box &
-    _r_sb=$!
-    "${scripts_dir}/box.iptables" renew >/dev/null 2>&1 &
-    _r_ipt=$!
-    wait "${_r_sb}"; _r_rc=$?
-    wait "${_r_ipt}" 2>/dev/null
-    if [ "${_r_rc}" -eq 0 ]; then
-      $scripts_dir/box.tool webroot >/dev/null 2>&1
-    else
+    if ! start_box; then
       log Error "核心启动失败，回滚 iptables 规则。"
       "${scripts_dir}/box.iptables" disable >/dev/null 2>&1
+      exit 1
     fi
+    if ! "${scripts_dir}/box.iptables" renew; then
+      log Error "应用透明代理规则失败，回滚并停止服务。"
+      stop_box >/dev/null 2>&1
+      "${scripts_dir}/box.iptables" disable >/dev/null 2>&1
+      exit 1
+    fi
+    $scripts_dir/box.tool webroot >/dev/null 2>&1
     ;;
   status)
     # 检查服务是否在运行

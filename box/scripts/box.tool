@@ -3217,7 +3217,7 @@ service_json() {
       ;;
   esac
 
-  local output rc
+  local output rc ipt_output ipt_rc
   if [ "${action}" = "reload" ]; then
     output="$(reload 2>&1)"
     rc=$?
@@ -3228,6 +3228,17 @@ service_json() {
   if [ "${rc}" -ne 0 ]; then
     json_error "E_COMMAND" "服务操作失败: ${action}" "${output}"
     return 1
+  fi
+
+  # box.service start 只负责核心进程；WebUI 的启动入口还需要重建透明代理规则。
+  if [ "${action}" = "start" ]; then
+    ipt_output="$("${scripts_dir}/box.iptables" renew 2>&1)"
+    ipt_rc=$?
+    if [ "${ipt_rc}" -ne 0 ]; then
+      json_error "E_COMMAND" "透明代理规则应用失败: ${action}" "${ipt_output}"
+      return 1
+    fi
+    output="${output}"$'\n'"${ipt_output}"
   fi
   json_ok "$(printf '{"action":%s,"output":%s}' "$(json_quote "${action}")" "$(json_quote "${output}")")"
 }

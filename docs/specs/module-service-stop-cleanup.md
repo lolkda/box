@@ -6,7 +6,7 @@
 - 规格状态：已确认
 - 最后更新：2026-11-24
 - 实现状态：已实现
-- 验证状态：部分完成（本地 shell 144 项通过，当前设备已清理并恢复 DNS；新停止代码未真机安装验证）
+- 验证状态：部分完成（本地 shell 146 项通过；停止清理已真机验证；启动/重启规则见 module-service-start-restart-ordering.md）
 - 关联文档：[module-webui-refactor.md](module-webui-refactor.md)（服务控制与订阅页规格）
 - 关联文档：[module-webui-performance.md](module-webui-performance.md)（状态刷新与轮询）
 
@@ -29,7 +29,7 @@
 - 用户点击“停止服务”时，先清理透明代理规则，再停止核心。
 - 清理失败时取消停止，核心继续运行，向界面返回错误。
 - 增加可重复验证停止成功和清理失败两条路径的测试。
-- 保持 `start`、`restart`、启动失败清理的现有行为不变。
+- 保持 `start`、`restart`、启动失败清理可用；启动/重启的规则时序见独立规格。
 
 ### 非目标
 
@@ -73,16 +73,16 @@
 - 输出或状态变化：核心和规则保持原状，网络不被裸停。
 - 边界与失败行为：不能把清理失败伪装成停止成功。
 
-### R-003：其他服务路径不变
+### R-003：其他服务路径保持可用
 
 - 参与者或触发方：`box.service start`、`box.service restart`、`box_bin_alive`。
 - 前置条件与输入：现有启动和重启流程。
 - 必须满足的行为：
-  - `start` 继续在启动前停止旧核心，并按现有逻辑重建规则。
-  - `restart` 继续先清理再停止、再启动。
+  - `start` 仍能启动核心；WebUI 的 `box.tool service start` 负责补建规则。
+  - `restart` 改为串行：清理 → 停止 → 启动/解析 UID → 应用规则。
   - 启动失败时 `box_bin_alive` 继续清理规则。
-- 输出或状态变化：现有服务生命周期行为不变。
-- 边界与失败行为：不新增重复的规则清理调用。
+- 输出或状态变化：现有服务生命周期行为保持可用。
+- 边界与失败行为：启动/重启时序详见 `module-service-start-restart-ordering.md`。
 
 ### R-004：可测试性和日志
 
@@ -158,7 +158,7 @@
 - 操作或输入：运行完整 shell 测试；检查 `start`、`restart` 调用顺序。
 - 预期结果：现有测试通过；`restart` 仍先清理再停止；`start` 仍能启动。
 - 验证状态：通过
-- 验证证据：完整 shell 测试 144 项通过；只修改 `stop)` 分支，`start`/`restart`/`box_bin_alive` 代码未改。
+- 验证证据：完整 shell 测试 146 项通过；`stop` 的清理路径已真机验证；`start`/`restart` 的规则时序已拆到独立规格。
 
 ## 7. 未决问题与假设
 
@@ -186,7 +186,7 @@ stop)
   ;;
 ```
 
-- 不修改 `stop_box`，避免影响 `start` 中的“停止旧核心”流程和 `restart` 的既有清理。
+- 不修改 `stop_box` 的停止职责；`restart` 的规则时序在独立规格中处理。
 - `box.iptables disable` 自身的输出保留，便于日志定位。
 - `service_json` 已有的非零返回处理会把错误转成 `E_COMMAND`。
 
