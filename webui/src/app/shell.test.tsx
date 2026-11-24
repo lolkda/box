@@ -73,21 +73,4 @@ describe("AppShell", () => {
     expect(screen.queryByRole("navigation", { name: "主导航" })).not.toBeInTheDocument();
   });
 
-  it("blocks mihomo-only pages when the core is sing-box", async () => {
-    installStatusMock("sing-box");
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const router = createMemoryRouter(
-      [{ path: "/", element: <AppShell />, children: [{ path: "rules", element: <div>rules content</div> }] }],
-      { initialEntries: ["/rules"] },
-    );
-    render(
-      <QueryClientProvider client={client}>
-        <ToastProvider>
-          <RouterProvider router={router} />
-        </ToastProvider>
-      </QueryClientProvider>,
-    );
-    expect(await screen.findByText("规则 仅支持 mihomo")).toBeInTheDocument();
-    expect(screen.queryByText("rules content")).not.toBeInTheDocument();
-  });
 });

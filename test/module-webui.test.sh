@@ -41,14 +41,13 @@ jassert() {
 run_tool() { bash -O extglob "${BOX_HOME}/scripts/box.tool" "$@"; }
 
 setup() {
-  mkdir -p "${BOX_HOME}/mihomo" "${BOX_HOME}/sing-box" "${BOX_HOME}/bin" "${BOX_HOME}/scripts" "${WORK}/bin"
+  mkdir -p "${BOX_HOME}/mihomo" "${BOX_HOME}/bin" "${BOX_HOME}/scripts" "${WORK}/bin"
   cp "${ROOT}/box/settings.json" "${BOX_HOME}/settings.json"
   cp "${ROOT}/box/settings.default.json" "${BOX_HOME}/settings.default.json"
   cp "${ROOT}/box/settings.schema.json" "${BOX_HOME}/settings.schema.json"
   cp "${ROOT}/box/settings.base.sh" "${BOX_HOME}/settings.base.sh"
   cp "${ROOT}/box/scripts/settings-gen.awk" "${BOX_HOME}/scripts/settings-gen.awk"
   cp "${ROOT}/box/mihomo/config.yaml" "${BOX_HOME}/mihomo/config.yaml"
-  cp "${ROOT}/box/sing-box/config.json" "${BOX_HOME}/sing-box/config.json"
   cp "${ROOT}/box/scripts/box.tool" "${BOX_HOME}/scripts/box.tool"
   cp "${ROOT}/box/scripts/box.service" "${BOX_HOME}/scripts/box.service"
   chmod +x "${BOX_HOME}/scripts/box.tool" "${BOX_HOME}/scripts/box.service"
@@ -319,7 +318,7 @@ rm -f "${WORK}/bin/curl"
 settings_json="$(run_tool settings get --json 2>/dev/null)"
 jassert '.ok == true and (.data | has("network_mode")) and (.data | has("githubtoken") | not)' "${settings_json}" "settings get 不返回 token 明文"
 jassert '(.data | has("wifi_ssids_list")) and .data.sensitive.githubtoken.set == false' "${settings_json}" "settings get 返回数组和敏感状态"
-jassert '(.data | has("cn_ip_url")) and (.data | has("cn_ipv6_url")) and (.data | has("subscription_url_singbox"))' "${settings_json}" "settings get 返回新增配置键"
+jassert '(.data | has("cn_ip_url")) and (.data | has("cn_ipv6_url"))' "${settings_json}" "settings get 返回新增配置键"
 jassert '.data.subscription_mode == "auto"' "${settings_json}" "settings get 返回订阅模式默认 auto"
 jassert '.data.subscription_user_agent == "clash-verge/v2.4.5"' "${settings_json}" "settings get 返回订阅 UA 默认值"
 assert_eq "$(jq -r 'keys[]' "${BOX_HOME}/settings.json" | sort)" "$(jq -r '.properties | keys[]' "${BOX_HOME}/settings.schema.json" | sort)" "默认 settings 与 schema 键一致"
@@ -384,7 +383,7 @@ bad_core_result="$(run_tool settings apply "${WORK}/bad-core.json" --json 2>/dev
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_core_result}" "旧核心 bin_name 被拒绝"
 
 cat > "${WORK}/bad-url.json" <<'EOF'
-{"cn_ip_url":"not-a-url","subscription_url_singbox":"ftp://example.com/sub"}
+{"cn_ip_url":"not-a-url"}
 EOF
 bad_url_result="$(run_tool settings apply "${WORK}/bad-url.json" --json 2>/dev/null)"
 jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_url_result}" "新增 URL 字段校验失败"
@@ -775,24 +774,6 @@ jassert '.ok == true and .data.cleared == true' "${reset_json}" "reset subscript
 
 delete_json="$(run_tool config delete --json 2>/dev/null)"
 jassert '.ok == true and (.data.path | contains("config.yaml.deleted"))' "${delete_json}" "config delete 返回备份路径"
-
-# 切换到 sing-box，status 应读取 sing-box 配置
-cat > "${WORK}/switch-singbox.json" <<'EOF'
-{"bin_name":"sing-box","subscription_url_singbox":"https://example.com/singbox"}
-EOF
-run_tool settings apply "${WORK}/switch-singbox.json" --json >/dev/null 2>&1
-sing_status="$(run_tool status --json 2>/dev/null)"
-jassert '.ok == true and .data.core == "sing-box" and .data.config == "config.json" and .data.config_exists == true' "${sing_status}" "status 正确识别 sing-box 配置"
-settings_sing="$(run_tool settings get --json 2>/dev/null)"
-jassert '.data.subscription_url_singbox == "https://example.com/singbox"' "${settings_sing}" "sing-box 订阅地址写入 settings"
-core_sing="$(run_tool core get --json 2>/dev/null)"
-jassert '.ok == false and .error.code == "E_VALIDATION"' "${core_sing}" "sing-box 不支持 mihomo 核心配置接口"
-config_sing="$(run_tool config get --json 2>/dev/null)"
-jassert '.ok == false and .error.code == "E_VALIDATION"' "${config_sing}" "sing-box 不支持 mihomo 规则配置接口"
-rp_sing="$(run_tool rule-profile get --json 2>/dev/null)"
-jassert '.ok == true and .data.supported == false' "${rp_sing}" "sing-box 规则订阅返回不支持状态"
-rp_set_sing="$(run_tool rule-profile set "https://rules.example/config.yaml" --json 2>/dev/null)"
-jassert '.ok == false and .error.code == "E_VALIDATION"' "${rp_set_sing}" "sing-box 拒绝配置规则订阅"
 
 # ---------------------------------------------------------------------------
 # 10. runtime 恢复与损坏设置

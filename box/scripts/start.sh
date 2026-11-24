@@ -41,7 +41,7 @@ start_service() {
 }
 
 enable_iptables() {
-  PIDS=("mihomo" "sing-box")
+  PIDS=("mihomo")
   PID=""
   i=0
   while [ -z "$PID" ] && [ "$i" -lt "${#PIDS[@]}" ]; do

@@ -30,14 +30,13 @@ assert_not_contains() {
 }
 
 setup() {
-  mkdir -p "${BOX_HOME}/mihomo/dashboard" "${BOX_HOME}/sing-box" "${BOX_HOME}/scripts" "${WORK}/bin" "${WORK}/fixture/dist"
+  mkdir -p "${BOX_HOME}/mihomo/dashboard" "${BOX_HOME}/scripts" "${WORK}/bin" "${WORK}/fixture/dist"
   cp "${ROOT}/box/settings.json" "${BOX_HOME}/settings.json"
   cp "${ROOT}/box/settings.default.json" "${BOX_HOME}/settings.default.json"
   cp "${ROOT}/box/settings.schema.json" "${BOX_HOME}/settings.schema.json"
   cp "${ROOT}/box/settings.base.sh" "${BOX_HOME}/settings.base.sh"
   cp "${ROOT}/box/scripts/settings-gen.awk" "${BOX_HOME}/scripts/settings-gen.awk"
   cp "${ROOT}/box/mihomo/config.yaml" "${BOX_HOME}/mihomo/config.yaml"
-  cp "${ROOT}/box/sing-box/config.json" "${BOX_HOME}/sing-box/config.json"
   cp "${ROOT}/box/scripts/box.tool" "${BOX_HOME}/scripts/box.tool"
   chmod +x "${BOX_HOME}/scripts/box.tool"
 
@@ -61,7 +60,14 @@ done
 cp "${FAKE_ZASHBOARD_ZIP}" "${out}"
 printf '200'
 CURL_EOF
-  chmod +x "${WORK}/bin/busybox" "${WORK}/bin/curl"
+  cat > "${WORK}/bin/wget" <<'WGET_EOF'
+#!/usr/bin/env bash
+if [ "${FAKE_CURL_FAIL:-0}" = "1" ]; then
+  exit 22
+fi
+exec /usr/bin/wget "$@"
+WGET_EOF
+  chmod +x "${WORK}/bin/busybox" "${WORK}/bin/curl" "${WORK}/bin/wget"
   export PATH="${WORK}/bin:${PATH}"
 
   printf '<!doctype html><html><head><title>zashboard</title></head><body>zashboard</body></html>\n' > "${WORK}/fixture/dist/index.html"

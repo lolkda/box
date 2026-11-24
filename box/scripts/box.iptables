@@ -1514,7 +1514,7 @@ cleanup_legacy_mihomo_dns_chains() {
 
 setup_fake_ip_icmp_rules() {
   [ "${iptables}" = "$IPV" ] || return 0
-  [[ "${bin_name}" == @(mihomo|sing-box) ]] || return 0
+  [ "${bin_name}" = "mihomo" ] || return 0
   [ -n "${fake_ip_range}" ] || return 0
   ensure_rule_insert nat OUTPUT -d "${fake_ip_range}" -p icmp -j DNAT --to-destination 127.0.0.1
   ensure_rule_insert nat PREROUTING -d "${fake_ip_range}" -p icmp -j DNAT --to-destination 127.0.0.1
@@ -2241,18 +2241,6 @@ case "${bin_name}" in
       stack=$(busybox awk '!/^ *#/ && /stack: / { print $2;found=1; exit } END{ if(!found) print "'"${stack}"'" }' "${mihomo_config}" 2>/dev/null)
     fi
     ;;
-  "sing-box")
-    if [[ "${network_mode}" == @(mixed|tun) ]]; then
-      tun_device=$(busybox grep -oE '"interface_name": "[^"]*' "${sing_config}" | busybox awk -F'"' '{print $4}' 2>/dev/null | head -n 1)
-      if [ -z "$tun_device" ]; then
-        tun_device="tun0"
-      fi
-      _stack=$(busybox grep -oE '"stack": "[^"]*' "${sing_config}" | busybox awk -F'"' '{print $4}' 2>/dev/null | head -n 1)
-      [ -n "${_stack}" ] && stack="${_stack}"
-    fi
-    fake_ip_range=$(busybox awk -F'"' '/inet4_range/ {print $4}' "${sing_config}")
-    fake_ip6_range=$(busybox awk -F'"' '/inet6_range/ {print $4}' "${sing_config}")
-    ;;
   *)
     log Error "<${bin_name}> 未知内核。"
     exit 1
@@ -2263,11 +2251,6 @@ box_etc() {
   case "${bin_name}" in
     mihomo)
       log Debug "enhanced-mode: $mihomo_enhanced_mode, fake-ip 段: $fake_ip_range, fake-ip6 段: ${fake_ip6_range:-none}, DNS 端口: $mihomo_dns_port, 模式: $mihomo_mode"
-      ;;
-    sing-box)
-      if [ -n "${fake_ip_range}" ] && [ "${bin_name}" = "sing-box" ]; then
-        log Debug "fake-ip 段: ${fake_ip_range}, ${fake_ip6_range}"
-      fi
       ;;
     *) 
       true 
@@ -3099,7 +3082,7 @@ if [ "$1" = "disable" ]; then
   fi
 fi
 
-if [ "${network_mode}" = "ebpf" ] && [[ "${bin_name}" == @(mihomo|sing-box) ]]; then
+if [ "${network_mode}" = "ebpf" ] && [ "${bin_name}" = "mihomo" ]; then
   case "$1" in
     reload_ebpf)
       probe_capabilities

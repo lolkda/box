@@ -10,7 +10,7 @@
 ## 项目定位
 
 本仓库主要提供：
-- 统一的代理核心运行管理（mihomo / sing-box）
+- 统一的 mihomo 代理核心运行管理
 - 多网络模式下的透明代理规则编排（TProxy / Redirect / Tun / Mixed / Enhance）
 - 订阅、Geo 资源、核心二进制与 WebUI 的统一维护脚本
 - 适配 Android Root 生态的模块化目录与服务生命周期管理
@@ -23,7 +23,6 @@
 /data/adb/box/
 ├── bin/                # 代理核心与工具二进制
 ├── mihomo/             # mihomo 配置目录
-├── sing-box/           # sing-box 配置目录
 ├── scripts/            # 核心脚本
 │   ├── box.service     # 服务生命周期管理
 │   ├── box.iptables    # 透明代理规则管理
@@ -66,7 +65,7 @@ su -c "/data/adb/box/scripts/box.tool sub update"
 - 策略组、规则、规则集：仅 mihomo，可视化增删改；规则支持结构化构建与高级原文模式
 - 核心配置：mihomo 安全运行层表单 + 完整 YAML 高级编辑；`external-ui` 固定为 `./dashboard` 并支持一键更新 zashboard 面板
 - 应用与网络：`package.list.cfg` / `gid.list.cfg` / `ap.list.cfg` 可视化清单
-- 设置：全部可编辑标量键、数组编辑器、应用包名选择与 GitHub Token 脱敏；sing-box 订阅地址在对应核心下显示
+- 设置：全部可编辑标量键、数组编辑器、应用包名选择与 GitHub Token 脱敏
 - 日志：自动刷新、级别过滤、搜索、复制与清空
 - 任务中心：订阅/内核等后台任务由 shell 托管，关闭页面后可恢复查看
 - 危险操作：删除配置、清空日志、重置订阅、更新核心（均需二次确认）
@@ -82,6 +81,8 @@ cd webui && npm install && npm run build
 构建产物输出到 `webroot/`，模块打包时直接包含该目录。模块包同时内置 zashboard（构建时获取最新 `dist-no-fonts`），安装/升级后 mihomo 的 `/ui` 固定由 zashboard 提供；`box.tool upxui` 或核心配置页的「更新面板」可手动更新。规格见 [module-dashboard-zashboard.md](docs/specs/module-dashboard-zashboard.md)。
 
 设置数据层使用 `settings.json` + `settings.schema.json`，运行时由 `box.tool` 生成 `run/settings.runtime.sh`；旧 `settings.ini` 不兼容并会在升级时重置。规格见 [module-settings-json.md](docs/specs/module-settings-json.md)。
+
+2.0.0 起只保留 mihomo：升级会删除旧 `sing-box/` 配置目录和 `bin/sing-box`，旧 settings 中的 sing-box 字段会自动清理；规格见 [module-mihomo-only.md](docs/specs/module-mihomo-only.md)。
 
 订阅支持普通 provider 和完整配置聚合自动拆分；订阅只管理节点，策略组和规则仍由 `config.yaml` 管理。规格见 [module-subscription-auto-provider.md](docs/specs/module-subscription-auto-provider.md)。
 

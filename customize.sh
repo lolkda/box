@@ -220,9 +220,6 @@ if handle_choice "是否需要下载内核或数据文件？" "是，进行下�
         ui_print " "
         ui_print "-----------------------------------------------------------"
         ui_print "- 请选择您需要下载的内核:"
-        if handle_choice "  - 下载 sing-box 内核？" "下载" "跳过"; then
-            COMPONENTS_TO_DOWNLOAD="$COMPONENTS_TO_DOWNLOAD sing-box"
-        fi
         if handle_choice "  - 下载 mihomo 内核？" "下载" "跳过"; then
             COMPONENTS_TO_DOWNLOAD="$COMPONENTS_TO_DOWNLOAD mihomo"
         fi
@@ -231,7 +228,7 @@ if handle_choice "是否需要下载内核或数据文件？" "是，进行下�
         fi
     else
         ui_print "- 已选择一键下载所有组件。"
-        COMPONENTS_TO_DOWNLOAD="geox utils sing-box mihomo"
+        COMPONENTS_TO_DOWNLOAD="geox utils mihomo"
     fi
 
     ui_print " "
@@ -294,9 +291,7 @@ if [ "${backup_box}" = "true" ]; then
         cp -af "${temp_dir}/${config_dir}/." "/data/adb/box/${config_dir}/"
     fi
   }
-  for dir in mihomo sing-box; do
-    restore_config_dir "$dir"
-  done
+  restore_config_dir mihomo
 
   if [ "${legacy_settings}" = "true" ] && [ -f "${DEFAULT_CONFIG_STAGE}" ]; then
     ui_print "  - 首次升级：重置 mihomo/config.yaml 为默认配置"
@@ -322,7 +317,7 @@ if [ "${backup_box}" = "true" ]; then
       chmod 755 "${target_path}"
     fi
   }
-  for bin_item in curl yq sing-box mihomo; do
+  for bin_item in curl yq mihomo; do
     restore_binary "$bin_item"
   done
 
@@ -345,6 +340,28 @@ if [ -f "/data/adb/box/mihomo/config.yaml" ]; then
     printf '\nexternal-ui: ./dashboard\n' >> "/data/adb/box/mihomo/config.yaml"
   fi
   sed -i '/^[[:space:]]*external-ui-url:/d' "/data/adb/box/mihomo/config.yaml"
+fi
+
+# 2.0.0：完全移除 sing-box 支持，升级时按确认直接清理旧核心与数据
+ui_print "- 清理已移除的 sing-box 核心与数据"
+busybox pkill -15 -f "/data/adb/box/bin/sing-box" >/dev/null 2>&1 || true
+rm -rf "/data/adb/box/sing-box" 2>/dev/null || ui_print "  ! 无法删除 /data/adb/box/sing-box"
+rm -f "/data/adb/box/bin/sing-box" "/data/adb/box/bin/backup/sing-box.bak" 2>/dev/null || true
+if [ -n "${temp_dir}" ] && [ -d "${temp_dir}" ]; then
+  rm -rf "${temp_dir}/sing-box" 2>/dev/null || true
+  rm -f "${temp_dir}/bin/sing-box" "${temp_dir}/bin/backup/sing-box.bak" 2>/dev/null || true
+fi
+
+# 迁移旧 settings.json：删除已移除的 sing-box 设置键
+if [ -f "/data/adb/box/settings.json" ]; then
+  cp -f "/data/adb/box/settings.json" "/data/adb/box/settings.json.pre-2.0.0" 2>/dev/null || true
+  if command -v jq >/dev/null 2>&1; then
+    jq 'del(.bin_name, .singbox_stable, .subscription_url_singbox)' "/data/adb/box/settings.json" > "/data/adb/box/settings.json.tmp" 2>/dev/null && mv -f "/data/adb/box/settings.json.tmp" "/data/adb/box/settings.json" || rm -f "/data/adb/box/settings.json.tmp"
+  elif [ -x "/data/adb/box/bin/yq" ]; then
+    /data/adb/box/bin/yq -o=json -i 'del(.bin_name, .singbox_stable, .subscription_url_singbox)' "/data/adb/box/settings.json" 2>/dev/null || true
+  else
+    busybox sed -i -E '/^[[:space:]]*"(bin_name|singbox_stable|subscription_url_singbox)"[[:space:]]*:/d' "/data/adb/box/settings.json" 2>/dev/null || true
+  fi
 fi
 
 # 旧核心已移除：清理旧二进制与配置目录，并迁移非法 bin_name

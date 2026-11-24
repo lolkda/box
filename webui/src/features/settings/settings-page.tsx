@@ -60,7 +60,7 @@ const settingsSchema = z.object({
       if (field.key === "subscription_user_agent" && (!value.trim() || value.length > 255 || /[\r\n\x00-\x1F\x7F]/.test(value))) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field.key], message: "User-Agent 不能为空、不能包含换行或控制字符，最多 255 个字符" });
       }
-      if ((field.key === "url_ghproxy" || field.key === "ruleset_prefix" || field.key === "cn_ip_url" || field.key === "cn_ipv6_url" || field.key === "subscription_url_singbox") && value && !/^https?:\/\//i.test(value)) {
+      if ((field.key === "url_ghproxy" || field.key === "ruleset_prefix" || field.key === "cn_ip_url" || field.key === "cn_ipv6_url") && value && !/^https?:\/\//i.test(value)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field.key], message: `${field.label}必须是 http(s) URL` });
       }
     }

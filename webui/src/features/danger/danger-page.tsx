@@ -11,7 +11,7 @@ import { PageTitle } from "../../components/ui/page-title";
 import { useToast } from "../../components/ui/toast";
 import { getErrorMessage } from "../../lib/utils";
 
-type DangerOp = "delete-config" | "clear-logs" | "reset-subs" | "upkernel-mihomo" | "upkernel-sing-box";
+type DangerOp = "delete-config" | "clear-logs" | "reset-subs" | "upkernel-mihomo";
 
 interface DangerItem {
   id: DangerOp;
@@ -50,13 +50,6 @@ const items: DangerItem[] = [
     confirmDescription: "会下载并替换 mihomo 核心，期间服务可能重启。任务启动后不可取消。",
     icon: AlertTriangle,
   },
-  {
-    id: "upkernel-sing-box",
-    title: "更新 sing-box 核心",
-    description: "从模块内置 GitHub 源下载并替换核心",
-    confirmDescription: "会下载并替换 sing-box 核心，期间服务可能重启。任务启动后不可取消。",
-    icon: AlertTriangle,
-  },
 ];
 
 export function DangerPage() {
@@ -87,9 +80,8 @@ export function DangerPage() {
         await queryClient.invalidateQueries({ queryKey: queryKeys.config });
         await queryClient.invalidateQueries({ queryKey: queryKeys.status });
       } else {
-        const core = pending.id === "upkernel-mihomo" ? "mihomo" : "sing-box";
-        await startTask("upkernel", core);
-        toast({ title: `已开始更新 ${core} 核心`, tone: "info" });
+        await startTask("upkernel", "mihomo");
+        toast({ title: "已开始更新 mihomo 核心", tone: "info" });
         setPending(null);
         navigate("/tasks");
         return;

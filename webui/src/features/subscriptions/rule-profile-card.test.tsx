@@ -75,15 +75,6 @@ describe("RuleProfileCard", () => {
     clearKsuSpawnMock();
   });
 
-  it("shows an unsupported hint when the core is sing-box", async () => {
-    installRuleProfileMock({ supported: false });
-    renderCard();
-
-    expect(await screen.findByText("仅 mihomo")).toBeInTheDocument();
-    expect(screen.getByText(/当前核心不支持 mihomo/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "配置规则订阅" })).not.toBeInTheDocument();
-  });
-
   it("configures a global rule profile URL", async () => {
     installRuleProfileMock();
     const user = userEvent.setup();

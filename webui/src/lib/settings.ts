@@ -34,10 +34,6 @@ export const settingsGroups: SettingsGroup[] = [
     description: "启动、核心与自动更新",
     fields: [
       { key: "boot_auto_start", label: "开机自启", kind: "switch" },
-      { key: "bin_name", label: "代理核心", kind: "select", hint: "切换核心后需要重启服务", options: [
-        { value: "mihomo", label: "mihomo" },
-        { value: "sing-box", label: "sing-box" },
-      ] },
       { key: "auto_modify_config", label: "自动维护配置", kind: "switch", hint: "更新订阅时自动重写 proxy-providers 与 rule-providers" },
       { key: "update_subscription", label: "自动更新订阅", kind: "switch" },
       { key: "update_geo", label: "自动更新 Geo", kind: "switch" },
@@ -156,11 +152,6 @@ export const settingsGroups: SettingsGroup[] = [
         { value: "enable", label: "稳定版" },
         { value: "disable", label: "预发行版" },
       ] },
-      { key: "singbox_stable", label: "sing-box 通道", kind: "select", options: [
-        { value: "enable", label: "稳定版" },
-        { value: "disable", label: "预发行版" },
-      ] },
-      { key: "subscription_url_singbox", label: "sing-box 订阅地址", kind: "text", inputMode: "url", placeholder: "https://example.com/sub", hint: "仅在代理核心为 sing-box 时显示", showWhen: { key: "bin_name", equals: "sing-box" } },
       { key: "githubtoken", label: "GitHub Token", kind: "password", sensitive: true, hint: "只显示设置状态，不会回填明文" },
     ],
   },

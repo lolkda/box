@@ -1,7 +1,6 @@
 {
   "auto_modify_config": "true",
   "boot_auto_start": "true",
-  "bin_name": "mihomo",
   "network_mode": "tun",
   "tproxy_port": "9898",
   "redir_port": "9797",
@@ -26,8 +25,6 @@
   "use_ghproxy": "false",
   "url_ghproxy": "https://ghfast.top",
   "mihomo_stable": "enable",
-  "singbox_stable": "enable",
-  "subscription_url_singbox": "",
   "run_crontab": "false",
   "interva_update": "0 0,6,12,18 * * *",
   "cgroup_memcg": "false",

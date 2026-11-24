@@ -37,7 +37,6 @@ function buildSettings(): Pick<MockState, "settings" | "arrays" | "tokenSet" | "
     settings: {
       auto_modify_config: "true",
       boot_auto_start: "true",
-      bin_name: "mihomo",
       network_mode: "tproxy",
       tproxy_port: "9898",
       redir_port: "9797",
@@ -60,7 +59,6 @@ function buildSettings(): Pick<MockState, "settings" | "arrays" | "tokenSet" | "
       use_ghproxy: "true",
       url_ghproxy: "https://ghfast.top",
       mihomo_stable: "enable",
-      singbox_stable: "enable",
       run_crontab: "false",
       interva_update: "0 0,6,12,18 * * *",
       cgroup_memcg: "false",

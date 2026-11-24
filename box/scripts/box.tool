@@ -353,34 +353,18 @@ restart_box() {
 
 # 检查配置
 check() {
-  case "${bin_name}" in
-    sing-box)
-      if ${bin_path} check -c "${sing_config}" > "${box_run}/${bin_name}_report.log" 2>&1; then
-        log Info "${sing_config} 检查通过"
-      else
-        log Debug "${sing_config}"
-        log Error "$(<"${box_run}/${bin_name}_report.log")" >&2
-      fi
-      ;;
-    mihomo)
-      if ${bin_path} -t -d "${box_dir}/mihomo" -f "${mihomo_config}" > "${box_run}/${bin_name}_report.log" 2>&1; then
-        log Info "${mihomo_config} 检查通过"
-      else
-        log Debug "${mihomo_config}"
-        log Error "$(<"${box_run}/${bin_name}_report.log")" >&2
-      fi
-      ;;
-    *)
-      log Error "<${bin_name}> 未知的二进制文件."
-      exit 1
-      ;;
-  esac
+  if ${bin_path} -t -d "${box_dir}/mihomo" -f "${mihomo_config}" > "${box_run}/${bin_name}_report.log" 2>&1; then
+    log Info "${mihomo_config} 检查通过"
+  else
+    log Debug "${mihomo_config}"
+    log Error "$(<"${box_run}/${bin_name}_report.log")" >&2
+  fi
 }
 
 # 重载基础配置
 reload() {
-  ip_port=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/external-controller:/ {print $2}' "${mihomo_config}" | sed "s/'//g"; else busybox awk -F'[:,]' '/"external_controller"/ {print $2":"$3}' "${sing_config}" | sed 's/^[ \t]*//;s/"//g'; fi;)
-  secret=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/^secret:/ {print $2}' "${mihomo_config}" | sed 's/"//g'; else busybox awk -F'"' '/"secret"/ {print $4}' "${sing_config}" | head -n 1; fi;)
+  ip_port=$(busybox awk '/external-controller:/ {print $2}' "${mihomo_config}" | sed "s/'//g")
+  secret=$(busybox awk '/^secret:/ {print $2}' "${mihomo_config}" | sed 's/"//g')
 
   curl_command="curl"
   if ! command -v curl >/dev/null; then
@@ -394,33 +378,14 @@ reload() {
 
   check
 
-  case "${bin_name}" in
-    "mihomo")
-      endpoint="http://${ip_port}/configs?force=true"
-
-      if ${curl_command} -X PUT -H "Authorization: Bearer ${secret}" "${endpoint}" -d '{"path": "", "payload": ""}' 2>&1; then
-        log Info "${bin_name} 配置重载成功"
-        return 0
-      else
-        log Error "${bin_name} 配置重载失败 !"
-        return 1
-      fi
-      ;;
-    "sing-box")
-      endpoint="http://${ip_port}/configs?force=true"
-      if ${curl_command} -X PUT -H "Authorization: Bearer ${secret}" "${endpoint}" -d '{"path": "", "payload": ""}' 2>&1; then
-        log Info "${bin_name} 配置重载成功."
-        return 0
-      else
-        log Error "${bin_name} 配置重载失败 !"
-        return 1
-      fi
-      ;;
-    *)
-      log Warning "${bin_name} 不支持使用 API 重载配置."
-      return 1
-      ;;
-  esac
+  endpoint="http://${ip_port}/configs?force=true"
+  if ${curl_command} -X PUT -H "Authorization: Bearer ${secret}" "${endpoint}" -d '{"path": "", "payload": ""}' 2>&1; then
+    log Info "mihomo 配置重载成功"
+    return 0
+  else
+    log Error "mihomo 配置重载失败"
+    return 1
+  fi
 }
 
 # 获取最新的 curl
@@ -501,29 +466,12 @@ upyq() {
 
 # 检查并更新 geoip 和 geosite
 upgeox() {
-  case "${bin_name}" in
-    mihomo|sing-box) ;;
-    *)
-      log Error "不支持的代理核心: ${bin_name}"
-      return 1
-      ;;
-  esac
   geodata_mode=$(busybox awk '!/^ *#/ && /geodata-mode:*./{print $2}' "${mihomo_config}")
   [ -z "${geodata_mode}" ] && geodata_mode=false
-  case "${bin_name}" in
-    mihomo)
-      geoip_file="${box_dir}/mihomo/Country.mmdb"
-      geoip_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/country-lite.mmdb"
-      geosite_file="${box_dir}/mihomo/GeoSite.dat"
-      geosite_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/geosite.dat"
-      ;;
-    sing-box)
-      geoip_file="${box_dir}/sing-box/geoip.db"
-      geoip_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/geoip-lite.db"
-      geosite_file="${box_dir}/sing-box/geosite.db"
-      geosite_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/geosite.db"
-      ;;
-  esac
+  geoip_file="${box_dir}/mihomo/Country.mmdb"
+  geoip_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/country-lite.mmdb"
+  geosite_file="${box_dir}/mihomo/GeoSite.dat"
+  geosite_url="https://github.com/MetaCubeX/meta-rules-dat/raw/release/geosite.dat"
   if [ "${update_geo}" = "true" ] && { log Info "每日更新 GeoX" && log Debug "正在下载 ${geoip_url}"; } && upfile "${geoip_file}" "${geoip_url}" && { log Debug "正在下载 ${geosite_url}" && upfile "${geosite_file}" "${geosite_url}"; }; then
 
     find "${box_dir}/${bin_name}" -maxdepth 1 -type f -name "*.db.bak" -delete
@@ -538,12 +486,7 @@ upgeox() {
 }
 
 upgeox_all() {
-  local original_bin_name=$bin_name
-  for core in mihomo sing-box; do
-      bin_name=$core
-      upgeox
-  done
-  bin_name=$original_bin_name
+  upgeox
 }
 
 # 订阅清单：每行 名字|URL[|enabled]（第三列可选，0 表示禁用）
@@ -1304,9 +1247,7 @@ upsubs() {
 
   : > "${subscriptions_failed_file}" 2>/dev/null || true
 
-  case "${bin_name}" in
-    "mihomo")
-      if [ ! -s "${subscriptions_file}" ]; then
+  if [ ! -s "${subscriptions_file}" ]; then
         log Warning "订阅清单为空: ${subscriptions_file}"
         return 0
       fi
@@ -1429,33 +1370,8 @@ upsubs() {
         return 1
       fi
 
-      log Info "更新订阅于 $(date +"%F %R")"
-      return 0
-      ;;
-    "sing-box")
-      update_file_name="${sing_config}"
-      if [ -n "${subscription_url_singbox}" ]; then
-        log Info "${bin_name} 每日更新订阅 → $(date)"
-        log Debug "正在下载 ${update_file_name}"
-        if upfile "${update_file_name}" "${subscription_url_singbox}" "sing-box"; then
-          log Info "${update_file_name} 已保存"
-          log Info "更新订阅于 $(date +"%F %R")"
-          reload_if_running
-          return 0
-        else
-          log Error "更新订阅失败"
-          return 1
-        fi
-      else
-        log Warning "${bin_name} 订阅链接为空..."
-        return 1
-      fi
-      ;;
-    *)
-      log Error "<${bin_name}> 未知的二进制文件."
-      return 1
-      ;;
-  esac
+  log Info "更新订阅于 $(date +"%F %R")"
+  return 0
 }
 
 reload_if_running() {
@@ -1679,23 +1595,11 @@ ensure_yq() {
 }
 
 status_json() {
-  case "${bin_name}" in
-    mihomo|sing-box) ;;
-    *)
-      json_error "E_VALIDATION" "不支持的代理核心: ${bin_name}"
-      return 1
-      ;;
-  esac
-
   local running=false
   local pid="null"
   local config_exists=false
   local config_file="${mihomo_config}"
   local config_name="${name_mihomo_config}"
-  if [ "${bin_name}" = "sing-box" ]; then
-    config_file="${sing_config}"
-    config_name="${name_sing_config}"
-  fi
   if [ -f "${box_pid}" ]; then
     local current_pid
     current_pid="$(cat "${box_pid}" 2>/dev/null)"
@@ -2106,7 +2010,7 @@ settings_validate_scalar() {
     auto_modify_config|boot_auto_start|ipv6|performance_mode|proxy_tcp|proxy_udp|dns_hijack_tcp|dns_hijack_udp|bypass_cn_ip|bypass_cn_ip_v4|bypass_cn_ip_v6|update_subscription|update_geo|use_ghproxy|run_crontab|cgroup_memcg|taskset_cpu|cgroup_blkio|mac_filter|subscription_keep_last_good|enable_network_service_control|use_module_on_wifi|use_module_on_wifi_disconnect|use_ssid_matching|inotify_log_enabled)
       case "${value}" in true|false) return 0 ;; *) return 1 ;; esac
       ;;
-    quic|mihomo_dns_forward|mihomo_stable|singbox_stable)
+    quic|mihomo_dns_forward|mihomo_stable)
       case "${value}" in enable|disable) return 0 ;; *) return 1 ;; esac
       ;;
     network_mode)
@@ -2126,9 +2030,6 @@ settings_validate_scalar() {
       ;;
     mac_mode|use_wifi_list_mode)
       case "${value}" in blacklist|whitelist) return 0 ;; *) return 1 ;; esac
-      ;;
-    bin_name)
-      case "${value}" in mihomo|sing-box) return 0 ;; *) return 1 ;; esac
       ;;
     tproxy_port|redir_port)
       case "${value}" in ''|*[!0-9]*) return 1 ;; esac
@@ -2153,7 +2054,7 @@ settings_validate_scalar() {
       [ "$(printf '%s' "${value}" | busybox awk '{ print NF }')" -eq 5 ] || return 1
       return 0
       ;;
-    url_ghproxy|ruleset_prefix|cn_ip_url|cn_ipv6_url|subscription_url_singbox)
+    url_ghproxy|ruleset_prefix|cn_ip_url|cn_ipv6_url)
       [ -z "${value}" ] && return 0
       case "${value}" in http://*|https://*) return 0 ;; *) return 1 ;; esac
       ;;
@@ -3684,7 +3585,7 @@ task_start_json() {
       ;;
     upkernel)
       title="更新 ${arg} 核心"
-      case "${arg}" in mihomo|sing-box|mihomo_smart|sing-box_ref1nd) ;; *)
+      case "${arg}" in mihomo|mihomo_smart) ;; *)
         json_error "E_VALIDATION" "不支持的内核: ${arg:-空}"
         return 1
       ;; esac
@@ -3905,9 +3806,6 @@ upkernel() {
     "mihomo_smart")
       target_bin_name="mihomo"
       ;;
-    "sing-box_ref1nd")
-      target_bin_name="sing-box"
-      ;;
   esac
 
   mkdir -p "${bin_dir}/backup"
@@ -3954,50 +3852,6 @@ upkernel() {
       
       log Debug "下载 ${download_link}"
       upfile "${box_dir}/${file_kernel}.gz" "${download_link}" && xkernel "$core_to_update" "" "" "" "$file_kernel"
-      ;;
-    "sing-box_ref1nd")
-      log Info "正在更新 sing-box reF1nd 核心"
-      local api_url="https://api.github.com/repos/reF1nd/sing-box-releases/releases"
-      local url_down="https://github.com/reF1nd/sing-box-releases/releases"
-
-      if [ "${singbox_stable}" = "disable" ]; then
-        log Debug "正在下载 ${core_to_update} 预发布版本"
-        latest_version=$(github_get "${api_url}" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
-      else
-        log Debug "正在下载 ${core_to_update} 最新稳定版本"
-        latest_version=$(github_get "${api_url}/latest" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
-      fi
-
-      if [ -z "$latest_version" ]; then
-        log Error "获取 sing-box reF1nd 最新版本失败"
-        return 1
-      fi
-
-      local file_kernel="${core_to_update}-${arch}"
-      local download_link="${url_down}/download/${latest_version}/sing-box-${latest_version#v}-${platform}-${arch}.tar.gz"
-      log Debug "下载 ${download_link}"
-      upfile "${box_dir}/${file_kernel}.tar.gz" "${download_link}" && xkernel "$core_to_update" "$platform" "$arch" "$latest_version" "$file_kernel"
-      ;;
-    "sing-box")
-      api_url="https://api.github.com/repos/SagerNet/sing-box/releases"
-      url_down="https://github.com/SagerNet/sing-box/releases"
-
-      if [ "${singbox_stable}" = "disable" ]; then
-        log Debug "下载 ${core_to_update} 预发行版"
-        latest_version=$(github_get "${api_url}" | grep "tag_name" | busybox grep -oE "v[0-9].*" | head -1 | cut -d'"' -f1)
-      else
-        log Debug "下载 ${core_to_update} 最新稳定版"
-        latest_version=$(github_get "${api_url}/latest" | grep "tag_name" | busybox grep -oE "v[0-9.]*" | head -1)
-      fi
-
-      if [ -z "$latest_version" ]; then
-        log Error "获取 sing-box 最新 稳定版/测试版/Alpha版 失败"
-        return 1
-      fi
-
-      download_link="${url_down}/download/${latest_version}/sing-box-${latest_version#v}-${platform}-${arch}.tar.gz"
-      log Debug "下载 ${download_link}"
-      upfile "${box_dir}/${file_kernel}.tar.gz" "${download_link}" && xkernel "$core_to_update" "$platform" "$arch" "$latest_version" "$file_kernel"
       ;;
     "mihomo")
       download_link="https://github.com/MetaCubeX/mihomo/releases"
@@ -4046,8 +3900,6 @@ xkernel() {
   local target_bin_name="$core_to_process"
   if [ "$core_to_process" = "mihomo_smart" ]; then
     target_bin_name="mihomo"
-  elif [ "$core_to_process" = "sing-box_ref1nd" ]; then
-    target_bin_name="sing-box"
   fi
   
   bin_name=$core_to_process
@@ -4066,26 +3918,6 @@ xkernel() {
         bin_name=$original_bin_name
         return 1
       fi
-      ;;
-    "sing-box"|"sing-box_ref1nd")
-      tar_command="tar"
-      if ! command -v tar >/dev/null; then
-        tar_command="busybox tar"
-      fi
-      log Info "正在解压 Sing-Box 核心..."
-      if ${tar_command} -xf "${box_dir}/${file_kernel}.tar.gz" -C "${bin_dir}" >/dev/null; then
-        mv "${bin_dir}/sing-box-${latest_version#v}-${platform}-${arch}/sing-box" "${bin_dir}/${target_bin_name}"
-        if [ -f "${box_pid}" ]; then
-          rm -rf /data/adb/box/sing-box/cache.db
-          restart_box "$target_bin_name"
-        else
-          log Debug "${core_to_process} 无需重启."
-        fi
-      else
-        log Error "解压 ${box_dir}/${file_kernel}.tar.gz 失败."
-      fi
-      [ -d "${bin_dir}/sing-box-${latest_version#v}-${platform}-${arch}" ] && \
-        rm -r "${bin_dir}/sing-box-${latest_version#v}-${platform}-${arch}"
       ;;
     *)
       log Error "<${core_to_process}> 未知的二进制文件."
@@ -4113,24 +3945,8 @@ xkernel() {
   bin_name=$original_bin_name
 }
 upxui() {
-  if [[ "${bin_name}" != @(mihomo|sing-box) ]]; then
-    log Debug "${bin_name} 不支持面板"
-    return 1
-  fi
-
-  local ui_path
-  local ui_url
-  if [ "${bin_name}" = "mihomo" ]; then
-    # mihomo 面板固定为 zashboard，不再读取旧 external-ui-url，避免回落到 MetacubeXD。
-    ui_path="./dashboard"
-    ui_url="https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip"
-  else
-    ui_path=$(busybox awk -F '"' '/"external_ui"/ {print $4}' "${sing_config}" | head -n 1)
-    ui_url=$(busybox awk -F '"' '/"external_ui_download_url"/ {print $4; exit}' "${sing_config}" 2>/dev/null)
-    if [ -z "${ui_url}" ]; then
-      ui_url="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
-    fi
-  fi
+  local ui_path="./dashboard"
+  local ui_url="https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip"
 
   if [ -z "${ui_path}" ]; then
     ui_path="./dashboard"
@@ -4391,8 +4207,8 @@ webroot() {
     return 0
   fi
 
-  ip_port=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/external-controller:/ {print $2}' "${mihomo_config}"; else busybox awk -F'[:,]' '/"external_controller"/ {print $2":"$3}' "${sing_config}" | sed 's/^[ \t]*//;s/"//g'; fi;)
-  secret=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/^secret:/ {print $2}' "${mihomo_config}" | sed 's/"//g'; else busybox awk -F'"' '/"secret"/ {print $4}' "${sing_config}" | head -n 1; fi;)
+  ip_port=$(busybox awk '/external-controller:/ {print $2}' "${mihomo_config}")
+  secret=$(busybox awk '/^secret:/ {print $2}' "${mihomo_config}" | sed 's/"//g')
   touch "$path_webroot"
   echo -e '
   <!DOCTYPE html>
@@ -4760,7 +4576,7 @@ case "$1" in
     upyq
     upcurl
     upgeox_all
-    upkernels sing-box mihomo
+    upkernels mihomo
     for bin_name in "${bin_list[@]}"; do
       upsubs
       upxui
@@ -4770,6 +4586,6 @@ case "$1" in
     log Error "$0 $1 未找到"
     log Info "用法: $0 {status|service|settings|config|rule-profile|core|lists|logs|task|reset|sub|subs|geox|geosub|upkernel|upkernels|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|check|memcg|blkio|bond0|bond1|all}"
     log Info "JSON 调用统一追加 --json，返回 {ok,data,error} 包络"
-    log Info "upkernel 支持的核心: sing-box, mihomo, mihomo_smart, sing-box_ref1nd"
+    log Info "upkernel 支持的核心: mihomo, mihomo_smart"
     ;;
 esac

@@ -19,13 +19,6 @@
         "false"
       ]
     },
-    "bin_name": {
-      "type": "string",
-      "enum": [
-        "mihomo",
-        "sing-box"
-      ]
-    },
     "network_mode": {
       "type": "string",
       "enum": [
@@ -188,17 +181,6 @@
         "enable",
         "disable"
       ]
-    },
-    "singbox_stable": {
-      "type": "string",
-      "enum": [
-        "enable",
-        "disable"
-      ]
-    },
-    "subscription_url_singbox": {
-      "type": "string",
-      "pattern": "^(https?://.*)?$"
     },
     "run_crontab": {
       "type": "string",
