@@ -27,10 +27,13 @@ export interface Subscription {
   provider_count: number;
   updated_at: string;
   enabled: boolean;
+  user_agent_effective?: string;
 }
 
 export interface SubscriptionDetail extends Subscription {
   url: string;
+  user_agent?: string;
+  user_agent_effective?: string;
 }
 
 export interface ProxyGroup {

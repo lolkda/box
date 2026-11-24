@@ -212,11 +212,15 @@ export const api = {
 
   subscription: (name: string) => runJson<SubscriptionDetail>(["sub", "get", name, "--json"]),
 
-  addSubscription: (url: string, name: string) =>
-    runJson<Subscription>(["sub", "add", url, name, "--json"]),
+  addSubscription: (url: string, name: string, userAgent = "") =>
+    runJson<Subscription>(["sub", "add", url, name, userAgent, "--json"]),
 
-  setSubscription: (oldName: string, newName: string, url: string) =>
-    runJson<Subscription>(["sub", "set", oldName, newName, url, "--json"]),
+  setSubscription: (oldName: string, newName: string, url: string, userAgent?: string) =>
+    runJson<Subscription>(
+      userAgent === undefined
+        ? ["sub", "set", oldName, newName, url, "--json"]
+        : ["sub", "set", oldName, newName, url, userAgent, "--json"],
+    ),
 
   removeSubscription: (name: string) => runJson<{ name: string }>(["sub", "rm", name, "--json"]),
 

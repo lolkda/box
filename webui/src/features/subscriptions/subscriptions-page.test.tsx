@@ -13,7 +13,10 @@ function envelope(data: unknown) {
   return { ok: true, data, meta: { version: 1 } };
 }
 
+let lastAddCommand = "";
+
 function installSubscriptionMock() {
+  lastAddCommand = "";
   const subscriptions = [
     { name: "机场 A", url_masked: "https://example.com/***", provider: "downloaded", provider_size: 1024, provider_count: 0, updated_at: "2026-11-23T07:00:00+0800", enabled: true },
   ];
@@ -30,6 +33,7 @@ function installSubscriptionMock() {
       if (target) target.enabled = false;
       payload = envelope({ name: target?.name || "机场 A", enabled: false, reloaded: true, missing: false });
     } else if (command.includes("'sub' 'add'")) {
+      lastAddCommand = command;
       subscriptions.push({ name: "测试新增", url_masked: "https://new.example.com/***", provider: "missing", provider_size: 0, provider_count: 0, updated_at: "", enabled: true });
       payload = envelope({ name: "测试新增", url_masked: "https://new.example.com/***" });
     } else {
@@ -102,9 +106,11 @@ describe("SubscriptionsPage", () => {
     await user.click(screen.getByRole("button", { name: "添加订阅" }));
     await user.type(screen.getByLabelText("名字"), "测试新增");
     await user.type(screen.getByLabelText(/订阅地址/), "https://new.example.com/sub");
+    await user.type(screen.getByLabelText(/User-Agent/), "ClashMeta");
     await user.click(screen.getByRole("button", { name: "添加" }));
 
     expect(await screen.findByText("测试新增")).toBeInTheDocument();
+    expect(lastAddCommand).toContain("ClashMeta");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

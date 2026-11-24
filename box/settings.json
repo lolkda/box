@@ -47,6 +47,7 @@
   "use_wifi_list_mode": "blacklist",
   "inotify_log_enabled": "true",
   "subscription_mode": "auto",
+  "subscription_user_agent": "clash-verge/v2.4.5",
   "cnip_force_proxy_apps": [],
   "force_proxy_cidrs": [],
   "force_proxy_cidrs6": [],

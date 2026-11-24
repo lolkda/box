@@ -109,6 +109,28 @@ run_tool sub rm "香港2" --json >/dev/null 2>&1
 list_json="$(run_tool sub list --json 2>/dev/null)"
 jassert '.data.items | length == 0' "${list_json}" "sub rm 删除订阅"
 
+# 订阅级 User-Agent 覆盖、继承与迁移
+ua_add="$(run_tool sub add "https://ua.example/sub" "UA订阅" "ClashMeta" --json 2>/dev/null)"
+jassert '.data.user_agent == "ClashMeta" and .data.user_agent_effective == "ClashMeta"' "${ua_add}" "sub add 保存订阅 UA 覆盖"
+ua_file="${BOX_HOME}/mihomo/subscriptions.ua/UA订阅.ua"
+assert_eq "ClashMeta" "$(cat "${ua_file}" 2>/dev/null)" "订阅 UA 使用独立 sidecar"
+ua_get="$(run_tool sub get "UA订阅" --json 2>/dev/null)"
+jassert '.data.user_agent == "ClashMeta" and .data.user_agent_effective == "ClashMeta"' "${ua_get}" "sub get 返回原始与生效 UA"
+ua_set="$(run_tool sub set "UA订阅" "UA订阅2" "https://ua.example/sub2" "" --json 2>/dev/null)"
+jassert '.data.user_agent == "" and .data.user_agent_effective == "clash-verge/v2.4.5"' "${ua_set}" "显式清空订阅 UA 后继承全局"
+[ ! -e "${BOX_HOME}/mihomo/subscriptions.ua/UA订阅2.ua" ] && ok "清空后删除 sidecar" || bad "清空后删除 sidecar"
+ua_set2="$(run_tool sub set "UA订阅2" "UA订阅2" "https://ua.example/sub2" "mihomo" --json 2>/dev/null)"
+jassert '.data.user_agent == "mihomo" and .data.user_agent_effective == "mihomo"' "${ua_set2}" "sub set 更新订阅 UA"
+ua_rename="$(run_tool sub set "UA订阅2" "UA订阅3" "https://ua.example/sub2" --json 2>/dev/null)"
+jassert '.data.user_agent == "mihomo"' "${ua_rename}" "重命名订阅保留 UA 覆盖"
+assert_eq "mihomo" "$(cat "${BOX_HOME}/mihomo/subscriptions.ua/UA订阅3.ua" 2>/dev/null)" "重命名迁移 UA sidecar"
+run_tool sub rm "UA订阅3" --json >/dev/null 2>&1
+[ ! -e "${BOX_HOME}/mihomo/subscriptions.ua/UA订阅3.ua" ] && ok "删除订阅清理 UA sidecar" || bad "删除订阅清理 UA sidecar"
+bad_ua="$(run_tool sub add "https://ua.example/bad" "非法UA" $'bad\nua' --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_ua}" "拒绝含换行的订阅 UA"
+bad_global="$(run_tool settings set "subscription_user_agent" $'bad\nua' --json 2>/dev/null)"
+jassert '.ok == false and .error.code == "E_VALIDATION"' "${bad_global}" "拒绝含换行的全局 UA"
+
 cat > "${WORK}/normal-provider.yaml" <<'EOF'
 proxies:
   - {name: normal-1, type: ss, server: 127.0.0.1, port: 443, cipher: aes-128-gcm, password: p}
@@ -117,16 +139,21 @@ EOF
 # 普通 provider：auto 模式保持原有节点导入
 cat > "${WORK}/bin/curl" <<'EOF'
 #!/usr/bin/env bash
-out=""; url=""
+out=""; url=""; ua=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -w) shift 2 ;;
+    -A|--user-agent) ua="$2"; shift 2 ;;
     *) url="$1"; shift ;;
   esac
 done
 case "${url}" in
   https://normal.example/sub) cp "${WORK}/normal-provider.yaml" "${out}" ;;
+  https://ua-download.example/sub)
+    [ "${ua}" = "ClashMeta" ] || exit 22
+    cp "${WORK}/normal-provider.yaml" "${out}"
+    ;;
   *) exit 22 ;;
 esac
 printf '200'
@@ -138,6 +165,10 @@ run_tool sub update --json >/dev/null 2>&1
 assert_eq "http://www.gstatic.com/generate_204" "$(yq -r '."proxy-providers"."普通"."health-check".url' "${BOX_HOME}/mihomo/config.yaml")" "普通 provider 默认 health-check URL"
 assert_eq "5000" "$(yq -r '."proxy-providers"."普通"."health-check".timeout' "${BOX_HOME}/mihomo/config.yaml")" "普通 provider 默认 health-check 超时"
 run_tool sub rm "普通" --json >/dev/null 2>&1
+run_tool sub add "https://ua-download.example/sub" "UA下载" "ClashMeta" --json >/dev/null 2>&1
+run_tool sub update --json >/dev/null 2>&1
+[ -s "${BOX_HOME}/mihomo/proxy_provider/UA下载.yaml" ] && ok "订阅更新使用订阅级 UA" || bad "订阅更新使用订阅级 UA"
+run_tool sub rm "UA下载" --json >/dev/null 2>&1
 rm -f "${WORK}/bin/curl"
 
 # 聚合订阅：完整配置中的 proxy-providers 自动拆出节点 provider
@@ -290,6 +321,7 @@ jassert '.ok == true and (.data | has("network_mode")) and (.data | has("githubt
 jassert '(.data | has("wifi_ssids_list")) and .data.sensitive.githubtoken.set == false' "${settings_json}" "settings get 返回数组和敏感状态"
 jassert '(.data | has("cn_ip_url")) and (.data | has("cn_ipv6_url")) and (.data | has("subscription_url_singbox"))' "${settings_json}" "settings get 返回新增配置键"
 jassert '.data.subscription_mode == "auto"' "${settings_json}" "settings get 返回订阅模式默认 auto"
+jassert '.data.subscription_user_agent == "clash-verge/v2.4.5"' "${settings_json}" "settings get 返回订阅 UA 默认值"
 assert_eq "$(jq -r 'keys[]' "${BOX_HOME}/settings.json" | sort)" "$(jq -r '.properties | keys[]' "${BOX_HOME}/settings.schema.json" | sort)" "默认 settings 与 schema 键一致"
 
 cat > "${WORK}/settings.json" <<'EOF'

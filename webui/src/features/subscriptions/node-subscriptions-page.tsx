@@ -18,10 +18,12 @@ import { Sheet } from "../../components/ui/sheet";
 import { PageSkeleton } from "../../components/ui/skeleton";
 import { useToast } from "../../components/ui/toast";
 import { cn, formatBytes, formatDateTime, getErrorMessage } from "../../lib/utils";
+import { isValidUserAgent, userAgentPresets } from "../../lib/user-agent";
 
 interface SubscriptionForm {
   name: string;
   url: string;
+  userAgent: string;
 }
 
 export function NodeSubscriptionsPage() {
@@ -32,7 +34,7 @@ export function NodeSubscriptionsPage() {
   const toast = useToast();
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Subscription | null>(null);
-  const [form, setForm] = useState<SubscriptionForm>({ name: "", url: "" });
+  const [form, setForm] = useState<SubscriptionForm>({ name: "", url: "", userAgent: "" });
   const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<Subscription | null>(null);
@@ -44,7 +46,7 @@ export function NodeSubscriptionsPage() {
   useEffect(() => {
     if (!formOpen) return;
     if (!editing) {
-      setForm({ name: "", url: "" });
+      setForm({ name: "", url: "", userAgent: "" });
       return;
     }
     let cancelled = false;
@@ -52,7 +54,7 @@ export function NodeSubscriptionsPage() {
     void api
       .subscription(editing.name)
       .then((detail) => {
-        if (!cancelled) setForm({ name: detail.name, url: detail.url });
+        if (!cancelled) setForm({ name: detail.name, url: detail.url, userAgent: detail.user_agent || "" });
       })
       .catch((error) => {
         if (!cancelled) toast({ title: "读取订阅详情失败", description: getErrorMessage(error), tone: "error" });
@@ -67,7 +69,7 @@ export function NodeSubscriptionsPage() {
 
   const openAdd = () => {
     setEditing(null);
-    setForm({ name: "", url: "" });
+    setForm({ name: "", url: "", userAgent: "" });
     setFormOpen(true);
   };
 
@@ -87,13 +89,18 @@ export function NodeSubscriptionsPage() {
       toast({ title: "订阅名字不能包含 |", tone: "error" });
       return;
     }
+    const userAgent = form.userAgent;
+    if (!isValidUserAgent(userAgent, true)) {
+      toast({ title: "User-Agent 不能为空、不能包含换行或控制字符，最多 255 个字符", tone: "error" });
+      return;
+    }
     setSaving(true);
     try {
       if (editing) {
-        await api.setSubscription(editing.name, name || editing.name, url);
+        await api.setSubscription(editing.name, name || editing.name, url, userAgent);
         toast({ title: "订阅已更新", tone: "success" });
       } else {
-        await api.addSubscription(url, name);
+        await api.addSubscription(url, name, userAgent);
         toast({ title: "订阅已添加", description: "可在任务中心更新全部订阅", tone: "success" });
       }
       setFormOpen(false);
@@ -274,6 +281,22 @@ export function NodeSubscriptionsPage() {
               autoCorrect="off"
               spellCheck={false}
               onChange={(event) => { const value = event.currentTarget.value; setForm((current) => ({ ...current, url: value })); }}
+            />
+          </Field>
+          <Field label="User-Agent（可选）" htmlFor="subscription-user-agent" hint="留空继承全局；修改后下次更新订阅生效">
+            <datalist id="subscription-user-agent-presets">
+              {userAgentPresets.map((preset) => <option value={preset} key={preset} />)}
+            </datalist>
+            <Input
+              id="subscription-user-agent"
+              list="subscription-user-agent-presets"
+              value={form.userAgent}
+              placeholder="clash-verge/v2.4.5"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className="font-mono text-xs"
+              onChange={(event) => { const value = event.currentTarget.value; setForm((current) => ({ ...current, userAgent: value })); }}
             />
           </Field>
           {detailLoading ? <p className="text-xs text-fg-muted">正在读取订阅详情…</p> : null}

@@ -318,6 +318,11 @@
         "provider"
       ]
     },
+    "subscription_user_agent": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
     "cnip_force_proxy_apps": {
       "type": "array",
       "items": {

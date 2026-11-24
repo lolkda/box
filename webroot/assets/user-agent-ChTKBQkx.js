@@ -1,0 +1,1 @@
+const t=["clash-verge/v2.4.5","clash.meta/1.19.20","Clash","mihomo/1.19.20","ClashforWindows/0.20.39"];function r(s,e=!1){return s.trim()?s.length<=255&&!/[\r\n\x00-\x1F\x7F]/.test(s):e}export{r as i,t as u};

@@ -554,6 +554,8 @@ subscriptions_providers_file="${subscriptions_providers_file:-${box_run}/subscri
 subscriptions_provider_defs_dir="${subscriptions_provider_defs_dir:-${box_run_state}/provider-defs}"
 # 本次订阅更新失败的来源；重建 provider 时保留其旧配置
 subscriptions_failed_file="${subscriptions_failed_file:-${box_run}/subscriptions.failed}"
+# 每个节点订阅的 UA 覆盖值；空文件或文件不存在表示继承全局
+subscriptions_ua_dir="${subscriptions_ua_dir:-${box_dir}/mihomo/subscriptions.ua}"
 
 # 把订阅名字转换成安全的 provider 文件名
 sub_provider_file_name() {
@@ -561,6 +563,76 @@ sub_provider_file_name() {
   safe="$(printf '%s' "$1" | busybox sed 's#[/\\|[:space:]]#_#g; s/^\.*//')"
   [ -n "${safe}" ] || safe="sub"
   printf '%s' "${safe}"
+}
+
+sub_ua_file() {
+  printf '%s/%s.ua' "${subscriptions_ua_dir}" "$(sub_provider_file_name "$1")"
+}
+
+sub_override_user_agent() {
+  local file
+  file="$(sub_ua_file "$1")"
+  [ -s "${file}" ] || return 0
+  busybox cat "${file}"
+}
+
+sub_effective_user_agent() {
+  local override
+  override="$(sub_override_user_agent "$1")"
+  if [ -n "${override}" ]; then
+    printf '%s' "${override}"
+    return 0
+  fi
+  if [ -n "${subscription_user_agent:-}" ]; then
+    printf '%s' "${subscription_user_agent}"
+    return 0
+  fi
+  printf 'clash-verge/v2.4.5'
+}
+
+sub_user_agent_valid() {
+  local ua="$1" allow_empty="${2:-false}"
+  if [ -z "${ua}" ]; then
+    [ "${allow_empty}" = "true" ]
+    return $?
+  fi
+  [ "${#ua}" -le 255 ] || return 1
+  case "${ua}" in *'\n'*|*'\r'*) return 1 ;; esac
+  [ "$(printf '%s' "${ua}" | busybox tr -d '\r\n')" = "${ua}" ] || return 1
+  if printf '%s' "${ua}" | busybox grep -q '[[:cntrl:]]'; then
+    return 1
+  fi
+  return 0
+}
+
+sub_set_override_user_agent() {
+  local name="$1" ua="$2" file tmp
+  file="$(sub_ua_file "${name}")"
+  if [ -z "${ua}" ]; then
+    rm -f "${file}" 2>/dev/null || true
+    return 0
+  fi
+  mkdir -p "${subscriptions_ua_dir}" || return 1
+  tmp="${file}.tmp.$$"
+  printf '%s' "${ua}" > "${tmp}" || { rm -f "${tmp}"; return 1; }
+  chmod 600 "${tmp}" 2>/dev/null || true
+  mv "${tmp}" "${file}" || { rm -f "${tmp}"; return 1; }
+}
+
+sub_remove_override_user_agent() {
+  local file
+  file="$(sub_ua_file "$1")"
+  rm -f "${file}" "${file}".tmp.* 2>/dev/null || true
+}
+
+sub_rename_override_user_agent() {
+  local old_name="$1" new_name="$2" old_file new_file
+  old_file="$(sub_ua_file "${old_name}")"
+  new_file="$(sub_ua_file "${new_name}")"
+  [ "${old_file}" = "${new_file}" ] && return 0
+  [ -f "${old_file}" ] || return 0
+  mkdir -p "${subscriptions_ua_dir}" || return 1
+  mv "${old_file}" "${new_file}" || return 1
 }
 
 # 订阅名字是否已存在
@@ -1117,6 +1189,8 @@ sub_write_provider_defs_cache() {
 sub_update_aggregate() {
   local source="$1"
   local temp_file="$2"
+  local ua="${3:-}"
+  [ -n "${ua}" ] || ua="$(sub_effective_user_agent "${source}")"
   local provider_list="${temp_file}.providers"
   local success_lines="${temp_file}.success"
   local p_name p_url provider_file provider_count success_count failure_count=0 duplicate=""
@@ -1169,7 +1243,7 @@ sub_update_aggregate() {
   while IFS="$(printf '\t')" read -r p_name p_url; do
     provider_file="${mihomo_provide_path}/$(sub_provider_file_name "${p_name}").yaml"
     rm -f "${provider_file}.download"
-    if ! LOG_MASK_URL=mask upfile "${provider_file}.download" "${p_url}" "${subscription_user_agent}"; then
+    if ! LOG_MASK_URL=mask upfile "${provider_file}.download" "${p_url}" "${ua}"; then
       log Error "provider 下载失败: ${p_name}"
       rm -f "${provider_file}.download"
       failure_count=$((failure_count + 1))
@@ -1274,11 +1348,13 @@ upsubs() {
         safe_name="$(sub_provider_file_name "${provider_name}")"
         local provider_file="${mihomo_provide_path}/${safe_name}.yaml"
         local temp_file="${provider_file}.download"
+        local sub_ua
+        sub_ua="$(sub_effective_user_agent "${provider_name}")"
 
         log Info "--> 正在处理订阅: ${provider_name}"
         rm -f "${temp_file}"
 
-        if ! LOG_MASK_URL=mask upfile "${temp_file}" "${provider_url}" "${subscription_user_agent}"; then
+        if ! LOG_MASK_URL=mask upfile "${temp_file}" "${provider_url}" "${sub_ua}"; then
           log Error "订阅下载失败: ${provider_name}"
           rm -f "${temp_file}"
           if [ "${subscription_keep_last_good}" != "true" ]; then
@@ -1307,7 +1383,7 @@ upsubs() {
           fi
 
           log Info "检测到完整配置聚合，开始拆分 provider: ${provider_name}"
-          sub_update_aggregate "${provider_name}" "${temp_file}"
+          sub_update_aggregate "${provider_name}" "${temp_file}" "${sub_ua}"
           local aggregate_status=$?
           rm -f "${temp_file}"
           case "${aggregate_status}" in
@@ -1414,6 +1490,12 @@ EOF
 sub_add() {
   local url="$1"
   local name="$2"
+  local ua="${3:-}"
+
+  if ! sub_user_agent_valid "${ua}" true; then
+    log Error "User-Agent 不合法"
+    return 1
+  fi
 
   case "${url}" in
     http://*|https://*) ;;
@@ -1461,6 +1543,10 @@ sub_add() {
   done < "${subscriptions_file}"
 
   printf '%s|%s\n' "${name}" "${url}" >> "${subscriptions_file}"
+  if ! sub_set_override_user_agent "${name}" "${ua}"; then
+    log Error "保存订阅 User-Agent 失败: ${name}"
+    return 1
+  fi
   log Info "已添加订阅: ${name}"
   log Info "执行 box.tool sub update 拉取节点"
   return 0
@@ -1523,6 +1609,7 @@ sub_rm() {
   safe_name="$(sub_provider_file_name "${name}")"
   provider_file="${mihomo_provide_path}/${safe_name}.yaml"
   rm -f "${provider_file}" "${provider_file}.download"
+  sub_remove_override_user_agent "${name}"
 
   log Info "已删除订阅: ${name}"
   return 0
@@ -1686,11 +1773,12 @@ sub_list_json() {
       case "${name}" in
         ''|\#*) continue ;;
       esac
-      local safe_name provider_file state provider_size updated provider_count enabled_bool=true
+      local safe_name provider_file state provider_size updated provider_count enabled_bool=true effective_ua
       safe_name="$(sub_provider_file_name "${name}")"
       provider_file="${mihomo_provide_path}/${safe_name}.yaml"
       provider_count="$(sub_provider_count "${name}")"
       [ "${enabled}" = "0" ] && enabled_bool=false
+      effective_ua="$(sub_effective_user_agent "${name}")"
       if [ "${provider_count}" -gt 0 ]; then
         state="aggregated"
       elif [ -s "${provider_file}" ]; then
@@ -1706,9 +1794,9 @@ sub_list_json() {
         updated="$(busybox stat -c '%y' "${provider_file}" 2>/dev/null | busybox cut -d. -f1 || true)"
       fi
       [ "${first}" -eq 1 ] || printf ','
-      printf '{"name":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s,"enabled":%s}' \
+      printf '{"name":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s,"enabled":%s,"user_agent_effective":%s}' \
         "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")" "$(json_quote "${state}")" \
-        "${provider_size}" "${provider_count}" "$(json_quote "${updated}")" "$(json_bool "${enabled_bool}")"
+        "${provider_size}" "${provider_count}" "$(json_quote "${updated}")" "$(json_bool "${enabled_bool}")" "$(json_quote "${effective_ua}")"
       first=0
     done < "${subscriptions_file}"
   fi
@@ -1726,11 +1814,13 @@ sub_get_json() {
     return 1
   fi
 
-  local name url enabled found=1 safe_name provider_file provider_size provider_count updated enabled_bool=true
+  local name url enabled found=1 safe_name provider_file provider_size provider_count updated enabled_bool=true override_ua effective_ua
   while IFS='|' read -r name url enabled; do
     [ "${name}" = "${wanted}" ] || continue
     found=0
     [ "${enabled}" = "0" ] && enabled_bool=false
+    override_ua="$(sub_override_user_agent "${name}")"
+    effective_ua="$(sub_effective_user_agent "${name}")"
     safe_name="$(sub_provider_file_name "${name}")"
     provider_file="${mihomo_provide_path}/${safe_name}.yaml"
     provider_count="$(sub_provider_count "${name}")"
@@ -1741,10 +1831,10 @@ sub_get_json() {
       [ -n "${provider_size}" ] || provider_size=0
       updated="$(busybox stat -c '%y' "${provider_file}" 2>/dev/null | busybox cut -d. -f1 || true)"
     fi
-    json_ok "$(printf '{"name":%s,"url":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s,"enabled":%s}' \
+    json_ok "$(printf '{"name":%s,"url":%s,"url_masked":%s,"provider":%s,"provider_size":%s,"provider_count":%s,"updated_at":%s,"enabled":%s,"user_agent":%s,"user_agent_effective":%s}' \
       "$(json_quote "${name}")" "$(json_quote "${url}")" "$(json_quote "$(mask_url "${url}")")" \
       "$(json_quote "$([ "${provider_count}" -gt 0 ] && printf aggregated || { [ -s "${provider_file}" ] && printf downloaded || printf missing; })")" \
-      "${provider_size}" "${provider_count}" "$(json_quote "${updated}")" "$(json_bool "${enabled_bool}")")"
+      "${provider_size}" "${provider_count}" "$(json_quote "${updated}")" "$(json_bool "${enabled_bool}")" "$(json_quote "${override_ua}")" "$(json_quote "${effective_ua}")")"
     return 0
   done < "${subscriptions_file}"
 
@@ -1853,6 +1943,7 @@ sub_disable_json() {
 sub_add_json() {
   local url="$1"
   local name="$2"
+  local ua="${3:-}"
   if [ -z "${url}" ]; then
     json_error "E_USAGE" "缺少订阅地址"
     return 1
@@ -1861,15 +1952,16 @@ sub_add_json() {
     name="$(printf '%s' "${url}" | busybox sed -E 's#^https?://([^/]+).*#\1#')"
   fi
 
-  local output rc
-  output="$(sub_add "${url}" "${name}" 2>&1 1>/dev/null)"
+  local output rc effective_ua
+  output="$(sub_add "${url}" "${name}" "${ua}" 2>&1 1>/dev/null)"
   rc=$?
   if [ "${rc}" -ne 0 ]; then
     json_error "E_VALIDATION" "添加订阅失败" "$(printf '%s' "${output}" | busybox sed -E 's/^[0-9-]+ [0-9:]+ \[[A-Za-z]+\]: //')"
     return 1
   fi
-  json_ok "$(printf '{"name":%s,"url_masked":%s,"provider":"missing","provider_size":0,"provider_count":0,"updated_at":"","enabled":true}' \
-    "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")")"
+  effective_ua="$(sub_effective_user_agent "${name}")"
+  json_ok "$(printf '{"name":%s,"url_masked":%s,"provider":"missing","provider_size":0,"provider_count":0,"updated_at":"","enabled":true,"user_agent":%s,"user_agent_effective":%s}' \
+    "$(json_quote "${name}")" "$(json_quote "$(mask_url "${url}")")" "$(json_quote "${ua}")" "$(json_quote "${effective_ua}")")"
 }
 
 sub_rm_json() {
@@ -1897,11 +1989,16 @@ sub_set_json() {
   local old_name="$1"
   local new_name="$2"
   local url="$3"
+  local ua="${4-__PRESERVE_UA__}"
   if [ -z "${old_name}" ] || [ -z "${url}" ]; then
-    json_error "E_USAGE" "用法: sub set <旧名字> <新名字> <订阅地址> --json"
+    json_error "E_USAGE" "用法: sub set <旧名字> <新名字> <订阅地址> [User-Agent] --json"
     return 1
   fi
   [ -n "${new_name}" ] || new_name="${old_name}"
+  if [ "${ua}" != "__PRESERVE_UA__" ] && ! sub_user_agent_valid "${ua}" true; then
+    json_error "E_VALIDATION" "User-Agent 不合法"
+    return 1
+  fi
   case "${url}" in
     http://*|https://*) ;;
     *)
@@ -1964,12 +2061,28 @@ sub_set_json() {
     rm -f "${mihomo_provide_path}/${old_safe}.yaml.download"
   fi
 
+  if [ "${ua}" = "__PRESERVE_UA__" ]; then
+    if ! sub_rename_override_user_agent "${old_name}" "${new_name}"; then
+      json_error "E_IO" "迁移订阅 User-Agent 失败"
+      return 1
+    fi
+  else
+    if [ "${new_name}" != "${old_name}" ]; then
+      sub_remove_override_user_agent "${old_name}"
+    fi
+    if ! sub_set_override_user_agent "${new_name}" "${ua}"; then
+      json_error "E_IO" "保存订阅 User-Agent 失败"
+      return 1
+    fi
+  fi
+
   if [ "${auto_modify_config}" = "true" ] && [ -x "${box_dir}/bin/yq" -o "$(command -v yq 2>/dev/null)" ]; then
     update_mihomo_providers >/dev/null 2>&1 || log Warning "订阅已更新，但 proxy-providers 配置更新失败"
   fi
 
-  json_ok "$(printf '{"name":%s,"url_masked":%s,"renamed":%s}' \
-    "$(json_quote "${new_name}")" "$(json_quote "$(mask_url "${url}")")" "$(json_bool "${renamed}")")"
+  json_ok "$(printf '{"name":%s,"url_masked":%s,"renamed":%s,"user_agent":%s,"user_agent_effective":%s}' \
+    "$(json_quote "${new_name}")" "$(json_quote "$(mask_url "${url}")")" "$(json_bool "${renamed}")" \
+    "$(json_quote "$(sub_override_user_agent "${new_name}")")" "$(json_quote "$(sub_effective_user_agent "${new_name}")")")"
 }
 
 sub_update_json() {
@@ -2052,6 +2165,14 @@ settings_validate_scalar() {
     url_ghproxy|ruleset_prefix|cn_ip_url|cn_ipv6_url|subscription_url_singbox)
       [ -z "${value}" ] && return 0
       case "${value}" in http://*|https://*) return 0 ;; *) return 1 ;; esac
+      ;;
+    subscription_user_agent)
+      [ -n "${value}" ] || return 1
+      [ "${#value}" -le 255 ] || return 1
+      case "${value}" in *'\n'*|*'\r'*) return 1 ;; esac
+      [ "$(printf '%s' "${value}" | busybox tr -d '\r\n')" = "${value}" ] || return 1
+      printf '%s' "${value}" | busybox grep -q '[[:cntrl:]]' && return 1
+      return 0
       ;;
     githubtoken)
       return 0
@@ -3423,6 +3544,7 @@ logs_clear_json() {
 reset_subscriptions_json() {
   : > "${subscriptions_file}"
   rm -f "${mihomo_provide_path}"/*.yaml 2>/dev/null
+  rm -rf "${subscriptions_ua_dir}" 2>/dev/null
   json_ok '{"cleared":true}'
 }
 
@@ -4556,12 +4678,14 @@ case "$1" in
       add)
         if has_json_arg "$@"; then
           if [ "$4" = "--json" ]; then
-            sub_add_json "$3" ""
+            sub_add_json "$3" "" ""
+          elif [ "$5" = "--json" ]; then
+            sub_add_json "$3" "$4" ""
           else
-            sub_add_json "$3" "$4"
+            sub_add_json "$3" "$4" "$5"
           fi
         else
-          sub_add "$3" "$4"
+          sub_add "$3" "$4" "$5"
         fi
         ;;
       get)
@@ -4569,9 +4693,15 @@ case "$1" in
         ;;
       set)
         if has_json_arg "$@"; then
-          sub_set_json "$3" "$4" "$5"
+          if [ "$6" = "--json" ]; then
+            sub_set_json "$3" "$4" "$5"
+          elif [ "$7" = "--json" ]; then
+            sub_set_json "$3" "$4" "$5" "$6"
+          else
+            sub_set_json "$3" "$4" "$5"
+          fi
         else
-          log Info "用法: $0 sub set <旧名字> <新名字> <订阅地址> --json"
+          log Info "用法: $0 sub set <旧名字> <新名字> <订阅地址> [User-Agent] --json"
         fi
         ;;
       list|ls)
