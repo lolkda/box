@@ -1,6 +1,4 @@
-import { userAgentPresets } from "./user-agent";
-
-export type SettingFieldKind = "switch" | "select" | "text" | "number" | "password" | "array" | "package-array";
+export type SettingFieldKind = "switch" | "select" | "user-agent" | "text" | "number" | "password" | "array" | "package-array";
 
 export interface SettingOption {
   value: string;
@@ -14,7 +12,6 @@ export interface SettingField {
   options?: SettingOption[];
   placeholder?: string;
   hint?: string;
-  presets?: string[];
   sensitive?: boolean;
   inputMode?: "text" | "numeric" | "url";
   showWhen?: { key: string; equals: string };
@@ -40,7 +37,7 @@ export const settingsGroups: SettingsGroup[] = [
       { key: "run_crontab", label: "启用定时任务", kind: "switch" },
       { key: "interva_update", label: "定时表达式", kind: "text", placeholder: "0 0,6,12,18 * * *", hint: "标准 5 字段 cron 表达式" },
       { key: "subscription_keep_last_good", label: "保留上次可用订阅", kind: "switch", hint: "更新失败时保留上一个可用 provider 文件" },
-      { key: "subscription_user_agent", label: "节点订阅 User-Agent", kind: "text", placeholder: "clash-verge/v2.4.5", hint: "仅影响 mihomo 节点订阅和 provider 下载；修改后下次更新订阅生效", presets: userAgentPresets },
+      { key: "subscription_user_agent", label: "节点订阅 User-Agent", kind: "user-agent", hint: "仅影响 mihomo 节点订阅和 provider 下载；修改后下次更新订阅生效" },
     ],
   },
   {

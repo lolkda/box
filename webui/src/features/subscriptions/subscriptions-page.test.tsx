@@ -98,6 +98,38 @@ describe("SubscriptionsPage", () => {
     expect(await screen.findByText("已禁用")).toBeInTheDocument();
   });
 
+  it("keeps preset User-Agent selection non-editable", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("机场 A")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "添加订阅" }));
+    await user.selectOptions(screen.getByLabelText(/User-Agent/), "Clash");
+
+    expect(screen.queryByLabelText("自定义 User-Agent")).not.toBeInTheDocument();
+    expect(document.querySelector("datalist")).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText(/User-Agent/), "__custom__");
+    expect(screen.getByLabelText("自定义 User-Agent")).toBeInTheDocument();
+    expect(document.querySelector("datalist")).not.toBeInTheDocument();
+  });
+
+  it("requires a value when custom User-Agent is selected", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("机场 A")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "添加订阅" }));
+    await user.type(screen.getByLabelText("名字"), "测试新增");
+    await user.type(screen.getByLabelText(/订阅地址/), "https://new.example.com/sub");
+    await user.selectOptions(screen.getByLabelText(/User-Agent/), "自定义…");
+    await user.click(screen.getByRole("button", { name: "添加" }));
+
+    expect(await screen.findByText("自定义 User-Agent 不能为空")).toBeInTheDocument();
+    expect(lastAddCommand).toBe("");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
   it("adds a subscription through the sheet", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -106,7 +138,8 @@ describe("SubscriptionsPage", () => {
     await user.click(screen.getByRole("button", { name: "添加订阅" }));
     await user.type(screen.getByLabelText("名字"), "测试新增");
     await user.type(screen.getByLabelText(/订阅地址/), "https://new.example.com/sub");
-    await user.type(screen.getByLabelText(/User-Agent/), "ClashMeta");
+    await user.selectOptions(screen.getByLabelText(/User-Agent/), "__custom__");
+    await user.type(screen.getByLabelText("自定义 User-Agent"), "ClashMeta");
     await user.click(screen.getByRole("button", { name: "添加" }));
 
     expect(await screen.findByText("测试新增")).toBeInTheDocument();

@@ -20,6 +20,7 @@ import { Select } from "../../components/ui/select";
 import { PageSkeleton } from "../../components/ui/skeleton";
 import { Switch } from "../../components/ui/switch";
 import { TagInput } from "../../components/ui/tag-input";
+import { UserAgentSelect } from "../../components/ui/user-agent-select";
 import { useToast } from "../../components/ui/toast";
 import { allSettingsFields, settingsGroups, type SettingField } from "../../lib/settings";
 import { cn, getErrorMessage } from "../../lib/utils";
@@ -178,6 +179,24 @@ function SettingsFieldRow({
     );
   }
 
+  if (field.kind === "user-agent") {
+    return (
+      <Field label={field.label} htmlFor={`setting-${field.key}`} hint={field.hint} error={error}>
+        <Controller
+          control={control}
+          name={`settings.${field.key}`}
+          render={({ field: controlled }) => (
+            <UserAgentSelect
+              id={`setting-${field.key}`}
+              value={controlled.value || ""}
+              onChange={controlled.onChange}
+            />
+          )}
+        />
+      </Field>
+    );
+  }
+
   if (field.kind === "password") {
     return (
       <Field label={field.label} htmlFor={`setting-${field.key}`} hint={field.hint} error={error}>
@@ -229,21 +248,14 @@ function SettingsFieldRow({
     );
   }
 
-  const presetListId = field.presets?.length ? `setting-${field.key}-presets` : undefined;
   return (
     <Field label={field.label} htmlFor={`setting-${field.key}`} hint={field.hint} error={error}>
-      {presetListId ? (
-        <datalist id={presetListId}>
-          {field.presets?.map((preset) => <option value={preset} key={preset} />)}
-        </datalist>
-      ) : null}
       <Input
         id={`setting-${field.key}`}
         type="text"
-        list={presetListId}
         inputMode={field.inputMode || (field.kind === "number" ? "numeric" : "text")}
         placeholder={field.placeholder}
-        className={field.key === "interva_update" || field.key === "allow_cpu" || field.key === "url_ghproxy" || field.key === "ruleset_prefix" || field.key === "subscription_user_agent" ? "font-mono text-xs" : undefined}
+        className={field.key === "interva_update" || field.key === "allow_cpu" || field.key === "url_ghproxy" || field.key === "ruleset_prefix" ? "font-mono text-xs" : undefined}
         {...register(`settings.${field.key}`)}
       />
     </Field>
