@@ -1,3 +1,9 @@
+#### Changelog 1.11.9 - 24-11-2026
+- 移除设置页的订阅模式选项
+- 订阅更新统一自动识别 provider、proxies 与完整配置聚合
+- 兼容旧 subscription_mode=provider，不再拒绝聚合订阅
+- 保留全局与按订阅 User-Agent 配置
+
 #### Changelog 1.11.8 - 24-11-2026
 - 新增全局与按订阅 User-Agent 配置
 - 订阅 UA 支持预设与自定义，留空继承全局
