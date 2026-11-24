@@ -3,6 +3,8 @@
 scripts_dir="${0%/*}"
 
 user_agent="box_for_root"
+# 订阅与 provider 下载使用的 UA；xusx 等转换服务会按 UA 返回不同节点入口
+subscription_user_agent="${subscription_user_agent:-clash-verge/v2.4.5}"
 BOX_DIR="${BOX_HOME:-/data/adb/box}"
 if [ ! -f "${BOX_DIR}/settings.base.sh" ]; then
   printf '{"ok":false,"error":{"code":"E_IO","message":"settings.base.sh 不存在","detail":""}}' >&2
@@ -1167,7 +1169,7 @@ sub_update_aggregate() {
   while IFS="$(printf '\t')" read -r p_name p_url; do
     provider_file="${mihomo_provide_path}/$(sub_provider_file_name "${p_name}").yaml"
     rm -f "${provider_file}.download"
-    if ! LOG_MASK_URL=mask upfile "${provider_file}.download" "${p_url}" "ClashMeta"; then
+    if ! LOG_MASK_URL=mask upfile "${provider_file}.download" "${p_url}" "${subscription_user_agent}"; then
       log Error "provider 下载失败: ${p_name}"
       rm -f "${provider_file}.download"
       failure_count=$((failure_count + 1))
@@ -1276,7 +1278,7 @@ upsubs() {
         log Info "--> 正在处理订阅: ${provider_name}"
         rm -f "${temp_file}"
 
-        if ! LOG_MASK_URL=mask upfile "${temp_file}" "${provider_url}" "ClashMeta"; then
+        if ! LOG_MASK_URL=mask upfile "${temp_file}" "${provider_url}" "${subscription_user_agent}"; then
           log Error "订阅下载失败: ${provider_name}"
           rm -f "${temp_file}"
           if [ "${subscription_keep_last_good}" != "true" ]; then

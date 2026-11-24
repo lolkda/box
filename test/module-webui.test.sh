@@ -202,13 +202,20 @@ cat > "${WORK}/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 out=""
 url=""
+ua=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -w) shift 2 ;;
+    -A|--user-agent) ua="$2"; shift 2 ;;
     *) url="$1"; shift ;;
   esac
 done
+case "${url}" in
+  https://aggregate.example/sub|https://aggregate-provider.example/*|https://normal.example/sub|https://partial.example/sub|https://mixed.example/sub|https://partial-provider.example/*)
+    [ "${ua}" = "clash-verge/v2.4.5" ] || exit 22
+    ;;
+esac
 case "${url}" in
   https://aggregate.example/sub) cp "${WORK}/aggregate.yaml" "${out}" ;;
   https://aggregate-provider.example/*) cp "${WORK}/provider.yaml" "${out}" ;;
