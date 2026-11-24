@@ -1,3 +1,10 @@
+#### Changelog 2.0.0 - 24-11-2026
+- BREAKING: 完全移除 sing-box，仅保留 mihomo
+- 升级时删除旧 sing-box 配置目录与二进制
+- 移除核心选择、sing-box 设置/订阅/内核更新与相关 WebUI 入口
+- 自动迁移旧 settings 中的 sing-box 字段
+- 保留 mihomo 订阅、provider、User-Agent、规则和网络模式功能
+
 #### Changelog 1.11.9 - 24-11-2026
 - 移除设置页的订阅模式选项
 - 订阅更新统一自动识别 provider、proxies 与完整配置聚合
