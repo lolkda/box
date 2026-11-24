@@ -548,6 +548,10 @@ upgeox_all() {
 subscriptions_file="${subscriptions_file:-${box_dir}/mihomo/subscriptions.list}"
 # 聚合订阅派生出的 provider 清单（内部运行文件）
 subscriptions_providers_file="${subscriptions_providers_file:-${box_run}/subscriptions.providers}"
+# 聚合订阅的完整 provider 定义缓存；用于保留 health-check/override/exclude-filter
+subscriptions_provider_defs_dir="${subscriptions_provider_defs_dir:-${box_run_state}/provider-defs}"
+# 本次订阅更新失败的来源；重建 provider 时保留其旧配置
+subscriptions_failed_file="${subscriptions_failed_file:-${box_run}/subscriptions.failed}"
 
 # 把订阅名字转换成安全的 provider 文件名
 sub_provider_file_name() {
@@ -562,6 +566,19 @@ subscription_exists() {
   local wanted="$1"
   [ -f "${subscriptions_file}" ] || return 1
   busybox awk -F'|' -v wanted="${wanted}" '$1 == wanted { found = 1 } END { exit(found ? 0 : 1) }' "${subscriptions_file}"
+}
+
+# 本次更新是否失败；失败来源在重建 provider 时保留旧配置
+sub_update_failed() {
+  local source="$1"
+  [ -s "${subscriptions_failed_file}" ] || return 1
+  busybox grep -Fxq "${source}" "${subscriptions_failed_file}"
+}
+
+sub_mark_update_failed() {
+  local source="$1"
+  [ -n "${source}" ] || return 0
+  printf '%s\n' "${source}" >> "${subscriptions_failed_file}"
 }
 
 # 订阅默认启用；第三列为 0 时表示禁用
@@ -595,9 +612,24 @@ update_mihomo_providers() {
     return 1
   fi
 
-  log Debug "开始更新 proxy-providers 配置项..."
+  local yq_cmd="${yq:-}"
+  if [ -z "${yq_cmd}" ]; then
+    if command -v yq >/dev/null 2>&1; then
+      yq_cmd="yq"
+    elif [ -x "${box_dir}/bin/yq" ]; then
+      yq_cmd="${box_dir}/bin/yq"
+    else
+      log Error "yq 不存在，无法合并 proxy-providers"
+      return 1
+    fi
+  fi
   local temp_providers="${mihomo_config}.providers.tmp"
+  local base_providers="${mihomo_config}.base.providers.tmp"
+  local merged_providers="${mihomo_config}.merged.providers.tmp"
+  local disabled_names="${mihomo_config}.disabled.names.tmp"
+  local cache_names="${mihomo_config}.cache.names.tmp"
   local provider_count=0 provider_name provider_url enabled aggregate_source local_path
+  local safe_name relative_path escaped_url cache_file cache_norm p_name safe_provider
   provider_name=""
   provider_url=""
   enabled=""
@@ -614,17 +646,18 @@ update_mihomo_providers() {
         log Debug "跳过已禁用订阅: ${provider_name}"
         continue
       fi
+      if sub_update_failed "${provider_name}"; then
+        log Debug "保留更新失败订阅的旧 provider: ${provider_name}"
+        continue
+      fi
 
       if sub_manifest_source_exists "${provider_name}"; then
         log Debug "跳过聚合订阅自身: ${provider_name}"
         continue
       fi
 
-      local safe_name
       safe_name="$(sub_provider_file_name "${provider_name}")"
-      local relative_path="./$(basename "${mihomo_provide_path}")/${safe_name}.yaml"
-      local escaped_url
-
+      relative_path="./$(basename "${mihomo_provide_path}")/${safe_name}.yaml"
       escaped_url="$(printf '%s' "${provider_url}" | busybox sed 's/\\/\\\\/g; s/"/\\"/g')"
 
       log Debug "添加 provider: ${provider_name} -> ${relative_path} (http)"
@@ -637,9 +670,9 @@ update_mihomo_providers() {
     interval: 86400
     health-check:
       enable: true
-      url: https://cp.cloudflare.com
+      url: http://www.gstatic.com/generate_204
       interval: 300
-      timeout: 1000
+      timeout: 5000
       tolerance: 100
 EOF
       provider_count=$((provider_count + 1))
@@ -656,8 +689,16 @@ EOF
         log Debug "跳过已禁用聚合订阅的 provider: ${aggregate_source}/${provider_name}"
         continue
       fi
+      if sub_update_failed "${aggregate_source}"; then
+        log Debug "保留更新失败聚合订阅的旧 provider: ${aggregate_source}/${provider_name}"
+        continue
+      fi
+      # 有完整定义缓存时，缓存是成功 provider 的权威来源；失败项由基线保留旧 block
+      if [ -s "${subscriptions_provider_defs_dir}/$(sub_provider_file_name "${aggregate_source}").yaml" ]; then
+        log Debug "跳过旧 manifest provider，使用完整定义缓存: ${aggregate_source}/${provider_name}"
+        continue
+      fi
 
-      local safe_name relative_path escaped_url
       safe_name="$(sub_provider_file_name "${provider_name}")"
       relative_path="./$(basename "${mihomo_provide_path}")/${safe_name}.yaml"
       escaped_url="$(printf '%s' "${provider_url}" | busybox sed 's/\\/\\\\/g; s/"/\\"/g')"
@@ -671,22 +712,92 @@ EOF
     interval: 86400
     health-check:
       enable: true
-      url: https://cp.cloudflare.com
+      url: http://www.gstatic.com/generate_204
       interval: 300
-      timeout: 1000
+      timeout: 5000
       tolerance: 100
 EOF
       provider_count=$((provider_count + 1))
     done < "${subscriptions_providers_file}"
   fi
 
-  if [ "${provider_count}" -eq 0 ]; then
-    echo "proxy-providers: {}" > "${temp_providers}"
+  # 现有配置中的 provider 先作为基线，保留手动 provider；订阅 block 再整块覆盖
+  if "${yq_cmd}" 'has("proxy-providers")' "${mihomo_config}" >/dev/null 2>&1; then
+    "${yq_cmd}" -o=yaml '{"proxy-providers": ."proxy-providers"}' "${mihomo_config}" > "${base_providers}" 2>/dev/null || {
+      log Error "读取现有 proxy-providers 失败"
+      rm -f "${temp_providers}" "${base_providers}" "${merged_providers}" "${disabled_names}" "${cache_names}"
+      return 1
+    }
+  else
+    printf 'proxy-providers: {}\n' > "${base_providers}"
   fi
 
-  local temp_output="${mihomo_config}.output.tmp"
+  BASE="${base_providers}" MANAGED="${temp_providers}" "${yq_cmd}" eval -n 'load(env(BASE)) as $base | load(env(MANAGED)) as $managed | {"proxy-providers": (($base."proxy-providers" // {}) + ($managed."proxy-providers" // {}))}' > "${merged_providers}" 2>/dev/null || {
+    log Error "合并 proxy-providers 基线失败"
+    rm -f "${temp_providers}" "${base_providers}" "${merged_providers}" "${disabled_names}" "${cache_names}"
+    return 1
+  }
 
-  busybox awk -v new_providers="${temp_providers}" '
+  # 聚合订阅如果有完整定义缓存，用缓存整块覆盖同名 managed provider
+  if [ -s "${subscriptions_file}" ]; then
+    while IFS='|' read -r provider_name provider_url enabled; do
+      [ "${enabled}" = "0" ] && continue
+      sub_update_failed "${provider_name}" && continue
+      safe_name="$(sub_provider_file_name "${provider_name}")"
+      cache_file="${subscriptions_provider_defs_dir}/${safe_name}.yaml"
+      [ -s "${cache_file}" ] || continue
+      cache_norm="${cache_file}.norm.$$"
+      cp "${cache_file}" "${cache_norm}" || continue
+      "${yq_cmd}" -r '."proxy-providers" | keys[]' "${cache_norm}" > "${cache_names}" 2>/dev/null || : > "${cache_names}"
+      while IFS= read -r p_name; do
+        [ -n "${p_name}" ] || continue
+        safe_provider="$(sub_provider_file_name "${p_name}")"
+        relative_path="./$(basename "${mihomo_provide_path}")/${safe_provider}.yaml"
+        NAME="${p_name}" VALUE="${relative_path}" "${yq_cmd}" -i '."proxy-providers"[env(NAME)].path = env(VALUE)' "${cache_norm}" >/dev/null 2>&1 || {
+          log Error "provider 缓存路径重写失败: ${p_name}"
+          rm -f "${cache_norm}" "${cache_names}"
+          continue 2
+        }
+      done < "${cache_names}"
+
+      BASE="${merged_providers}" SOURCE="${cache_norm}" "${yq_cmd}" eval -n 'load(env(BASE)) as $base | load(env(SOURCE)) as $source | {"proxy-providers": (($base."proxy-providers" // {}) + ($source."proxy-providers" // {}))}' > "${merged_providers}.next" 2>/dev/null && mv "${merged_providers}.next" "${merged_providers}" || {
+        log Error "合并 provider 缓存失败: ${provider_name}"
+        rm -f "${cache_norm}" "${cache_names}" "${merged_providers}.next"
+        continue
+      }
+      rm -f "${cache_norm}"
+    done < "${subscriptions_file}"
+  fi
+  rm -f "${cache_names}"
+
+  # 禁用订阅的 provider 需要从基线中移除；启用订阅只合并，不删除旧 provider
+  : > "${disabled_names}"
+  if [ -s "${subscriptions_file}" ]; then
+    while IFS='|' read -r provider_name provider_url enabled; do
+      [ "${enabled}" = "0" ] || continue
+      printf '%s\n' "${provider_name}" >> "${disabled_names}"
+      if [ -s "${subscriptions_providers_file}" ]; then
+        busybox awk -F'|' -v source="${provider_name}" '$1 == source { print $2 }' "${subscriptions_providers_file}" >> "${disabled_names}"
+      fi
+      safe_name="$(sub_provider_file_name "${provider_name}")"
+      cache_file="${subscriptions_provider_defs_dir}/${safe_name}.yaml"
+      if [ -s "${cache_file}" ]; then
+        "${yq_cmd}" -r '."proxy-providers" | keys[]' "${cache_file}" >> "${disabled_names}" 2>/dev/null || true
+      fi
+    done < "${subscriptions_file}"
+  fi
+  if [ -s "${disabled_names}" ]; then
+    busybox sort -u "${disabled_names}" > "${disabled_names}.sorted"
+    while IFS= read -r p_name; do
+      [ -n "${p_name}" ] || continue
+      NAME="${p_name}" "${yq_cmd}" -i 'del(."proxy-providers"[env(NAME)])' "${merged_providers}" >/dev/null 2>&1 || true
+    done < "${disabled_names}.sorted"
+    rm -f "${disabled_names}.sorted"
+  fi
+
+  # 用最终 provider map 替换 config.yaml 的 proxy-providers 段
+  local temp_output="${mihomo_config}.output.tmp"
+  busybox awk -v new_providers="${merged_providers}" '
     BEGIN {
       in_providers = 0
       providers_done = 0
@@ -721,11 +832,28 @@ EOF
         close(new_providers)
       }
     }
-  ' "${mihomo_config}" > "${temp_output}"
+  ' "${mihomo_config}" > "${temp_output}" || {
+    log Error "生成 proxy-providers 配置失败"
+    rm -f "${temp_providers}" "${base_providers}" "${merged_providers}" "${disabled_names}" "${temp_output}"
+    return 1
+  }
 
-  mv "${temp_output}" "${mihomo_config}"
-  rm -f "${temp_providers}"
+  if [ -x "${bin_path}" ]; then
+    if ! "${bin_path}" -t -d "${box_dir}/${bin_name}" -f "${temp_output}" >/dev/null 2>&1; then
+      log Error "proxy-providers 配置检查失败，保留旧配置"
+      rm -f "${temp_providers}" "${base_providers}" "${merged_providers}" "${disabled_names}" "${temp_output}"
+      return 1
+    fi
+  fi
 
+  mv "${temp_output}" "${mihomo_config}" || {
+    log Error "写入主配置失败"
+    rm -f "${temp_providers}" "${base_providers}" "${merged_providers}" "${disabled_names}" "${temp_output}"
+    return 1
+  }
+  rm -f "${temp_providers}" "${base_providers}" "${merged_providers}" "${disabled_names}"
+
+  provider_count="$(${yq_cmd} '."proxy-providers" | length' "${mihomo_config}" 2>/dev/null || printf '0')"
   log Debug "proxy-providers 配置构建完成（${provider_count} 个）"
   return 0
 }
@@ -770,6 +898,23 @@ update_mihomo_rulesets() {
   return 0
 }
 
+
+# 统计订阅中的 proxies / proxy-providers 数量
+sub_source_count() {
+  local file="$1" path="$2" count
+  ${yq:-yq} "has(\"${path}\")" "${file}" >/dev/null 2>&1 || { printf '0'; return 0; }
+  count="$(${yq:-yq} ".${path} | length" "${file}" 2>/dev/null || printf '0')"
+  case "${count}" in ''|*[!0-9]*) count=0 ;; esac
+  printf '%s' "${count}"
+}
+
+# 同时存在非空 proxies 与非空 proxy-providers 时拒绝，避免静默丢失来源
+sub_is_mixed_source() {
+  local file="$1"
+  [ "$(sub_source_count "${file}" proxies)" -gt 0 ] || return 1
+  [ "$(sub_source_count "${file}" proxy-providers)" -gt 0 ] || return 1
+  return 0
+}
 
 # 判断下载内容是否为完整配置聚合：proxies 为空且 proxy-providers 非空
 sub_is_aggregate_file() {
@@ -915,6 +1060,57 @@ sub_write_provider_manifest() {
   return 0
 }
 
+# 保存聚合订阅的完整 provider 定义；只保留本次成功下载/解析的 provider
+sub_write_provider_defs_cache() {
+  local source="$1"
+  local source_file="$2"
+  local provider_list="$3"
+  local success_lines="$4"
+  local yq_cmd="${yq:-yq}"
+  local cache_dir="${subscriptions_provider_defs_dir}"
+  local safe_name cache_file temp_file success_names
+
+  safe_name="$(sub_provider_file_name "${source}")"
+  mkdir -p "${cache_dir}" >/dev/null 2>&1 || return 1
+  cache_file="${cache_dir}/${safe_name}.yaml"
+  temp_file="${cache_file}.tmp.$$"
+  success_names="${temp_file}.success.names"
+
+  "${yq_cmd}" -o=yaml '{"proxy-providers": ."proxy-providers"}' "${source_file}" > "${temp_file}" 2>/dev/null || {
+    rm -f "${temp_file}" "${success_names}"
+    return 1
+  }
+  busybox cut -d'|' -f2 "${success_lines}" > "${success_names}" 2>/dev/null || : > "${success_names}"
+
+  # 失败 provider 不进入缓存，保留旧配置条目即可
+  while IFS="$(printf '\t')" read -r p_name p_url; do
+    [ -n "${p_name}" ] || continue
+    if ! busybox grep -Fxq "${p_name}" "${success_names}"; then
+      NAME="${p_name}" "${yq_cmd}" -i 'del(."proxy-providers"[env(NAME)])' "${temp_file}" 2>/dev/null || {
+        rm -f "${temp_file}" "${success_names}"
+        return 1
+      }
+    fi
+  done < "${provider_list}"
+
+  local count
+  count="$("${yq_cmd}" '."proxy-providers" | length' "${temp_file}" 2>/dev/null || printf '0')"
+  case "${count}" in ''|*[!0-9]*) count=0 ;; esac
+  if [ "${count}" -eq 0 ]; then
+    rm -f "${temp_file}" "${success_names}"
+    return 1
+  fi
+
+  chmod 0600 "${temp_file}" >/dev/null 2>&1 || true
+  mv "${temp_file}" "${cache_file}" || {
+    rm -f "${temp_file}" "${success_names}"
+    return 1
+  }
+  chmod 0600 "${cache_file}" >/dev/null 2>&1 || true
+  rm -f "${success_names}"
+  return 0
+}
+
 # 更新完整配置聚合中的 provider；0=全部成功，2=部分成功，1=全部失败/格式错误
 sub_update_aggregate() {
   local source="$1"
@@ -998,6 +1194,11 @@ sub_update_aggregate() {
     rm -f "${provider_list}" "${success_lines}"
     return 1
   fi
+  if ! sub_write_provider_defs_cache "${source}" "${temp_file}" "${provider_list}" "${success_lines}"; then
+    log Error "provider 定义缓存写入失败: ${source}"
+    rm -f "${provider_list}" "${success_lines}"
+    return 1
+  fi
   rm -f "${provider_list}" "${success_lines}"
   if [ "${failure_count}" -gt 0 ]; then
     return 2
@@ -1024,6 +1225,8 @@ upsubs() {
     fi
     yq="${box_dir}/bin/yq"
   fi
+
+  : > "${subscriptions_failed_file}" 2>/dev/null || true
 
   case "${bin_name}" in
     "mihomo")
@@ -1055,6 +1258,7 @@ upsubs() {
 
         if [ -z "${provider_url}" ]; then
           log Warning "订阅地址为空，跳过: ${provider_name}"
+          sub_mark_update_failed "${provider_name}"
           failure_count=$((failure_count + 1))
           continue
         fi
@@ -1079,12 +1283,22 @@ upsubs() {
             rm -f "${provider_file}"
           fi
           failure_count=$((failure_count + 1))
+          sub_mark_update_failed "${provider_name}"
+          continue
+        fi
+
+        if sub_is_mixed_source "${temp_file}"; then
+          log Error "订阅同时包含 proxies 和 proxy-providers，拒绝歧义更新: ${provider_name}"
+          sub_mark_update_failed "${provider_name}"
+          rm -f "${temp_file}"
+          failure_count=$((failure_count + 1))
           continue
         fi
 
         if sub_is_aggregate_file "${temp_file}"; then
           if [ "${subscription_mode}" = "provider" ]; then
             log Error "订阅 ${provider_name} 是完整配置聚合，请将 subscription_mode 设为 auto"
+            sub_mark_update_failed "${provider_name}"
             rm -f "${temp_file}"
             failure_count=$((failure_count + 1))
             continue
@@ -1103,6 +1317,7 @@ upsubs() {
               failure_count=$((failure_count + 1))
               ;;
             *)
+              sub_mark_update_failed "${provider_name}"
               failure_count=$((failure_count + 1))
               ;;
           esac
@@ -1117,6 +1332,7 @@ upsubs() {
             rm -f "${provider_file}"
           fi
           failure_count=$((failure_count + 1))
+          sub_mark_update_failed "${provider_name}"
           continue
         fi
 
@@ -1135,6 +1351,7 @@ upsubs() {
         log Info "auto_modify_config 未启用，跳过更新 proxy-providers 配置"
       fi
 
+      rm -f "${subscriptions_failed_file}"
       if [ "${failure_count}" -gt 0 ]; then
         log Error "${failure_count} 个订阅/provider 更新失败"
         if [ "${success_count}" -gt 0 ]; then

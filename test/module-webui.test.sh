@@ -135,6 +135,8 @@ chmod +x "${WORK}/bin/curl"
 run_tool sub add "https://normal.example/sub" "普通" --json >/dev/null 2>&1
 run_tool sub update --json >/dev/null 2>&1
 [ -s "${BOX_HOME}/mihomo/proxy_provider/普通.yaml" ] && ok "普通 provider 自动导入" || bad "普通 provider 自动导入"
+assert_eq "http://www.gstatic.com/generate_204" "$(yq -r '."proxy-providers"."普通"."health-check".url' "${BOX_HOME}/mihomo/config.yaml")" "普通 provider 默认 health-check URL"
+assert_eq "5000" "$(yq -r '."proxy-providers"."普通"."health-check".timeout' "${BOX_HOME}/mihomo/config.yaml")" "普通 provider 默认 health-check 超时"
 run_tool sub rm "普通" --json >/dev/null 2>&1
 rm -f "${WORK}/bin/curl"
 
@@ -147,12 +149,23 @@ proxy-providers:
   xusx:
     type: http
     url: https://aggregate-provider.example/xusx
+    interval: 600
+    path: ./providers/xusx.yaml
+    health-check:
+      enable: true
+      url: http://www.gstatic.com/generate_204
+      interval: 600
+    override:
+      additional-prefix: '[xusx] '
+    exclude-filter: (?i)剩余|到期
   imagic:
     type: http
     url: https://aggregate-provider.example/imagic
+    interval: 86400
   bkm:
     type: http
     url: https://aggregate-provider.example/bkm
+    interval: 86400
 proxy-groups:
   - name: 保留策略
     type: select
@@ -177,6 +190,14 @@ proxy-providers:
     type: http
     url: https://partial-provider.example/p3
 EOF
+cat > "${WORK}/mixed.yaml" <<'EOF'
+proxies:
+  - {name: mixed-1, type: ss, server: 127.0.0.1, port: 443, cipher: aes-128-gcm, password: p}
+proxy-providers:
+  mixedp:
+    type: http
+    url: https://mixed-provider.example/mixedp
+EOF
 cat > "${WORK}/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 out=""
@@ -193,6 +214,7 @@ case "${url}" in
   https://aggregate-provider.example/*) cp "${WORK}/provider.yaml" "${out}" ;;
   https://normal.example/sub) cp "${WORK}/normal-provider.yaml" "${out}" ;;
   https://partial.example/sub) cp "${WORK}/partial.yaml" "${out}" ;;
+  https://mixed.example/sub) cp "${WORK}/mixed.yaml" "${out}" ;;
   https://partial-provider.example/p2) exit 22 ;;
   https://partial-provider.example/*) cp "${WORK}/provider.yaml" "${out}" ;;
   *) exit 22 ;;
@@ -200,9 +222,17 @@ esac
 printf '200'
 EOF
 chmod +x "${WORK}/bin/curl"
+yq -i '."proxy-providers".manual = {"type": "http", "url": "https://manual.example/m", "path": "./proxy_provider/manual.yaml"}' "${BOX_HOME}/mihomo/config.yaml"
+yq -i '."proxy-providers".xusx = {"type": "http", "url": "old", "stale-field": true, "health-check": {"url": "https://cp.cloudflare.com", "timeout": 1000}}' "${BOX_HOME}/mihomo/config.yaml"
 run_tool sub add "https://aggregate.example/sub" "大杂烩" --json >/dev/null 2>&1
 run_tool sub update --json >/dev/null 2>&1
 jassert '.data.items[0].provider_count == 3 and .data.items[0].provider == "aggregated"' "$(run_tool sub list --json 2>/dev/null)" "聚合订阅显示 3 个 provider"
+assert_eq "http://www.gstatic.com/generate_204" "$(yq -r '."proxy-providers".xusx."health-check".url' "${BOX_HOME}/mihomo/config.yaml")" "聚合 provider 保留 health-check URL"
+assert_eq "600" "$(yq -r '."proxy-providers".xusx.interval' "${BOX_HOME}/mihomo/config.yaml")" "聚合 provider 保留 interval"
+assert_eq "[xusx] " "$(yq -r '."proxy-providers".xusx.override."additional-prefix"' "${BOX_HOME}/mihomo/config.yaml")" "聚合 provider 保留 override"
+assert_eq "./proxy_provider/xusx.yaml" "$(yq -r '."proxy-providers".xusx.path' "${BOX_HOME}/mihomo/config.yaml")" "聚合 provider 改写 path"
+assert_eq "true" "$(yq -r '."proxy-providers" | has("manual")' "${BOX_HOME}/mihomo/config.yaml")" "聚合更新保留手动 provider"
+assert_eq "false" "$(yq -r '."proxy-providers".xusx | has("stale-field")' "${BOX_HOME}/mihomo/config.yaml")" "聚合 provider 同名整块覆盖"
 jassert '.data.provider_count == 3 and .data.provider == "aggregated"' "$(run_tool sub get "大杂烩" --json 2>/dev/null)" "聚合订阅详情显示 3 个 provider"
 aggregate_disable="$(run_tool sub disable "大杂烩" --json 2>/dev/null)"
 jassert '.ok == true and .data.enabled == false' "${aggregate_disable}" "禁用聚合订阅"
@@ -214,7 +244,7 @@ assert_eq "3" "$(wc -l < "${BOX_HOME}/run/subscriptions.providers" | tr -d '[:sp
 for provider_name in xusx imagic bkm; do
   [ -s "${BOX_HOME}/mihomo/proxy_provider/${provider_name}.yaml" ] && ok "生成 provider ${provider_name}" || bad "生成 provider ${provider_name}"
 done
-grep -q '^  "xusx":' "${BOX_HOME}/mihomo/config.yaml" && ok "主配置包含派生 provider xusx" || bad "主配置包含派生 provider xusx"
+yq -e '."proxy-providers" | has("xusx")' "${BOX_HOME}/mihomo/config.yaml" >/dev/null 2>&1 && ok "主配置包含派生 provider xusx" || bad "主配置包含派生 provider xusx"
 grep -q '^proxy-groups:' "${BOX_HOME}/mihomo/config.yaml" && ok "主配置保留 proxy-groups" || bad "主配置保留 proxy-groups"
 grep -q '^rules:' "${BOX_HOME}/mihomo/config.yaml" && ok "主配置保留 rules" || bad "主配置保留 rules"
 groups_after="$(yq -o=json '.proxy-groups' "${BOX_HOME}/mihomo/config.yaml" | md5sum | cut -d' ' -f1)"
@@ -225,7 +255,12 @@ run_tool sub add "https://partial.example/sub" "部分" --json >/dev/null 2>&1
 partial_result="$(run_tool sub update --json 2>/dev/null)"
 jassert '.ok == true and .data.partial == true' "${partial_result}" "单个 provider 失败返回部分成功"
 [ -s "${BOX_HOME}/mihomo/proxy_provider/p1.yaml" ] && [ -s "${BOX_HOME}/mihomo/proxy_provider/p3.yaml" ] && ok "部分成功保留成功 provider" || bad "部分成功保留成功 provider"
-grep -q '^  "p2":' "${BOX_HOME}/mihomo/config.yaml" && bad "失败 provider 不应写入配置" || ok "失败 provider 不写入配置"
+yq -e '."proxy-providers" | has("p2") | not' "${BOX_HOME}/mihomo/config.yaml" >/dev/null 2>&1 && ok "失败 provider 不写入配置" || bad "失败 provider 不写入配置"
+run_tool sub add "https://mixed.example/sub" "混合" --json >/dev/null 2>&1
+mixed_result="$(run_tool sub update --json 2>/dev/null)"
+jassert '.ok == true and .data.partial == true' "${mixed_result}" "混合订阅返回部分成功"
+yq -e '."proxy-providers" | has("混合") | not' "${BOX_HOME}/mihomo/config.yaml" >/dev/null 2>&1 && ok "混合订阅不写入 provider" || bad "混合订阅不写入 provider"
+run_tool sub rm "混合" --json >/dev/null 2>&1
 run_tool sub rm "部分" --json >/dev/null 2>&1
 cat > "${WORK}/provider-mode.json" <<'EOF'
 {"subscription_mode":"provider"}
