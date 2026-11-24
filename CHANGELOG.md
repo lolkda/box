@@ -1,3 +1,10 @@
+#### Changelog 1.11.6 - 24-11-2026
+- 合并订阅 proxy-providers 完整定义，保留 health-check/override/exclude-filter/interval；同名整块覆盖、不同名追加；只改写本地 path
+- 保留手动 provider 和订阅中未出现的旧 provider
+- subscription 同时包含 proxies 与 proxy-providers 时拒绝并保留旧配置
+- 只有顶层 proxies 的订阅默认 health-check 改为 http://www.gstatic.com/generate_204、timeout 5000
+- 新增 provider 合并回归测试
+
 #### Changelog 1.11.5 - 24-11-2026
 - 服务启动后补建透明代理规则，避免显示运行中但未接管流量
 - 重启改为串行：清理规则、停止核心、解析 UID、启动核心、应用规则
