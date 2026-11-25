@@ -36,7 +36,7 @@ function buildSettings(): Pick<MockState, "settings" | "arrays" | "tokenSet" | "
   return {
     settings: {
       auto_modify_config: "true",
-      boot_auto_start: "true",
+      boot_auto_start: "false",
       network_mode: "tproxy",
       tproxy_port: "9898",
       redir_port: "9797",
@@ -270,7 +270,7 @@ function parseTokens(command: string): string[] {
 
 function getArgs(command: string): string[] {
   const tokens = parseTokens(command);
-  const index = tokens.findIndex((token) => token.endsWith("box.tool"));
+  const index = tokens.findIndex((token) => token.endsWith("boxctl") || token.endsWith("box.tool"));
   return index >= 0 ? tokens.slice(index + 1) : [];
 }
 
@@ -355,7 +355,17 @@ function handle(args: string[]): unknown {
         config_exists: state.configExists,
         subscriptions: state.subscriptions.length,
         active_tasks: state.tasks.filter((task) => task.state === "running").length,
+        control: { mode: "auto", desired: state.running ? "running" : "stopped" },
       });
+    case "internal": {
+      if (action === "control-auto") {
+        return envelope({ mode: "auto", desired: state.running ? "running" : "stopped" });
+      }
+      if (action === "control-manual") {
+        return envelope({ mode: "manual", desired: state.running ? "running" : "stopped" });
+      }
+      break;
+    }
     case "service": {
       if (action === "start" || action === "restart") {
         state.running = true;

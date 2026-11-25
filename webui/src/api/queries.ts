@@ -24,6 +24,7 @@ export function useStatusQuery(options: { enabled?: boolean; live?: boolean } = 
     queryKey: queryKeys.status,
     queryFn: api.status,
     enabled,
+    retry: live ? 1 : 3,
     refetchInterval: live ? 15_000 : false,
     staleTime: live ? 10_000 : 30_000,
   });

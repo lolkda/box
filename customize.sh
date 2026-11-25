@@ -29,6 +29,51 @@ else
 fi
 
 mkdir -p "${service_dir}"
+
+BOXCTL_BIN="/data/adb/box/bin/boxctl"
+BOXCTL_SOCKET="/data/adb/box/run/boxctl/control.sock"
+BOXCTL_TEMP_PID=""
+
+boxctl_install_daemon_start() {
+  [ -x "${BOXCTL_BIN}" ] || return 1
+  if [ -S "${BOXCTL_SOCKET}" ]; then
+    return 0
+  fi
+  mkdir -p /data/adb/box/run
+  "${BOXCTL_BIN}" --root /data/adb/box daemon >> /data/adb/box/run/boxctl-install.log 2>&1 &
+  BOXCTL_TEMP_PID=$!
+  local attempt=0
+  while [ "${attempt}" -lt 10 ]; do
+    [ -S "${BOXCTL_SOCKET}" ] && return 0
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+boxctl_install_daemon_stop() {
+  if [ -n "${BOXCTL_TEMP_PID}" ]; then
+    kill "${BOXCTL_TEMP_PID}" >/dev/null 2>&1 || true
+    wait "${BOXCTL_TEMP_PID}" 2>/dev/null || true
+    BOXCTL_TEMP_PID=""
+  fi
+}
+
+boxctl_install_stop_existing() {
+  [ -x "${BOXCTL_BIN}" ] || return 0
+  if [ -f "/data/adb/box/run/boxctl/daemon.pid" ]; then
+    existing_pid=$(cat "/data/adb/box/run/boxctl/daemon.pid" 2>/dev/null | tr -cd '0-9')
+    if [ -n "${existing_pid}" ] && [ "${existing_pid}" -gt 1 ] 2>/dev/null; then
+      : > "/data/adb/box/run/boxctl/daemon.stop" 2>/dev/null || true
+      kill -TERM "${existing_pid}" >/dev/null 2>&1 || true
+      attempt=0
+      while [ "${attempt}" -lt 5 ] && kill -0 "${existing_pid}" >/dev/null 2>&1; do
+        sleep 1
+        attempt=$((attempt + 1))
+      done
+    fi
+  fi
+}
 if [ -d "/data/adb/modules/box_for_magisk" ]; then
   rm -rf "/data/adb/modules/box_for_magisk"
   ui_print "- 已删除旧模块。"
@@ -49,6 +94,8 @@ cp -a "$MODPATH/box/mihomo/dashboard/." "$ZASHBOARD_STAGE/"
 # 保存新方案的默认 mihomo 配置，供旧 renew 设置首次升级时重置使用。
 DEFAULT_CONFIG_STAGE="$MODPATH/default-config.yaml"
 cp -f "$MODPATH/box/mihomo/config.yaml" "$DEFAULT_CONFIG_STAGE" 2>/dev/null || true
+
+boxctl_install_stop_existing
 
 legacy_settings="false"
 if [ -d "/data/adb/box" ]; then
@@ -73,7 +120,7 @@ fi
 
 ui_print "- 创建目录"
 mkdir -p /data/adb/box/ /data/adb/box/run/ /data/adb/box/bin/
-chmod 0755 /data/adb/box/scripts/box.tool /data/adb/box/settings.base.sh 2>/dev/null || true
+[ -f /data/adb/box/bin/boxctl ] && chmod 0755 /data/adb/box/bin/boxctl
 
 ui_print "- 提取 uninstall.sh 和 box_service.sh"
 unzip -j -o "$ZIPFILE" 'uninstall.sh' -d "$MODPATH" >&2
@@ -82,13 +129,17 @@ unzip -j -o "$ZIPFILE" 'box_service.sh' -d "${service_dir}" >&2
 ui_print "- 设置权限"
 set_perm_recursive $MODPATH 0 0 0755 0644
 set_perm_recursive /data/adb/box/ 0 3005 0755 0644
-set_perm_recursive /data/adb/box/scripts/ 0 3005 0755 0700
+set_perm /data/adb/box/bin/boxctl 0 0 0755
+[ -f /data/adb/box/bin/yq ] && set_perm /data/adb/box/bin/yq 0 0 0755
+[ -f /data/adb/box/bin/curl ] && set_perm /data/adb/box/bin/curl 0 0 0755
 [ -f /data/adb/box/settings.json ] && set_perm /data/adb/box/settings.json 0 0 0600
 [ -f /data/adb/box/githubtoken ] && set_perm /data/adb/box/githubtoken 0 0 0600
 [ -f /data/adb/box/run/settings.runtime.sh ] && set_perm /data/adb/box/run/settings.runtime.sh 0 0 0600
 set_perm ${service_dir}/box_service.sh 0 0 0755
 set_perm $MODPATH/uninstall.sh 0 0 0755
-chmod ugo+x ${service_dir}/box_service.sh $MODPATH/uninstall.sh /data/adb/box/scripts/*
+chmod ugo+x ${service_dir}/box_service.sh $MODPATH/uninstall.sh
+# 旧 shell 已封存到仓库 legacy/，升级时清理设备上的活动副本。
+rm -rf /data/adb/box/scripts /data/adb/box/settings.base.sh /data/adb/box/run/settings.runtime.sh
 
 KEY_LISTENER_PID=""
 KEY_FIFO=""
@@ -160,6 +211,11 @@ volume_key_detection() {
 
 handle_choice() {
     local question="$1"
+    if [ -f "/data/adb/box_install_noninteractive" ]; then
+        ui_print " "
+        ui_print "- 非交互安装：跳过可选下载/确认"
+        return 1
+    fi
     local choice_yes="${2:-是}"
     local choice_no="${3:-否}"
     local timeout_seconds="${4:-10}"
@@ -200,10 +256,18 @@ if handle_choice "是否需要下载内核或数据文件？" "是，进行下�
 
     if handle_choice "是否使用镜像加速接下来的下载？" "使用加速" "直接下载"; then
         ui_print "- 已启用镜像加速。"
-        /data/adb/box/scripts/box.tool settings set use_ghproxy true --json >/dev/null 2>&1 || true
+        if [ -x "/data/adb/box/bin/boxctl" ]; then
+            /data/adb/box/bin/boxctl --root /data/adb/box settings set use_ghproxy true --json >/dev/null 2>&1 || true
+        else
+            ui_print "  ! legacy box.tool is sealed; use boxctl"
+        fi
     else
         ui_print "- 已禁用镜像加速。"
-        /data/adb/box/scripts/box.tool settings set use_ghproxy false --json >/dev/null 2>&1 || true
+        if [ -x "/data/adb/box/bin/boxctl" ]; then
+            /data/adb/box/bin/boxctl --root /data/adb/box settings set use_ghproxy false --json >/dev/null 2>&1 || true
+        else
+            ui_print "  ! legacy box.tool is sealed; use boxctl"
+        fi
     fi
 
     COMPONENTS_TO_DOWNLOAD=""
@@ -251,17 +315,45 @@ if handle_choice "是否需要下载内核或数据文件？" "是，进行下�
               case "$component" in
                 geox)
                   ui_print "  -> 正在下载 GeoX..."
-                  /data/adb/box/scripts/box.tool upgeox_all
+                  if boxctl_install_daemon_start; then
+                    if ! "${BOXCTL_BIN}" --root /data/adb/box task start geox --wait --json >/dev/null 2>&1; then
+                      ui_print "  ! Rust GeoX 更新失败，回退旧脚本"
+                      ui_print "  ! legacy box.tool is sealed; use boxctl"
+                    fi
+                  else
+                    ui_print "  ! legacy box.tool is sealed; use boxctl"
+                  fi
                   ;;
                 utils)
                   ui_print "  -> 正在下载 yq..."
-                  /data/adb/box/scripts/box.tool upyq
+                  if boxctl_install_daemon_start; then
+                    if ! "${BOXCTL_BIN}" --root /data/adb/box task start upyq --wait --json >/dev/null 2>&1; then
+                      ui_print "  ! Rust yq 更新失败，回退旧脚本"
+                      ui_print "  ! legacy box.tool is sealed; use boxctl"
+                    fi
+                  else
+                    ui_print "  ! legacy box.tool is sealed; use boxctl"
+                  fi
                   ui_print "  -> 正在下载 curl..."
-                  /data/adb/box/scripts/box.tool upcurl
+                  if boxctl_install_daemon_start; then
+                    if ! "${BOXCTL_BIN}" --root /data/adb/box task start upcurl --wait --json >/dev/null 2>&1; then
+                      ui_print "  ! Rust curl 更新失败，回退旧脚本"
+                      ui_print "  ! legacy box.tool is sealed; use boxctl"
+                    fi
+                  else
+                    ui_print "  ! legacy box.tool is sealed; use boxctl"
+                  fi
                   ;;
                 *)
                   ui_print "  -> 正在下载内核: $component..."
-                  /data/adb/box/scripts/box.tool upkernel "$component"
+                  if boxctl_install_daemon_start; then
+                    if ! "${BOXCTL_BIN}" --root /data/adb/box task start upkernel "$component" --wait --json >/dev/null 2>&1; then
+                      ui_print "  ! Rust 内核更新失败，回退旧脚本"
+                      ui_print "  ! legacy box.tool is sealed; use boxctl"
+                    fi
+                  else
+                    ui_print "  ! legacy box.tool is sealed; use boxctl"
+                  fi
                   ;;
               esac
             done
@@ -328,6 +420,16 @@ if [ "${backup_box}" = "true" ]; then
   fi
 fi
 
+# 旧 settings/renew 迁移交由 Rust 准备步骤：先备份，再重置并写升级确认门槛。
+if [ "${legacy_settings}" = "true" ] && [ -x "/data/adb/box/bin/boxctl" ]; then
+  ui_print "- 正在执行 Rust 升级准备（备份 settings/token/旧名单）"
+  if /data/adb/box/bin/boxctl --root /data/adb/box internal upgrade-prepare --json >/dev/null 2>&1; then
+    ui_print "  - 备份与重置完成；启动前需在 WebUI 确认升级"
+  else
+    ui_print "  ! Rust 升级准备失败，保留现有设置"
+  fi
+fi
+
 # 所有安装路径都强制使用模块内置 zashboard，并清理旧面板路径/下载地址。
 ui_print "- 部署内置 zashboard"
 rm -rf "/data/adb/box/mihomo/dashboard"
@@ -388,7 +490,12 @@ fi
 if [ ! -f "/data/adb/box/settings.default.json" ] && [ -f "/data/adb/box/settings.json" ]; then
   cp -f "/data/adb/box/settings.json" "/data/adb/box/settings.default.json" 2>/dev/null || true
 fi
-/data/adb/box/scripts/box.tool settings get --json >/dev/null 2>&1 || ui_print "  ! 设置运行时初始化失败，请打开设置页检查"
+boxctl_install_daemon_start >/dev/null 2>&1 || true
+if [ -x "/data/adb/box/bin/boxctl" ]; then
+  /data/adb/box/bin/boxctl --root /data/adb/box settings get --json >/dev/null 2>&1 || ui_print "  ! 设置运行时初始化失败，请打开设置页检查"
+else
+  ui_print "  ! legacy box.tool is sealed; use boxctl"
+fi
 
 [ -z "$(find /data/adb/box/bin -type f -name '*' ! -name '*.bak')" ] && sed -Ei 's/^description=(\[.*][[:space:]]*)?/description=[ 😱 模块已安装但需手动下载内核 ] /g' $MODPATH/module.prop
 
@@ -415,4 +522,5 @@ if [ "$backup_box" = "true" ] && [ -n "$temp_dir" ] && [ -d "$temp_dir" ]; then
   fi
 fi
 
+boxctl_install_daemon_stop
 ui_print "- 安装完成，请重启设备。"

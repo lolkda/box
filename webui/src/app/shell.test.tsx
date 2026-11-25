@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell } from "./shell";
@@ -7,13 +8,13 @@ import { OverviewPage } from "../features/overview/overview-page";
 import { ToastProvider } from "../components/ui/toast";
 import { clearKsuSpawnMock, installKsuSpawnMock } from "../test/ksu-spawn-mock";
 
-function installStatusMock(core = "mihomo") {
+function installStatusMock(core = "mihomo", controlMode: "auto" | "manual" = "auto") {
   installKsuSpawnMock((command) => {
     let payload;
     if (command.includes("status") && command.includes("--json")) {
       payload = {
         ok: true,
-        data: { running: true, pid: 1234, core, mode: "tproxy", config: "config.yaml", config_exists: true, subscriptions: 2, active_tasks: 0 },
+        data: { running: true, pid: 1234, core, mode: "tproxy", config: "config.yaml", config_exists: true, subscriptions: 2, active_tasks: 0, control: { mode: controlMode, desired: "running" } },
         meta: { version: 1 },
       };
     } else if (command.includes("task") && command.includes("list")) {
@@ -55,7 +56,25 @@ describe("AppShell", () => {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
     expect(await screen.findByText("运行中")).toBeInTheDocument();
-    expect(await screen.findByText("mihomo · tproxy · PID 1234")).toBeInTheDocument();
+    expect(await screen.findByText("mihomo · tproxy · PID 1234 · 自动控制")).toBeInTheDocument();
+  });
+
+  it("switches manual control back to auto", async () => {
+    installStatusMock("mihomo", "manual");
+    renderApp();
+    expect(await screen.findByText(/手动控制/)).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "切回自动" }));
+    expect(await screen.findByText("已切回自动模式")).toBeInTheDocument();
+  });
+
+  it("switches automatic control back to manual", async () => {
+    installStatusMock("mihomo", "auto");
+    renderApp();
+    expect(await screen.findByText(/自动控制/)).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "切回手动" }));
+    expect(await screen.findByText("已切回手动模式")).toBeInTheDocument();
   });
 
   it("does not render the top app bar or task shortcut", async () => {

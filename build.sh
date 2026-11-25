@@ -72,6 +72,8 @@ zip -r -o -X -ll "${ZIP_NAME}" ./ \
   -x 'docs/*' \
   -x 'test/*' \
   -x 'webui/*' \
+  -x 'rust/*' \
+  -x 'legacy/*' \
   -x 'artifacts/*' \
   -x 'box-*.zip' \
   -x 'LICENSE' \

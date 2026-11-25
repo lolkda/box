@@ -24,7 +24,6 @@
       "enum": [
         "tun",
         "tproxy",
-        "ebpf",
         "redirect",
         "mixed",
         "enhance"
@@ -130,8 +129,7 @@
     "cnip_mode": {
       "type": "string",
       "enum": [
-        "ipset",
-        "ebpf"
+        "ipset"
       ]
     },
     "cn_ip_url": {

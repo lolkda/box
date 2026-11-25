@@ -45,7 +45,7 @@ describe("execCommand", () => {
   it("collects stdout and stderr and preserves the exit code", async () => {
     installKsuSpawnMock(() => ({ errno: 3, stdout: "first line\nsecond line", stderr: "warning" }));
 
-    await expect(execCommand("/data/adb/box/scripts/box.tool status --json")).resolves.toEqual({
+    await expect(execCommand("/data/adb/box/bin/boxctl status --json")).resolves.toEqual({
       errno: 3,
       stdout: "first line\nsecond line",
       stderr: "warning",

@@ -48,7 +48,6 @@ export const settingsGroups: SettingsGroup[] = [
       { key: "network_mode", label: "网络模式", kind: "select", options: [
         { value: "tun", label: "TUN" },
         { value: "tproxy", label: "TProxy" },
-        { value: "ebpf", label: "eBPF" },
         { value: "redirect", label: "Redirect" },
         { value: "mixed", label: "Mixed" },
         { value: "enhance", label: "Enhance" },
@@ -90,7 +89,6 @@ export const settingsGroups: SettingsGroup[] = [
       { key: "bypass_cn_ip_v6", label: "绕过 IPv6 大陆 IP", kind: "switch" },
       { key: "cnip_mode", label: "CNIP 匹配", kind: "select", options: [
         { value: "ipset", label: "ipset" },
-        { value: "ebpf", label: "eBPF" },
       ] },
       { key: "cn_ip_url", label: "CNIP IPv4 源", kind: "text", inputMode: "url", placeholder: "https://ispip.clang.cn/all_cn.txt" },
       { key: "cn_ipv6_url", label: "CNIP IPv6 源", kind: "text", inputMode: "url", placeholder: "https://ispip.clang.cn/all_cn_ipv6.txt" },

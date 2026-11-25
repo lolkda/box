@@ -22,7 +22,7 @@ import type {
   TaskLogsData,
 } from "./types";
 
-export const TOOL = "/data/adb/box/scripts/box.tool";
+export const TOOL = "/data/adb/box/bin/boxctl";
 
 let tempCounter = 0;
 
@@ -93,7 +93,10 @@ function errorText(error: unknown): string {
 
 let spawnCallbackCounter = 0;
 
-export async function execCommand(command: string): Promise<{ errno: number; stdout: string; stderr: string }> {
+export async function execCommand(
+  command: string,
+  timeoutMs = 0,
+): Promise<{ errno: number; stdout: string; stderr: string }> {
   const bridge = getKsuBridge();
   if (!bridge) {
     throw new ApiError("E_UNAVAILABLE", "KernelSU API 不可用，请从 KernelSU 模块页打开");
@@ -109,21 +112,26 @@ export async function execCommand(command: string): Promise<{ errno: number; std
     const stdout: string[] = [];
     const stderr: string[] = [];
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
     const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
       delete (window as unknown as Record<string, SpawnChildProcess>)[callbackName];
     };
-    const fail = (error: unknown) => {
+    const fail = (error: unknown, keepCallback = false) => {
       if (settled) return;
       settled = true;
-      cleanup();
+      if (!keepCallback) cleanup();
       reject(error instanceof ApiError ? error : new ApiError("E_EXEC", "执行命令失败", errorText(error)));
     };
 
     child.stdout.on("data", (data: string) => stdout.push(String(data)));
     child.stderr.on("data", (data: string) => stderr.push(String(data)));
     child.on("exit", (code: number | string | null) => {
-      if (settled) return;
+      if (settled) {
+        cleanup();
+        return;
+      }
       settled = true;
       cleanup();
       const numericCode = typeof code === "number" ? code : Number(code);
@@ -138,6 +146,14 @@ export async function execCommand(command: string): Promise<{ errno: number; std
       if (!settled) fail(error);
     });
 
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        // Keep the callback object alive until the native child exits: KernelSU
+        // may emit late stdout/exit events after the JS timeout and expects the
+        // window callback to still exist.
+        fail(new ApiError("E_TIMEOUT", "命令执行超时", `${command.slice(0, 160)} (${timeoutMs}ms)`), true);
+      }, timeoutMs);
+    }
     (window as unknown as Record<string, SpawnChildProcess>)[callbackName] = child;
     try {
       spawnCommand("/system/bin/sh", JSON.stringify(["-c", shellQuote(command)]), "{}", callbackName);
@@ -169,9 +185,9 @@ export function parseEnvelope<T>(stdout: string, errno: number, stderr: string):
   throw new ApiError(payload?.code || "E_UNKNOWN", payload?.message || "操作失败", payload?.detail || "");
 }
 
-export async function runJson<T>(args: string[]): Promise<T> {
+export async function runJson<T>(args: string[], timeoutMs = 0): Promise<T> {
   const command = `${TOOL} ${args.map(shellQuote).join(" ")}`;
-  const result = await execCommand(command);
+  const result = await execCommand(command, timeoutMs);
   return parseEnvelope<T>(result.stdout, result.errno, result.stderr);
 }
 
@@ -201,9 +217,12 @@ export async function runJsonWithFile<T>(args: string[], payload: unknown): Prom
 }
 
 export const api = {
-  status: () => runJson<StatusData>(["status", "--json"]),
+  status: () => runJson<StatusData>(["status", "--json"], 15_000),
 
   service: (action: ServiceAction) => runJson<{ action: string; output: string }>(["service", action, "--json"]),
+
+  setControlAuto: () => runJson<{ mode: string; desired: string }>(["internal", "control-auto", "--json"]),
+  setControlManual: () => runJson<{ mode: string; desired: string }>(["internal", "control-manual", "--json"]),
 
   subscriptions: async () => {
     const data = await runJson<{ items: Subscription[] }>(["sub", "list", "--json"]);
@@ -270,7 +289,7 @@ export const api = {
   settings: () => runJson<SettingsData>(["settings", "get", "--json"]),
 
   applySettings: (settings: Record<string, string>, arrays: Record<string, string[]>, token?: string) => {
-    const payload: Record<string, unknown> = { ...settings, ...arrays };
+    const payload: Record<string, unknown> = { settings: { ...settings, ...arrays } };
     if (typeof token === "string") payload.githubtoken = token;
     return runJsonWithFile<{ changed: string[] }>(["settings", "apply"], payload);
   },

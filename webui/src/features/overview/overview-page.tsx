@@ -38,6 +38,7 @@ export function OverviewPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const [pendingAction, setPendingAction] = useState<ServiceAction | null>(null);
+  const [switchingControl, setSwitchingControl] = useState(false);
 
   const runAction = async (action: ServiceAction) => {
     setPendingAction(action);
@@ -53,6 +54,20 @@ export function OverviewPage() {
       });
     } finally {
       setPendingAction(null);
+    }
+  };
+
+  const setControlMode = async (mode: "auto" | "manual") => {
+    setSwitchingControl(true);
+    try {
+      if (mode === "auto") await api.setControlAuto();
+      else await api.setControlManual();
+      toast({ title: mode === "auto" ? "已切回自动模式" : "已切回手动模式", tone: "success" });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.status });
+    } catch (error) {
+      toast({ title: "切换控制模式失败", description: getErrorMessage(error), tone: "error" });
+    } finally {
+      setSwitchingControl(false);
     }
   };
 
@@ -99,7 +114,8 @@ export function OverviewPage() {
                     <h2 className="text-2xl font-semibold tracking-tight">{status.running ? "运行中" : "已停止"}</h2>
                   </div>
                   <p className="mt-1 text-xs text-fg-muted">
-                    {status.core} · {status.mode} · PID {status.pid ?? "-"}
+                    {status.core} · {status.mode} · PID {status.pid ?? "-"} ·{" "}
+                    {status.control?.mode === "manual" ? "手动控制" : "自动控制"}
                   </p>
                 </div>
                 <Badge tone={status.running ? "success" : "neutral"} className="mt-1">
@@ -167,6 +183,34 @@ export function OverviewPage() {
               >
                 重载
               </Button>
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-border bg-surface px-3 py-2.5">
+              <span className="text-[11px] text-fg-muted">
+                {status.control?.mode === "manual"
+                  ? "手动模式下，网络事件不会自动覆盖当前启停状态"
+                  : "自动模式下，Wi-Fi 策略可决定启停"}
+              </span>
+              {status.control?.mode === "manual" ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={switchingControl}
+                  disabled={switchingControl}
+                  onClick={() => void setControlMode("auto")}
+                >
+                  切回自动
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={switchingControl}
+                  disabled={switchingControl}
+                  onClick={() => void setControlMode("manual")}
+                >
+                  切回手动
+                </Button>
+              )}
             </div>
           </Card>
 

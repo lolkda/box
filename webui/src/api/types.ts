@@ -8,6 +8,11 @@ export interface ApiErrorPayload {
   detail?: string;
 }
 
+export interface ControlState {
+  mode: "manual" | "auto" | string;
+  desired: "running" | "stopped" | string;
+}
+
 export interface StatusData {
   running: boolean;
   pid: number | null;
@@ -17,6 +22,7 @@ export interface StatusData {
   config_exists: boolean;
   subscriptions: number;
   active_tasks: number;
+  control?: ControlState;
 }
 
 export interface Subscription {
