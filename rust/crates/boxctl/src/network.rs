@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use serde_json::{json, Value};
 
 use crate::error::{BoxError, ErrorCode, Result};
+use crate::network_rules::{Action, Document as NetworkRuleDocument, Family, Mode, Scope};
 use crate::paths::Paths;
 
 const SYSTEM_PATH: &[&str] = &["/system/bin", "/system/xbin", "/sbin"];
@@ -92,6 +93,63 @@ impl Plan {
             "warnings": self.warnings
         })
     }
+
+    fn validate(&self) -> Result<()> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let builtins: BTreeSet<&'static str> =
+            ["PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING"]
+                .into_iter()
+                .collect();
+        let mut chains: BTreeMap<(&'static str, &'static str, &'static str), usize> =
+            BTreeMap::new();
+        for rule in &self.rules {
+            if rule.family == "ip" || rule.family == "nft" || rule.table.is_empty() {
+                continue;
+            }
+            if rule.args.first().is_some_and(|value| value == "-N") {
+                *chains
+                    .entry((rule.family, rule.table, rule.chain))
+                    .or_default() += 1;
+            }
+        }
+        for ((family, table, chain), count) in &chains {
+            if *count > 1 {
+                return Err(BoxError::internal(format!(
+                    "network plan defines chain {family}/{table}/{chain} more than once"
+                )));
+            }
+        }
+        for rule in &self.rules {
+            if rule.family == "ip" || rule.family == "nft" || rule.table.is_empty() {
+                continue;
+            }
+            let action = rule.args.first().map(String::as_str).unwrap_or_default();
+            if action == "-A" || action == "-I" {
+                let parent = rule.args.get(1).map(String::as_str).unwrap_or_default();
+                if !builtins.contains(parent)
+                    && !chains.contains_key(&(rule.family, rule.table, rule.chain))
+                {
+                    return Err(BoxError::internal(format!(
+                        "network plan appends to undefined chain {}",
+                        rule.chain
+                    )));
+                }
+            }
+            if let Some(index) = rule.args.iter().position(|value| value == "-j") {
+                if let Some(target) = rule.args.get(index + 1) {
+                    if target.starts_with("BOX_")
+                        && !chains.contains_key(&(rule.family, rule.table, target.as_str()))
+                    {
+                        return Err(BoxError::internal(format!(
+                            "network plan jumps to undefined chain {}",
+                            target
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[allow(dead_code)]
@@ -123,6 +181,7 @@ impl Runner for SystemRunner {
 }
 
 pub fn apply(plan: &Plan, runner: &mut dyn Runner) -> Result<()> {
+    plan.validate()?;
     let mut applied = Vec::new();
     for rule in &plan.rules {
         let args = rule.command_args();
@@ -161,6 +220,149 @@ pub fn cleanup(plan: &Plan, runner: &mut dyn Runner) -> Result<()> {
     }
     Err(last
         .unwrap_or_else(|| BoxError::new(ErrorCode::Command, "network rule cleanup did not run")))
+}
+
+pub fn cleanup_all(
+    settings: &Value,
+    caps: Capabilities,
+    dns_port: Option<u16>,
+    runner: &mut dyn Runner,
+) -> Result<bool> {
+    let mut rules = Vec::new();
+    for mode in ["tun", "tproxy", "redirect", "mixed", "enhance"] {
+        let mut values = settings.clone();
+        values["network_mode"] = Value::String(mode.to_string());
+        if let Ok(plan) = plan_with_dns(&values, caps, dns_port) {
+            rules.extend(plan.rules);
+        }
+    }
+    if rules.is_empty() {
+        return Ok(false);
+    }
+    cleanup_rules(rules.iter().rev(), runner)?;
+    Ok(true)
+}
+
+pub fn cleanup_stale(runner: &mut dyn Runner) -> bool {
+    let mut touched = false;
+    let chains = [
+        "BOX_TPROXY",
+        "BOX_TPROXY_LOCAL",
+        "BOX_LOCAL_TPROXY",
+        "BOX_TUN_BYPASS_PRE",
+        "BOX_TUN_BYPASS_OUT",
+        "BOX_REDIRECT",
+        "BOX_REDIRECT_LOCAL",
+        "BOX_LOCAL_REDIRECT",
+        "BOX_DNS",
+        "BOX_DNS_PRE",
+        "BOX_FILTER_LOCAL",
+        "BOX_FILTER_PRE",
+        "BOX_LOCAL_UDP",
+        "BOX_QUIC_BLOCK",
+    ];
+    let mut run = |command: &str, args: Vec<String>| {
+        if runner.run(command, &args).is_ok() {
+            touched = true;
+        }
+    };
+    for family in ["iptables", "ip6tables"] {
+        for (table, parents) in [
+            ("mangle", ["PREROUTING", "OUTPUT"]),
+            ("nat", ["PREROUTING", "OUTPUT"]),
+            ("filter", ["PREROUTING", "OUTPUT"]),
+        ] {
+            for chain in chains {
+                for parent in parents {
+                    run(
+                        family,
+                        vec![
+                            "-w".to_string(),
+                            "10".to_string(),
+                            "-t".to_string(),
+                            table.to_string(),
+                            "-D".to_string(),
+                            parent.to_string(),
+                            "-j".to_string(),
+                            chain.to_string(),
+                        ],
+                    );
+                }
+            }
+            for chain in chains {
+                run(
+                    family,
+                    vec![
+                        "-w".to_string(),
+                        "10".to_string(),
+                        "-t".to_string(),
+                        table.to_string(),
+                        "-F".to_string(),
+                        chain.to_string(),
+                    ],
+                );
+                run(
+                    family,
+                    vec![
+                        "-w".to_string(),
+                        "10".to_string(),
+                        "-t".to_string(),
+                        table.to_string(),
+                        "-X".to_string(),
+                        chain.to_string(),
+                    ],
+                );
+            }
+        }
+    }
+    for family in ["iptables", "ip6tables"] {
+        for chain in chains {
+            run(
+                family,
+                vec![
+                    "-w".to_string(),
+                    "10".to_string(),
+                    "-t".to_string(),
+                    "filter".to_string(),
+                    "-D".to_string(),
+                    "FORWARD".to_string(),
+                    "-j".to_string(),
+                    chain.to_string(),
+                ],
+            );
+        }
+    }
+    for ip in ["ip", "ip6"] {
+        for mark in [
+            "0x01000000/0x01000000",
+            "0x2000000/0x2000000",
+            "0x3000000/0x3000000",
+        ] {
+            run(
+                "ip",
+                vec![
+                    if ip == "ip6" { "-6" } else { "-4" }.to_string(),
+                    "rule".to_string(),
+                    "del".to_string(),
+                    "fwmark".to_string(),
+                    mark.to_string(),
+                ],
+            );
+        }
+        for table in ["100", "2025"] {
+            run(
+                "ip",
+                vec![
+                    if ip == "ip6" { "-6" } else { "-4" }.to_string(),
+                    "route".to_string(),
+                    "flush".to_string(),
+                    "table".to_string(),
+                    table.to_string(),
+                ],
+            );
+        }
+    }
+    touched
 }
 
 fn cleanup_rules<'a>(rules: impl Iterator<Item = &'a Rule>, runner: &mut dyn Runner) -> Result<()> {
@@ -291,6 +493,39 @@ fn rollback_rules<'a>(rules: impl Iterator<Item = &'a Rule>) -> Vec<Rule> {
 
 static CAPABILITY_CACHE: OnceLock<Mutex<HashMap<PathBuf, Capabilities>>> = OnceLock::new();
 
+pub fn system_protection_summary() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "id": "system-core-bypass",
+            "name": "核心进程旁路",
+            "description": "核心和 root 流量访问本机代理端口时直连，避免回环",
+            "scopes": ["local"],
+            "readOnly": true
+        }),
+        serde_json::json!({
+            "id": "system-local-destination",
+            "name": "本机与局域网目标",
+            "description": "由默认 CIDR 规则和 ADB 端口规则覆盖；内核无 addrtype 时由用户可见规则表达",
+            "scopes": ["local", "forward"],
+            "readOnly": true
+        }),
+        serde_json::json!({
+            "id": "system-dns-chains",
+            "name": "DNS 链结构",
+            "description": "BOX_DNS 处理本机 DNS，BOX_DNS_PRE 处理转发 DNS",
+            "scopes": ["dns"],
+            "readOnly": true
+        }),
+        serde_json::json!({
+            "id": "system-ip-rules",
+            "name": "策略路由",
+            "description": "tproxy/TUN 的 mark、ip rule 和本地路由由模块固定管理",
+            "scopes": ["forward"],
+            "readOnly": true
+        }),
+    ]
+}
+
 pub fn warm_capabilities(paths: &Paths) -> Capabilities {
     let capabilities = detect(paths);
     let cache = CAPABILITY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -325,6 +560,15 @@ pub fn plan(settings: &Value, caps: Capabilities) -> Result<Plan> {
 }
 
 pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>) -> Result<Plan> {
+    plan_with_dns_and_rules(settings, caps, dns_port, None)
+}
+
+pub fn plan_with_dns_and_rules(
+    settings: &Value,
+    caps: Capabilities,
+    dns_port: Option<u16>,
+    rules: Option<&NetworkRuleDocument>,
+) -> Result<Plan> {
     let mode = settings
         .get("network_mode")
         .and_then(Value::as_str)
@@ -379,8 +623,25 @@ pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>
                 let hijack_udp = enabled(settings, "dns_hijack_udp");
                 let hijack_tcp = enabled(settings, "dns_hijack_tcp");
                 if hijack_udp || hijack_tcp {
-                    plan.rules.extend(dns_rules(port, hijack_udp, hijack_tcp));
+                    plan.rules.extend(dns_rules(
+                        "iptables", port, hijack_udp, hijack_tcp, rules, mode,
+                    ));
                 }
+            }
+            plan.rules.extend(tun_bypass_rules(
+                "iptables",
+                settings,
+                cnip_ipset.then_some("cnip"),
+                &force_v4,
+                rules,
+                mode,
+            ));
+            plan.rules.extend(quic_block_rules(settings));
+            plan.rules
+                .extend(user_filter_rules(rules, mode, "iptables"));
+            if ipv6 && caps.ip6tables {
+                plan.rules
+                    .extend(user_filter_rules(rules, mode, "ip6tables"));
             }
         } else if caps.nft {
             if let Some(port) = dns_port {
@@ -407,7 +668,7 @@ pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>
     if cnip_ipset && caps.iptables {
         plan.rules.extend(ipset_create_rules(ipv6));
     }
-    if matches!(effective, "tproxy" | "mixed" | "enhance") {
+    if matches!(effective, "tproxy" | "enhance") {
         plan.rules.extend(tproxy_rules(
             "iptables",
             tproxy_port,
@@ -415,6 +676,8 @@ pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>
             proxy_udp,
             cnip_ipset.then_some("cnip"),
             &force_v4,
+            rules,
+            mode,
         ));
         if ipv6 && caps.ip6tables && caps.ip6tables_mangle {
             plan.rules.extend(tproxy_rules(
@@ -424,6 +687,8 @@ pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>
                 proxy_udp,
                 cnip_ipset.then_some("cnip6"),
                 &force_v6,
+                rules,
+                mode,
             ));
         } else if ipv6 && caps.ip6tables && !caps.ip6tables_mangle {
             plan.warnings.push(
@@ -439,6 +704,8 @@ pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>
             proxy_tcp,
             cnip_ipset.then_some("cnip"),
             &force_v4,
+            rules,
+            mode,
         ));
         if ipv6 && caps.ip6tables && caps.ip6tables_nat {
             plan.rules.extend(redirect_rules(
@@ -447,6 +714,8 @@ pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>
                 proxy_tcp,
                 cnip_ipset.then_some("cnip6"),
                 &force_v6,
+                rules,
+                mode,
             ));
         } else if ipv6 && caps.ip6tables && !caps.ip6tables_nat {
             plan.warnings.push(
@@ -455,8 +724,88 @@ pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>
             plan.degraded = true;
         }
     }
+    let proxy_mode = settings
+        .get("proxy_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("core");
+    let proxy_uids = settings
+        .get("__proxy_uids")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|value| u32::try_from(value).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let proxy_gids = settings
+        .get("__proxy_gids")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|value| u32::try_from(value).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let local_force_active = !force_uids.is_empty() && cnip_ipset;
+    if !local_force_active && matches!(effective, "tproxy" | "redirect" | "mixed" | "enhance") {
+        plan.rules.extend(local_proxy_rules(
+            "iptables",
+            "nat",
+            "BOX_LOCAL_REDIRECT",
+            "redirect",
+            redir_port,
+            proxy_tcp,
+            false,
+            proxy_mode,
+            &proxy_uids,
+            &proxy_gids,
+            rules,
+            mode,
+        ));
+    }
+    if matches!(effective, "tproxy" | "enhance") && proxy_udp {
+        plan.rules.extend(local_udp_tproxy_rules(
+            "iptables",
+            tproxy_port,
+            proxy_mode,
+            &proxy_uids,
+            &proxy_gids,
+            rules,
+            mode,
+        ));
+    } else if effective == "redirect" && proxy_udp {
+        plan.warnings.push(
+            "local UDP transparent proxy is unavailable in redirect; local UDP remains direct"
+                .to_string(),
+        );
+        plan.degraded = true;
+    }
+    plan.rules.extend(quic_block_rules(settings));
+    if effective == "mixed" {
+        plan.rules.extend(tun_bypass_rules(
+            "iptables",
+            settings,
+            cnip_ipset.then_some("cnip"),
+            &force_v4,
+            rules,
+            mode,
+        ));
+    }
+    if let Some(port) = dns_port {
+        let hijack_udp = enabled(settings, "dns_hijack_udp");
+        let hijack_tcp = enabled(settings, "dns_hijack_tcp");
+        if hijack_udp || hijack_tcp {
+            plan.rules.extend(dns_rules(
+                "iptables", port, hijack_udp, hijack_tcp, rules, mode,
+            ));
+        }
+    }
     if !force_uids.is_empty() && cnip_ipset {
-        if matches!(effective, "tproxy" | "mixed" | "enhance") {
+        if matches!(effective, "tproxy" | "enhance") {
             plan.rules.extend(tproxy_local_force_rules(
                 "iptables",
                 "cnip",
@@ -494,6 +843,12 @@ pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>
                 ));
             }
         }
+    }
+    plan.rules
+        .extend(user_filter_rules(rules, mode, "iptables"));
+    if ipv6 && caps.ip6tables {
+        plan.rules
+            .extend(user_filter_rules(rules, mode, "ip6tables"));
     }
     Ok(plan)
 }
@@ -542,7 +897,7 @@ fn nft_plan(
         rules.push(nft_rule("box_tproxy", "ip daddr 224.0.0.0/4 return"));
         rules.push(nft_rule(
             "box_tproxy",
-            "meta mark 0x10000000/0x10000000 return",
+            "meta mark 0x01000000/0x01000000 return",
         ));
         if proxy_tcp {
             rules.push(nft_rule(
@@ -565,7 +920,7 @@ fn nft_plan(
                 "rule".to_string(),
                 "add".to_string(),
                 "fwmark".to_string(),
-                "0x10000000/0x10000000".to_string(),
+                "0x01000000/0x01000000".to_string(),
                 "table".to_string(),
                 "100".to_string(),
             ],
@@ -599,7 +954,7 @@ fn nft_plan(
                     "rule".to_string(),
                     "add".to_string(),
                     "fwmark".to_string(),
-                    "0x10000000/0x10000000".to_string(),
+                    "0x01000000/0x01000000".to_string(),
                     "table".to_string(),
                     "100".to_string(),
                 ],
@@ -730,77 +1085,83 @@ fn nft_dns_rules(port: u16, udp: bool, tcp: bool) -> Vec<Rule> {
     rules
 }
 
-fn dns_rules(port: u16, udp: bool, tcp: bool) -> Vec<Rule> {
-    let mut rules = vec![Rule {
-        family: "iptables",
-        table: "nat",
-        chain: "BOX_DNS",
-        args: vec!["-N".to_string(), "BOX_DNS".to_string()],
-    }];
-    rules.push(Rule {
-        family: "iptables",
-        table: "nat",
-        chain: "BOX_DNS",
-        args: vec![
-            "-A".to_string(),
-            "BOX_DNS".to_string(),
-            "-m".to_string(),
-            "owner".to_string(),
-            "--uid-owner".to_string(),
-            "0".to_string(),
-            "-j".to_string(),
-            "RETURN".to_string(),
-        ],
-    });
-    if udp {
+fn dns_rules(
+    family: &'static str,
+    port: u16,
+    udp: bool,
+    tcp: bool,
+    document: Option<&NetworkRuleDocument>,
+    mode: &str,
+) -> Vec<Rule> {
+    let mut rules = Vec::new();
+    for (chain, owner) in [("BOX_DNS", true), ("BOX_DNS_PRE", false)] {
         rules.push(Rule {
-            family: "iptables",
+            family,
             table: "nat",
-            chain: "BOX_DNS",
+            chain,
+            args: vec!["-N".to_string(), chain.to_string()],
+        });
+        if owner {
+            rules.push(Rule {
+                family,
+                table: "nat",
+                chain,
+                args: vec![
+                    "-A".to_string(),
+                    chain.to_string(),
+                    "-m".to_string(),
+                    "owner".to_string(),
+                    "--uid-owner".to_string(),
+                    "0".to_string(),
+                    "-j".to_string(),
+                    "RETURN".to_string(),
+                ],
+            });
+        }
+        rules.extend(user_rules_for(
+            document,
+            mode,
+            family,
+            Scope::Dns,
+            "nat",
+            chain,
+        ));
+        for (protocol, enabled) in [("udp", udp), ("tcp", tcp)] {
+            if !enabled {
+                continue;
+            }
+            rules.push(Rule {
+                family,
+                table: "nat",
+                chain,
+                args: vec![
+                    "-A".to_string(),
+                    chain.to_string(),
+                    "-p".to_string(),
+                    protocol.to_string(),
+                    "--dport".to_string(),
+                    "53".to_string(),
+                    "-j".to_string(),
+                    "REDIRECT".to_string(),
+                    "--to-ports".to_string(),
+                    port.to_string(),
+                ],
+            });
+        }
+    }
+    for (parent, target) in [("OUTPUT", "BOX_DNS"), ("PREROUTING", "BOX_DNS_PRE")] {
+        rules.push(Rule {
+            family,
+            table: "nat",
+            chain: parent,
             args: vec![
                 "-A".to_string(),
-                "BOX_DNS".to_string(),
-                "-p".to_string(),
-                "udp".to_string(),
-                "--dport".to_string(),
-                "53".to_string(),
+                parent.to_string(),
                 "-j".to_string(),
-                "REDIRECT".to_string(),
-                "--to-ports".to_string(),
-                port.to_string(),
+                target.to_string(),
             ],
         });
     }
-    if tcp {
-        rules.push(Rule {
-            family: "iptables",
-            table: "nat",
-            chain: "BOX_DNS",
-            args: vec![
-                "-A".to_string(),
-                "BOX_DNS".to_string(),
-                "-p".to_string(),
-                "tcp".to_string(),
-                "--dport".to_string(),
-                "53".to_string(),
-                "-j".to_string(),
-                "REDIRECT".to_string(),
-                "--to-ports".to_string(),
-                port.to_string(),
-            ],
-        });
-    }
-    rules.push(Rule {
-        family: "iptables",
-        table: "nat",
-        chain: "OUTPUT",
-        args: vec![
-            "-A".to_string(),
-            "OUTPUT".to_string(),
-            "-j".to_string(),
-            "BOX_DNS".to_string(),
-        ],
-    });
     rules
 }
 
@@ -898,7 +1259,7 @@ fn tproxy_local_force_rules(
                     "-j".to_string(),
                     "MARK".to_string(),
                     "--set-xmark".to_string(),
-                    "0x10000000/0x10000000".to_string(),
+                    "0x01000000/0x01000000".to_string(),
                 ],
             });
             rules.push(Rule {
@@ -987,6 +1348,291 @@ fn redirect_local_force_rules(
     rules
 }
 
+fn user_rules_for(
+    document: Option<&NetworkRuleDocument>,
+    mode: &str,
+    family: &'static str,
+    scope: Scope,
+    table: &'static str,
+    chain: &'static str,
+) -> Vec<Rule> {
+    let Some(document) = document else {
+        return Vec::new();
+    };
+    let Some(mode) = mode_from_str(mode) else {
+        return Vec::new();
+    };
+    let mut rules = Vec::new();
+    for rule in document.rules.iter().filter(|rule| rule.enabled) {
+        if !rule.modes.contains(&mode) || !rule.scopes.contains(&scope) {
+            continue;
+        }
+        match (rule.action, table) {
+            (Action::Bypass, "filter") | (Action::Reject, "mangle" | "nat") => continue,
+            _ => {}
+        }
+        if scope == Scope::Dns && rule.action != Action::Bypass {
+            continue;
+        }
+        if rule.family == Family::Ipv4 && family != "iptables" {
+            continue;
+        }
+        if rule.family == Family::Ipv6 && family != "ip6tables" {
+            continue;
+        }
+        if rule.match_fields.is_empty() {
+            continue;
+        }
+        let mut variants: Vec<Vec<String>> = vec![Vec::new()];
+        let dst_cidrs = filter_cidrs(&rule.match_fields.dst_cidrs, family);
+        let src_cidrs = filter_cidrs(&rule.match_fields.src_cidrs, family);
+        if !rule.match_fields.dst_cidrs.is_empty() && dst_cidrs.is_empty() {
+            continue;
+        }
+        if !rule.match_fields.src_cidrs.is_empty() && src_cidrs.is_empty() {
+            continue;
+        }
+        add_values(&mut variants, "-d", &dst_cidrs);
+        add_values(&mut variants, "-s", &src_cidrs);
+        if chain == "OUTPUT" {
+            add_values(&mut variants, "-o", &rule.match_fields.dst_ifaces);
+        } else {
+            add_values(&mut variants, "-i", &rule.match_fields.src_ifaces);
+            add_values(&mut variants, "-o", &rule.match_fields.dst_ifaces);
+        }
+        if !rule.match_fields.uids.is_empty() || !rule.match_fields.gids.is_empty() {
+            if chain != "OUTPUT" {
+                continue;
+            }
+            let uids = rule
+                .match_fields
+                .uids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>();
+            let gids = rule
+                .match_fields
+                .gids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>();
+            add_owner_values(&mut variants, "--uid-owner", &uids);
+            add_owner_values(&mut variants, "--gid-owner", &gids);
+        }
+        let types = rule
+            .match_fields
+            .dst_types
+            .iter()
+            .map(|value| match value {
+                crate::network_rules::DstType::Local => "LOCAL",
+                crate::network_rules::DstType::Multicast => "MULTICAST",
+                crate::network_rules::DstType::Broadcast => "BROADCAST",
+            })
+            .collect::<Vec<_>>();
+        if !types.is_empty() {
+            let mut next = Vec::new();
+            for variant in &variants {
+                for value in &types {
+                    let mut args = variant.clone();
+                    args.extend([
+                        "-m".to_string(),
+                        "addrtype".to_string(),
+                        "--dst-type".to_string(),
+                        (*value).to_string(),
+                    ]);
+                    next.push(args);
+                }
+            }
+            variants = next;
+        }
+        let protocols = match rule.protocol {
+            crate::network_rules::Protocol::Any
+                if !rule.match_fields.dst_ports.is_empty()
+                    || !rule.match_fields.src_ports.is_empty() =>
+            {
+                vec!["tcp", "udp"]
+            }
+            crate::network_rules::Protocol::Any => vec![],
+            crate::network_rules::Protocol::Tcp => vec!["tcp"],
+            crate::network_rules::Protocol::Udp => vec!["udp"],
+        };
+        let needs_protocol = !protocols.is_empty();
+        if needs_protocol {
+            let mut next = Vec::new();
+            for variant in &variants {
+                for protocol in &protocols {
+                    let mut args = variant.clone();
+                    args.extend(["-p".to_string(), (*protocol).to_string()]);
+                    next.push(args);
+                }
+            }
+            variants = next;
+        }
+        add_values(&mut variants, "--dport", &rule.match_fields.dst_ports);
+        add_values(&mut variants, "--sport", &rule.match_fields.src_ports);
+        for args in variants {
+            let mut args = args;
+            args.extend([
+                "-j".to_string(),
+                match rule.action {
+                    Action::Bypass => "RETURN".to_string(),
+                    Action::Reject => "REJECT".to_string(),
+                },
+            ]);
+            let mut full = vec!["-A".to_string(), chain.to_string()];
+            full.extend(args);
+            rules.push(Rule {
+                family,
+                table,
+                chain,
+                args: full,
+            });
+        }
+    }
+    rules
+}
+
+fn add_values(variants: &mut Vec<Vec<String>>, flag: &str, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    let mut next = Vec::new();
+    for variant in variants.iter() {
+        for value in values {
+            let mut args = variant.clone();
+            args.extend([flag.to_string(), value.clone()]);
+            next.push(args);
+        }
+    }
+    *variants = next;
+}
+
+fn add_owner_values(variants: &mut Vec<Vec<String>>, flag: &str, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    let mut next = Vec::new();
+    for variant in variants.iter() {
+        for value in values {
+            let mut args = variant.clone();
+            args.extend([
+                "-m".to_string(),
+                "owner".to_string(),
+                flag.to_string(),
+                value.clone(),
+            ]);
+            next.push(args);
+        }
+    }
+    *variants = next;
+}
+
+fn filter_cidrs(cidrs: &[String], family: &str) -> Vec<String> {
+    cidrs
+        .iter()
+        .filter(|cidr| {
+            let address = cidr.split('/').next().unwrap_or_default();
+            let ipv4 = address
+                .parse::<std::net::IpAddr>()
+                .map(|value| value.is_ipv4())
+                .unwrap_or(true);
+            (family == "iptables" && ipv4) || (family == "ip6tables" && !ipv4)
+        })
+        .cloned()
+        .collect()
+}
+
+fn mode_from_str(value: &str) -> Option<Mode> {
+    Some(match value {
+        "tun" => Mode::Tun,
+        "tproxy" => Mode::Tproxy,
+        "redirect" => Mode::Redirect,
+        "mixed" => Mode::Mixed,
+        "enhance" => Mode::Enhance,
+        _ => return None,
+    })
+}
+
+fn user_filter_rules(
+    document: Option<&NetworkRuleDocument>,
+    mode: &str,
+    family: &'static str,
+) -> Vec<Rule> {
+    let Some(document) = document else {
+        return Vec::new();
+    };
+    let local = user_rules_for(
+        Some(document),
+        mode,
+        family,
+        Scope::Local,
+        "filter",
+        "BOX_FILTER_LOCAL",
+    );
+    let forward = user_rules_for(
+        Some(document),
+        mode,
+        family,
+        Scope::Forward,
+        "filter",
+        "BOX_FILTER_PRE",
+    );
+    let filter = user_rules_for(
+        Some(document),
+        mode,
+        family,
+        Scope::Filter,
+        "filter",
+        "BOX_FILTER_PRE",
+    );
+    if local.is_empty() && forward.is_empty() && filter.is_empty() {
+        return Vec::new();
+    }
+    let mut rules = Vec::new();
+    if !local.is_empty() {
+        rules.push(Rule {
+            family,
+            table: "filter",
+            chain: "BOX_FILTER_LOCAL",
+            args: vec!["-N".to_string(), "BOX_FILTER_LOCAL".to_string()],
+        });
+        rules.push(Rule {
+            family,
+            table: "filter",
+            chain: "OUTPUT",
+            args: vec![
+                "-A".to_string(),
+                "OUTPUT".to_string(),
+                "-j".to_string(),
+                "BOX_FILTER_LOCAL".to_string(),
+            ],
+        });
+        rules.extend(local);
+    }
+    if !forward.is_empty() || !filter.is_empty() {
+        rules.push(Rule {
+            family,
+            table: "filter",
+            chain: "BOX_FILTER_PRE",
+            args: vec!["-N".to_string(), "BOX_FILTER_PRE".to_string()],
+        });
+        rules.push(Rule {
+            family,
+            table: "filter",
+            chain: "PREROUTING",
+            args: vec![
+                "-A".to_string(),
+                "PREROUTING".to_string(),
+                "-j".to_string(),
+                "BOX_FILTER_PRE".to_string(),
+            ],
+        });
+        rules.extend(forward);
+        rules.extend(filter);
+    }
+    rules
+}
+
 fn local_core_bypass_rules(
     family: &'static str,
     table: &'static str,
@@ -1029,6 +1675,722 @@ fn local_core_bypass_rules(
     rules
 }
 
+fn tun_bypass_rules(
+    family: &'static str,
+    settings: &Value,
+    cnip_set: Option<&'static str>,
+    force_cidrs: &[String],
+    document: Option<&NetworkRuleDocument>,
+    mode: &str,
+) -> Vec<Rule> {
+    let pre = "BOX_TUN_BYPASS_PRE";
+    let out = "BOX_TUN_BYPASS_OUT";
+    let route_mark = "0x3000000/0x3000000";
+    let bypass_mark = "0x2000000/0x2000000";
+    let tun_device = "meta";
+    let mut rules = Vec::new();
+    for chain in [pre, out] {
+        rules.push(Rule {
+            family,
+            table: "mangle",
+            chain,
+            args: vec!["-N".to_string(), chain.to_string()],
+        });
+    }
+    rules.push(Rule {
+        family,
+        table: "mangle",
+        chain: "PREROUTING",
+        args: vec![
+            "-A".to_string(),
+            "PREROUTING".to_string(),
+            "-j".to_string(),
+            pre.to_string(),
+        ],
+    });
+    rules.push(Rule {
+        family,
+        table: "mangle",
+        chain: "OUTPUT",
+        args: vec![
+            "-A".to_string(),
+            "OUTPUT".to_string(),
+            "-j".to_string(),
+            out.to_string(),
+        ],
+    });
+    let mark = |chain: &'static str, args: Vec<String>| Rule {
+        family,
+        table: "mangle",
+        chain,
+        args,
+    };
+    rules.push(mark(
+        pre,
+        vec![
+            "-A".to_string(),
+            pre.to_string(),
+            "-i".to_string(),
+            tun_device.to_string(),
+            "-j".to_string(),
+            "RETURN".to_string(),
+        ],
+    ));
+    for proto in ["tcp", "udp"] {
+        if (proto == "tcp" && enabled(settings, "dns_hijack_tcp"))
+            || (proto == "udp" && enabled(settings, "dns_hijack_udp"))
+        {
+            rules.push(mark(
+                pre,
+                vec![
+                    "-A".to_string(),
+                    pre.to_string(),
+                    "-p".to_string(),
+                    proto.to_string(),
+                    "--dport".to_string(),
+                    "53".to_string(),
+                    "-j".to_string(),
+                    "MARK".to_string(),
+                    "--set-xmark".to_string(),
+                    route_mark.to_string(),
+                ],
+            ));
+            rules.push(mark(
+                pre,
+                vec![
+                    "-A".to_string(),
+                    pre.to_string(),
+                    "-p".to_string(),
+                    proto.to_string(),
+                    "--dport".to_string(),
+                    "53".to_string(),
+                    "-j".to_string(),
+                    "RETURN".to_string(),
+                ],
+            ));
+        }
+    }
+    for cidr in force_cidrs {
+        for proto in ["tcp", "udp"] {
+            rules.push(mark(
+                pre,
+                vec![
+                    "-A".to_string(),
+                    pre.to_string(),
+                    "-d".to_string(),
+                    cidr.clone(),
+                    "-p".to_string(),
+                    proto.to_string(),
+                    "-j".to_string(),
+                    "MARK".to_string(),
+                    "--set-xmark".to_string(),
+                    route_mark.to_string(),
+                ],
+            ));
+            rules.push(mark(
+                pre,
+                vec![
+                    "-A".to_string(),
+                    pre.to_string(),
+                    "-d".to_string(),
+                    cidr.clone(),
+                    "-p".to_string(),
+                    proto.to_string(),
+                    "-j".to_string(),
+                    "RETURN".to_string(),
+                ],
+            ));
+        }
+    }
+    rules.extend(user_rules_for(
+        document,
+        mode,
+        family,
+        Scope::Forward,
+        "mangle",
+        pre,
+    ));
+    if let Some(set) = cnip_set {
+        rules.push(mark(
+            pre,
+            vec![
+                "-A".to_string(),
+                pre.to_string(),
+                "-m".to_string(),
+                "set".to_string(),
+                "--match-set".to_string(),
+                set.to_string(),
+                "dst".to_string(),
+                "-j".to_string(),
+                "MARK".to_string(),
+                "--set-xmark".to_string(),
+                bypass_mark.to_string(),
+            ],
+        ));
+    }
+    rules.push(mark(
+        pre,
+        vec![
+            "-A".to_string(),
+            pre.to_string(),
+            "-m".to_string(),
+            "mark".to_string(),
+            "--mark".to_string(),
+            bypass_mark.to_string(),
+            "-j".to_string(),
+            "RETURN".to_string(),
+        ],
+    ));
+    rules.push(mark(
+        pre,
+        vec![
+            "-A".to_string(),
+            pre.to_string(),
+            "-j".to_string(),
+            "MARK".to_string(),
+            "--set-xmark".to_string(),
+            route_mark.to_string(),
+        ],
+    ));
+    rules.push(mark(
+        out,
+        vec![
+            "-A".to_string(),
+            out.to_string(),
+            "-m".to_string(),
+            "owner".to_string(),
+            "--uid-owner".to_string(),
+            "0".to_string(),
+            "-j".to_string(),
+            "RETURN".to_string(),
+        ],
+    ));
+    for direction in ["--dport", "--sport"] {
+        rules.push(mark(
+            out,
+            vec![
+                "-A".to_string(),
+                out.to_string(),
+                "-p".to_string(),
+                "tcp".to_string(),
+                direction.to_string(),
+                "5555".to_string(),
+                "-j".to_string(),
+                "RETURN".to_string(),
+            ],
+        ));
+    }
+    rules.extend(user_rules_for(
+        document,
+        mode,
+        family,
+        Scope::Local,
+        "mangle",
+        out,
+    ));
+    let proxy_mode = settings
+        .get("proxy_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("core");
+    let uids = settings
+        .get("__proxy_uids")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|value| u32::try_from(value).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let gids = settings
+        .get("__proxy_gids")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|value| u32::try_from(value).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if proxy_mode == "blacklist" || proxy_mode == "black" {
+        for uid in &uids {
+            rules.push(mark(
+                out,
+                vec![
+                    "-A".to_string(),
+                    out.to_string(),
+                    "-m".to_string(),
+                    "owner".to_string(),
+                    "--uid-owner".to_string(),
+                    uid.to_string(),
+                    "-j".to_string(),
+                    "RETURN".to_string(),
+                ],
+            ));
+        }
+        for gid in &gids {
+            rules.push(mark(
+                out,
+                vec![
+                    "-A".to_string(),
+                    out.to_string(),
+                    "-m".to_string(),
+                    "owner".to_string(),
+                    "--gid-owner".to_string(),
+                    gid.to_string(),
+                    "-j".to_string(),
+                    "RETURN".to_string(),
+                ],
+            ));
+        }
+    } else if (proxy_mode == "whitelist" || proxy_mode == "white")
+        && (!uids.is_empty() || !gids.is_empty())
+    {
+        for uid in &uids {
+            rules.push(mark(
+                out,
+                vec![
+                    "-A".to_string(),
+                    out.to_string(),
+                    "-m".to_string(),
+                    "owner".to_string(),
+                    "--uid-owner".to_string(),
+                    uid.to_string(),
+                    "-j".to_string(),
+                    "MARK".to_string(),
+                    "--set-xmark".to_string(),
+                    route_mark.to_string(),
+                ],
+            ));
+        }
+        for gid in &gids {
+            rules.push(mark(
+                out,
+                vec![
+                    "-A".to_string(),
+                    out.to_string(),
+                    "-m".to_string(),
+                    "owner".to_string(),
+                    "--gid-owner".to_string(),
+                    gid.to_string(),
+                    "-j".to_string(),
+                    "MARK".to_string(),
+                    "--set-xmark".to_string(),
+                    route_mark.to_string(),
+                ],
+            ));
+        }
+        rules.push(mark(
+            out,
+            vec![
+                "-A".to_string(),
+                out.to_string(),
+                "-j".to_string(),
+                "RETURN".to_string(),
+            ],
+        ));
+    }
+    rules.push(mark(
+        out,
+        vec![
+            "-A".to_string(),
+            out.to_string(),
+            "-j".to_string(),
+            "MARK".to_string(),
+            "--set-xmark".to_string(),
+            route_mark.to_string(),
+        ],
+    ));
+    rules.push(Rule {
+        family: "ip",
+        table: "",
+        chain: "",
+        args: vec![
+            "-4".to_string(),
+            "rule".to_string(),
+            "add".to_string(),
+            "fwmark".to_string(),
+            bypass_mark.to_string(),
+            "table".to_string(),
+            "main".to_string(),
+            "pref".to_string(),
+            "98".to_string(),
+        ],
+    });
+    rules.push(Rule {
+        family: "ip",
+        table: "",
+        chain: "",
+        args: vec![
+            "-4".to_string(),
+            "rule".to_string(),
+            "add".to_string(),
+            "fwmark".to_string(),
+            route_mark.to_string(),
+            "table".to_string(),
+            "2025".to_string(),
+            "pref".to_string(),
+            "99".to_string(),
+        ],
+    });
+    rules.push(Rule {
+        family: "ip",
+        table: "",
+        chain: "",
+        args: vec![
+            "-4".to_string(),
+            "route".to_string(),
+            "replace".to_string(),
+            "default".to_string(),
+            "dev".to_string(),
+            tun_device.to_string(),
+            "table".to_string(),
+            "2025".to_string(),
+        ],
+    });
+    rules
+}
+
+fn quic_block_rules(settings: &Value) -> Vec<Rule> {
+    if !settings
+        .get("quic")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == "disable")
+    {
+        return Vec::new();
+    }
+    let mut rules = vec![
+        Rule {
+            family: "iptables",
+            table: "filter",
+            chain: "BOX_QUIC_BLOCK",
+            args: vec!["-N".to_string(), "BOX_QUIC_BLOCK".to_string()],
+        },
+        Rule {
+            family: "iptables",
+            table: "filter",
+            chain: "OUTPUT",
+            args: vec![
+                "-A".to_string(),
+                "OUTPUT".to_string(),
+                "-j".to_string(),
+                "BOX_QUIC_BLOCK".to_string(),
+            ],
+        },
+        Rule {
+            family: "iptables",
+            table: "filter",
+            chain: "FORWARD",
+            args: vec![
+                "-A".to_string(),
+                "FORWARD".to_string(),
+                "-j".to_string(),
+                "BOX_QUIC_BLOCK".to_string(),
+            ],
+        },
+    ];
+    for port in [443, 80] {
+        rules.push(Rule {
+            family: "iptables",
+            table: "filter",
+            chain: "BOX_QUIC_BLOCK",
+            args: vec![
+                "-A".to_string(),
+                "BOX_QUIC_BLOCK".to_string(),
+                "-p".to_string(),
+                "udp".to_string(),
+                "--dport".to_string(),
+                port.to_string(),
+                "-j".to_string(),
+                "REJECT".to_string(),
+            ],
+        });
+    }
+    rules
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_udp_tproxy_rules(
+    family: &'static str,
+    port: u16,
+    proxy_mode: &str,
+    uids: &[u32],
+    gids: &[u32],
+    document: Option<&NetworkRuleDocument>,
+    mode: &str,
+) -> Vec<Rule> {
+    let chain = "BOX_LOCAL_UDP";
+    let mut rules = local_core_bypass_rules(family, "mangle", chain);
+    rules.extend(user_rules_for(
+        document,
+        mode,
+        family,
+        Scope::Local,
+        "mangle",
+        chain,
+    ));
+    for direction in ["--dport", "--sport"] {
+        rules.push(Rule {
+            family,
+            table: "mangle",
+            chain,
+            args: vec![
+                "-A".to_string(),
+                chain.to_string(),
+                "-p".to_string(),
+                "udp".to_string(),
+                direction.to_string(),
+                "5555".to_string(),
+                "-j".to_string(),
+                "RETURN".to_string(),
+            ],
+        });
+    }
+    let mark = |rules: &mut Vec<Rule>, uid: Option<u32>, gid: Option<u32>, target: &str| {
+        let mut args = vec!["-A".to_string(), chain.to_string()];
+        args.extend(["-m".to_string(), "owner".to_string()]);
+        if let Some(uid) = uid {
+            args.extend(["--uid-owner".to_string(), uid.to_string()]);
+        }
+        if let Some(gid) = gid {
+            args.extend(["--gid-owner".to_string(), gid.to_string()]);
+        }
+        args.extend([
+            "-p".to_string(),
+            "udp".to_string(),
+            "-j".to_string(),
+            target.to_string(),
+        ]);
+        if target == "MARK" {
+            args.extend([
+                "--set-xmark".to_string(),
+                "0x01000000/0x01000000".to_string(),
+            ]);
+        }
+        rules.push(Rule {
+            family,
+            table: "mangle",
+            chain,
+            args,
+        });
+    };
+    let mark_all = |rules: &mut Vec<Rule>| {
+        rules.push(Rule {
+            family,
+            table: "mangle",
+            chain,
+            args: vec![
+                "-A".to_string(),
+                chain.to_string(),
+                "-p".to_string(),
+                "udp".to_string(),
+                "-j".to_string(),
+                "MARK".to_string(),
+                "--set-xmark".to_string(),
+                "0x01000000/0x01000000".to_string(),
+            ],
+        });
+    };
+    if proxy_mode == "blacklist" || proxy_mode == "black" {
+        for uid in uids {
+            mark(&mut rules, Some(*uid), None, "RETURN");
+        }
+        for gid in gids {
+            mark(&mut rules, None, Some(*gid), "RETURN");
+        }
+        mark_all(&mut rules);
+    } else if proxy_mode == "whitelist" || proxy_mode == "white" {
+        if uids.is_empty() && gids.is_empty() {
+            mark_all(&mut rules);
+        } else {
+            for uid in uids {
+                mark(&mut rules, Some(*uid), None, "MARK");
+            }
+            for gid in gids {
+                mark(&mut rules, None, Some(*gid), "MARK");
+            }
+        }
+    } else {
+        mark_all(&mut rules);
+    }
+    let _ = port;
+    rules
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_proxy_rules(
+    family: &'static str,
+    table: &'static str,
+    chain: &'static str,
+    action: &str,
+    port: u16,
+    proxy_tcp: bool,
+    proxy_udp: bool,
+    proxy_mode: &str,
+    uids: &[u32],
+    gids: &[u32],
+    document: Option<&NetworkRuleDocument>,
+    mode: &str,
+) -> Vec<Rule> {
+    let mut rules = local_core_bypass_rules(family, table, chain);
+    for direction in ["--dport", "--sport"] {
+        rules.push(Rule {
+            family,
+            table,
+            chain,
+            args: vec![
+                "-A".to_string(),
+                chain.to_string(),
+                "-p".to_string(),
+                "tcp".to_string(),
+                direction.to_string(),
+                "5555".to_string(),
+                "-j".to_string(),
+                "RETURN".to_string(),
+            ],
+        });
+    }
+    rules.extend(user_rules_for(
+        document,
+        mode,
+        family,
+        Scope::Local,
+        table,
+        chain,
+    ));
+    let hidden = format!("__local_{action}");
+    let _ = hidden;
+    let push_owner = |rules: &mut Vec<Rule>,
+                      protocol: &str,
+                      uid: Option<u32>,
+                      gid: Option<u32>,
+                      target: &str| {
+        let mut args = vec!["-A".to_string(), chain.to_string()];
+        args.extend(["-m".to_string(), "owner".to_string()]);
+        if let Some(uid) = uid {
+            args.extend(["--uid-owner".to_string(), uid.to_string()]);
+        }
+        if let Some(gid) = gid {
+            args.extend(["--gid-owner".to_string(), gid.to_string()]);
+        }
+        args.extend([
+            "-p".to_string(),
+            protocol.to_string(),
+            "-j".to_string(),
+            target.to_string(),
+        ]);
+        if target == "MARK" {
+            args.extend([
+                "--set-xmark".to_string(),
+                "0x01000000/0x01000000".to_string(),
+            ]);
+        } else if target == "REDIRECT" {
+            args.extend(["--to-ports".to_string(), port.to_string()]);
+        }
+        rules.push(Rule {
+            family,
+            table,
+            chain,
+            args,
+        });
+    };
+    let push_all = |rules: &mut Vec<Rule>, protocol: &str, target: &str| {
+        let mut args = vec![
+            "-A".to_string(),
+            chain.to_string(),
+            "-p".to_string(),
+            protocol.to_string(),
+            "-j".to_string(),
+            target.to_string(),
+        ];
+        if target == "MARK" {
+            args.extend([
+                "--set-xmark".to_string(),
+                "0x01000000/0x01000000".to_string(),
+            ]);
+        } else if target == "REDIRECT" {
+            args.extend(["--to-ports".to_string(), port.to_string()]);
+        }
+        rules.push(Rule {
+            family,
+            table,
+            chain,
+            args,
+        });
+    };
+    if proxy_mode == "blacklist" || proxy_mode == "black" {
+        for protocol in [("tcp", proxy_tcp), ("udp", proxy_udp)] {
+            if !protocol.1 {
+                continue;
+            }
+            for uid in uids {
+                push_owner(&mut rules, protocol.0, Some(*uid), None, "RETURN");
+            }
+            for gid in gids {
+                push_owner(&mut rules, protocol.0, None, Some(*gid), "RETURN");
+            }
+        }
+        if proxy_tcp {
+            push_all(&mut rules, "tcp", action_target(action));
+        }
+        if proxy_udp {
+            push_all(&mut rules, "udp", action_target(action));
+        }
+    } else if proxy_mode == "whitelist" || proxy_mode == "white" {
+        if uids.is_empty() && gids.is_empty() {
+            if proxy_tcp {
+                push_all(&mut rules, "tcp", action_target(action));
+            }
+            if proxy_udp {
+                push_all(&mut rules, "udp", action_target(action));
+            }
+        } else {
+            for protocol in [("tcp", proxy_tcp), ("udp", proxy_udp)] {
+                if !protocol.1 {
+                    continue;
+                }
+                for uid in uids {
+                    push_owner(
+                        &mut rules,
+                        protocol.0,
+                        Some(*uid),
+                        None,
+                        action_target(action),
+                    );
+                }
+                for gid in gids {
+                    push_owner(
+                        &mut rules,
+                        protocol.0,
+                        None,
+                        Some(*gid),
+                        action_target(action),
+                    );
+                }
+            }
+        }
+    } else {
+        if proxy_tcp {
+            push_all(&mut rules, "tcp", action_target(action));
+        }
+        if proxy_udp {
+            push_all(&mut rules, "udp", action_target(action));
+        }
+    }
+    rules
+}
+
+fn action_target(action: &str) -> &'static str {
+    if action == "mark" {
+        "MARK"
+    } else {
+        "REDIRECT"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tproxy_rules(
     family: &'static str,
     port: u16,
@@ -1036,6 +2398,8 @@ fn tproxy_rules(
     proxy_udp: bool,
     cnip_set: Option<&'static str>,
     force_cidrs: &[String],
+    document: Option<&NetworkRuleDocument>,
+    mode: &str,
 ) -> Vec<Rule> {
     let mut rules = Vec::new();
     rules.push(Rule {
@@ -1081,7 +2445,7 @@ fn tproxy_rules(
                     "--on-port".to_string(),
                     port.to_string(),
                     "--tproxy-mark".to_string(),
-                    "0x10000000/0x10000000".to_string(),
+                    "0x01000000/0x01000000".to_string(),
                 ],
             });
         }
@@ -1102,39 +2466,19 @@ fn tproxy_rules(
                     "--on-port".to_string(),
                     port.to_string(),
                     "--tproxy-mark".to_string(),
-                    "0x10000000/0x10000000".to_string(),
+                    "0x01000000/0x01000000".to_string(),
                 ],
             });
         }
     }
-    let local_networks: &[&str] = if family == "ip6tables" {
-        &["::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]
-    } else {
-        &[
-            "0.0.0.0/8",
-            "10.0.0.0/8",
-            "127.0.0.0/8",
-            "169.254.0.0/16",
-            "172.16.0.0/12",
-            "192.168.0.0/16",
-            "224.0.0.0/4",
-        ]
-    };
-    for network in local_networks {
-        rules.push(Rule {
-            family,
-            table: "mangle",
-            chain: "BOX_TPROXY",
-            args: vec![
-                "-A".to_string(),
-                "BOX_TPROXY".to_string(),
-                "-d".to_string(),
-                (*network).to_string(),
-                "-j".to_string(),
-                "RETURN".to_string(),
-            ],
-        });
-    }
+    rules.extend(user_rules_for(
+        document,
+        mode,
+        family,
+        Scope::Forward,
+        "mangle",
+        "BOX_TPROXY",
+    ));
     rules.push(Rule {
         family,
         table: "mangle",
@@ -1145,7 +2489,7 @@ fn tproxy_rules(
             "-m".to_string(),
             "mark".to_string(),
             "--mark".to_string(),
-            "0x10000000/0x10000000".to_string(),
+            "0x01000000/0x01000000".to_string(),
             "-j".to_string(),
             "RETURN".to_string(),
         ],
@@ -1168,6 +2512,23 @@ fn tproxy_rules(
             ],
         });
     }
+    for direction in ["--dport", "--sport"] {
+        rules.push(Rule {
+            family,
+            table: "mangle",
+            chain: "BOX_TPROXY",
+            args: vec![
+                "-A".to_string(),
+                "BOX_TPROXY".to_string(),
+                "-p".to_string(),
+                "tcp".to_string(),
+                direction.to_string(),
+                "5555".to_string(),
+                "-j".to_string(),
+                "RETURN".to_string(),
+            ],
+        });
+    }
     if proxy_tcp {
         rules.push(Rule {
             family,
@@ -1183,7 +2544,7 @@ fn tproxy_rules(
                 "--on-port".to_string(),
                 port.to_string(),
                 "--tproxy-mark".to_string(),
-                "0x10000000/0x10000000".to_string(),
+                "0x01000000/0x01000000".to_string(),
             ],
         });
     }
@@ -1202,7 +2563,7 @@ fn tproxy_rules(
                 "--on-port".to_string(),
                 port.to_string(),
                 "--tproxy-mark".to_string(),
-                "0x10000000/0x10000000".to_string(),
+                "0x01000000/0x01000000".to_string(),
             ],
         });
     }
@@ -1232,7 +2593,7 @@ fn tproxy_rules(
             "rule".to_string(),
             "add".to_string(),
             "fwmark".to_string(),
-            "0x10000000/0x10000000".to_string(),
+            "0x01000000/0x01000000".to_string(),
             "table".to_string(),
             "100".to_string(),
         ],
@@ -1262,6 +2623,8 @@ fn redirect_rules(
     proxy_tcp: bool,
     cnip_set: Option<&'static str>,
     force_cidrs: &[String],
+    document: Option<&NetworkRuleDocument>,
+    mode: &str,
 ) -> Vec<Rule> {
     let mut rules = vec![
         Rule {
@@ -1307,34 +2670,14 @@ fn redirect_rules(
             });
         }
     }
-    let local_networks: &[&str] = if family == "ip6tables" {
-        &["::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]
-    } else {
-        &[
-            "0.0.0.0/8",
-            "10.0.0.0/8",
-            "127.0.0.0/8",
-            "169.254.0.0/16",
-            "172.16.0.0/12",
-            "192.168.0.0/16",
-            "224.0.0.0/4",
-        ]
-    };
-    for network in local_networks {
-        rules.push(Rule {
-            family,
-            table: "nat",
-            chain: "BOX_REDIRECT",
-            args: vec![
-                "-A".to_string(),
-                "BOX_REDIRECT".to_string(),
-                "-d".to_string(),
-                (*network).to_string(),
-                "-j".to_string(),
-                "RETURN".to_string(),
-            ],
-        });
-    }
+    rules.extend(user_rules_for(
+        document,
+        mode,
+        family,
+        Scope::Forward,
+        "nat",
+        "BOX_REDIRECT",
+    ));
     if let Some(set) = cnip_set {
         rules.push(Rule {
             family,
@@ -1513,7 +2856,7 @@ fn api_level() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply, plan, Capabilities, Rule, Runner};
+    use super::{apply, plan, plan_with_dns_and_rules, Capabilities, Rule, Runner};
     use serde_json::json;
 
     fn settings(mode: &str) -> serde_json::Value {
@@ -1527,6 +2870,39 @@ mod tests {
             "bypass_cn_ip": "false",
             "ipset": "false"
         })
+    }
+
+    fn default_rule_document() -> crate::network_rules::Document {
+        crate::network_rules::Document {
+            schema_version: 1,
+            revision: 1,
+            defaults_version: "test".to_string(),
+            tombstones: Vec::new(),
+            rules: vec![crate::network_rules::RuleSpec {
+                id: "default-private-v4".to_string(),
+                name: "private".to_string(),
+                enabled: true,
+                action: crate::network_rules::Action::Bypass,
+                scopes: vec![
+                    crate::network_rules::Scope::Local,
+                    crate::network_rules::Scope::Forward,
+                ],
+                modes: vec![
+                    crate::network_rules::Mode::Tun,
+                    crate::network_rules::Mode::Tproxy,
+                    crate::network_rules::Mode::Redirect,
+                    crate::network_rules::Mode::Mixed,
+                    crate::network_rules::Mode::Enhance,
+                ],
+                family: crate::network_rules::Family::Ipv4,
+                protocol: crate::network_rules::Protocol::Any,
+                match_fields: crate::network_rules::MatchFields {
+                    dst_cidrs: vec!["10.0.0.0/8".to_string()],
+                    ..Default::default()
+                },
+                origin: crate::network_rules::Origin::Default,
+            }],
+        }
     }
 
     struct FakeRunner {
@@ -1565,9 +2941,162 @@ mod tests {
     }
 
     #[test]
-    fn tun_has_no_iptables_rules() {
+    fn plan_validation_rejects_duplicate_chain_creation() {
+        let plan = super::Plan {
+            requested_mode: "tproxy".to_string(),
+            effective_mode: "tproxy".to_string(),
+            degraded: false,
+            rules: vec![
+                super::Rule {
+                    family: "iptables",
+                    table: "mangle",
+                    chain: "BOX_DUP",
+                    args: vec!["-N".to_string(), "BOX_DUP".to_string()],
+                },
+                super::Rule {
+                    family: "iptables",
+                    table: "mangle",
+                    chain: "BOX_DUP",
+                    args: vec!["-N".to_string(), "BOX_DUP".to_string()],
+                },
+            ],
+            warnings: Vec::new(),
+        };
+        assert!(plan.validate().is_err());
+    }
+
+    #[test]
+    fn reject_rules_compile_into_filter_chains() {
+        let mut document = default_rule_document();
+        document.rules.push(crate::network_rules::RuleSpec {
+            id: "user-reject".to_string(),
+            name: "reject".to_string(),
+            enabled: true,
+            action: crate::network_rules::Action::Reject,
+            scopes: vec![crate::network_rules::Scope::Local],
+            modes: vec![crate::network_rules::Mode::Tun],
+            family: crate::network_rules::Family::Ipv4,
+            protocol: crate::network_rules::Protocol::Tcp,
+            match_fields: crate::network_rules::MatchFields {
+                dst_cidrs: vec!["198.51.100.77/32".to_string()],
+                ..Default::default()
+            },
+            origin: crate::network_rules::Origin::User,
+        });
+        let values = settings("tun");
+        let plan = plan_with_dns_and_rules(&values, full(), Some(1053), Some(&document))
+            .expect("tun filter plan");
+        assert!(plan.rules.iter().any(|rule| {
+            rule.family == "iptables"
+                && rule.table == "filter"
+                && rule.chain == "BOX_FILTER_LOCAL"
+                && rule.args.iter().any(|arg| arg == "REJECT")
+        }));
+    }
+
+    #[test]
+    fn packaged_default_rules_compile_into_bypass_chains() {
+        let bytes = include_str!("../../../../box/network-rules.default.json");
+        let document: crate::network_rules::Document =
+            serde_json::from_str(bytes).expect("default rules");
+        let mut values = settings("tproxy");
+        values["ipv6"] = json!("false");
+        let plan =
+            plan_with_dns_and_rules(&values, full(), Some(1053), Some(&document)).expect("plan");
+        assert!(plan.rules.iter().any(|rule| {
+            rule.chain == "BOX_LOCAL_REDIRECT"
+                && rule.args.iter().any(|arg| arg == "192.168.0.0/16")
+                && rule.args.iter().any(|arg| arg == "RETURN")
+        }));
+        assert!(plan.rules.iter().any(|rule| {
+            rule.chain == "BOX_TPROXY"
+                && rule.args.iter().any(|arg| arg == "5353")
+                && rule.args.iter().any(|arg| arg == "RETURN")
+        }));
+    }
+
+    #[test]
+    fn local_udp_uses_tproxy_mark_in_tproxy_mode() {
+        let values = settings("tproxy");
+        let plan = plan(&values, full()).expect("tproxy plan");
+        assert!(plan.rules.iter().any(|rule| {
+            rule.table == "mangle"
+                && rule.chain == "BOX_LOCAL_UDP"
+                && rule.args.iter().any(|arg| arg == "MARK")
+        }));
+    }
+
+    #[test]
+    fn quic_disable_adds_filter_reject_rules() {
+        let mut values = settings("tproxy");
+        values["quic"] = json!("disable");
+        let plan = plan(&values, full()).expect("quic plan");
+        assert!(plan.rules.iter().any(|rule| {
+            rule.table == "filter"
+                && rule.chain == "BOX_QUIC_BLOCK"
+                && rule.args.iter().any(|arg| arg == "443")
+                && rule.args.iter().any(|arg| arg == "REJECT")
+        }));
+        assert!(plan.rules.iter().any(|rule| {
+            rule.table == "filter"
+                && rule.chain == "FORWARD"
+                && rule.args.iter().any(|arg| arg == "BOX_QUIC_BLOCK")
+        }));
+    }
+
+    #[test]
+    fn local_output_rules_follow_proxy_mode() {
+        let mut core = settings("tproxy");
+        core["proxy_mode"] = serde_json::json!("core");
+        let core_plan = plan(&core, full()).expect("core");
+        assert!(core_plan.rules.iter().any(|rule| {
+            rule.chain == "BOX_LOCAL_REDIRECT" && rule.args.iter().any(|arg| arg == "REDIRECT")
+        }));
+
+        let mut black = settings("tproxy");
+        black["proxy_mode"] = serde_json::json!("blacklist");
+        black["__proxy_uids"] = serde_json::json!([10001]);
+        let black_plan = plan(&black, full()).expect("blacklist");
+        assert!(black_plan.rules.iter().any(|rule| {
+            rule.chain == "BOX_LOCAL_REDIRECT"
+                && rule.args.iter().any(|arg| arg == "10001")
+                && rule.args.iter().any(|arg| arg == "RETURN")
+        }));
+        assert!(black_plan.rules.iter().any(|rule| {
+            rule.chain == "BOX_LOCAL_REDIRECT" && rule.args.iter().any(|arg| arg == "REDIRECT")
+        }));
+
+        let mut white = settings("tproxy");
+        white["proxy_mode"] = serde_json::json!("whitelist");
+        white["__proxy_uids"] = serde_json::json!([10002]);
+        let white_plan = plan(&white, full()).expect("whitelist");
+        assert!(white_plan.rules.iter().any(|rule| {
+            rule.chain == "BOX_LOCAL_REDIRECT"
+                && rule.args.iter().any(|arg| arg == "10002")
+                && rule.args.iter().any(|arg| arg == "REDIRECT")
+        }));
+    }
+
+    #[test]
+    fn enhance_plan_has_no_duplicate_chain_creation() {
+        let plan = plan(&settings("enhance"), full()).expect("enhance plan");
+        plan.validate()
+            .expect("enhance plan must be structurally valid");
+        assert!(plan.rules.iter().any(|rule| rule.chain == "BOX_TPROXY"));
+        assert!(plan.rules.iter().any(|rule| rule.chain == "BOX_REDIRECT"));
+    }
+
+    #[test]
+    fn tun_has_bypass_rules() {
         let plan = plan(&settings("tun"), full()).expect("plan");
-        assert!(plan.rules.is_empty());
+        assert!(plan
+            .rules
+            .iter()
+            .any(|rule| rule.chain == "BOX_TUN_BYPASS_PRE"));
+        assert!(plan
+            .rules
+            .iter()
+            .any(|rule| rule.chain == "BOX_TUN_BYPASS_OUT"));
         assert!(!plan.degraded);
     }
 
@@ -1582,7 +3111,31 @@ mod tests {
         let redirect = plan(&settings("redirect"), full()).expect("redirect");
         assert!(!redirect.rules.is_empty());
         let mixed = plan(&settings("mixed"), full()).expect("mixed");
-        assert!(mixed.rules.len() > tproxy.rules.len());
+        assert!(mixed.rules.iter().any(|rule| rule.chain == "BOX_REDIRECT"));
+        assert!(mixed
+            .rules
+            .iter()
+            .any(|rule| rule.chain == "BOX_TUN_BYPASS_PRE"));
+        assert!(!mixed.rules.iter().any(|rule| rule.chain == "BOX_TPROXY"));
+    }
+
+    #[test]
+    fn non_tun_modes_emit_dns_hijack_rules() {
+        for mode in ["tproxy", "redirect", "mixed", "enhance"] {
+            let mut values = settings(mode);
+            values["dns_hijack_udp"] = serde_json::json!("true");
+            let plan = super::plan_with_dns(&values, full(), Some(1053)).expect("dns plan");
+            assert!(
+                plan.rules.iter().any(|rule| rule.chain == "BOX_DNS"),
+                "{mode} missing DNS chain"
+            );
+            assert!(
+                plan.rules
+                    .iter()
+                    .any(|rule| rule.args.iter().any(|arg| arg == "1053")),
+                "{mode} missing DNS port"
+            );
+        }
     }
 
     #[test]
@@ -1750,9 +3303,11 @@ mod tests {
 
     #[test]
     fn force_proxy_cidrs_precede_local_bypass() {
-        let mut values = settings("mixed");
+        let mut values = settings("tproxy");
         values["force_proxy_cidrs"] = serde_json::json!(["203.0.113.0/24"]);
-        let plan = plan(&values, full()).expect("force cidrs");
+        let rules = default_rule_document();
+        let plan =
+            plan_with_dns_and_rules(&values, full(), None, Some(&rules)).expect("force cidrs");
         let tproxy = plan
             .rules
             .iter()
@@ -1770,18 +3325,13 @@ mod tests {
             })
             .expect("local bypass");
         assert!(tproxy < local);
-        assert!(plan.rules.iter().any(|rule| {
-            rule.chain == "BOX_REDIRECT"
-                && rule.args.iter().any(|arg| arg == "203.0.113.0/24")
-                && rule.args.iter().any(|arg| arg == "REDIRECT")
-        }));
     }
 
     #[test]
     fn cnip_ipset_bypass_rules_are_generated() {
         let mut caps = full();
         caps.ipset = true;
-        let mut values = settings("mixed");
+        let mut values = settings("tproxy");
         values["bypass_cn_ip"] = serde_json::json!("true");
         values["bypass_cn_ip_v4"] = serde_json::json!("true");
         values["cnip_mode"] = serde_json::json!("ipset");
@@ -1800,7 +3350,7 @@ mod tests {
             .iter()
             .filter(|rule| rule.args.iter().any(|arg| arg == "--match-set"))
             .count();
-        assert!(bypass_count >= 2, "both tproxy and redirect need bypass");
+        assert!(bypass_count >= 1, "CNIP bypass rule must be present");
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub fn run(raw: Vec<String>) -> i32 {
         "lists" => run_lists(&args),
         "sub" => run_sub(&args),
         "rule-profile" => run_rule_profile(&args),
+        "network-rules" => run_network_rules(&args),
         "task" => run_task(&args),
         "task-run" => run_task_runner(&args),
         "service" => run_service(&args),
@@ -65,7 +66,7 @@ pub fn run(raw: Vec<String>) -> i32 {
         "version" => run_version(&args),
         "" => {
             let error = BoxError::usage(
-                "usage: boxctl [--json] [--socket PATH] <settings|config|core|lists|sub|rule-profile|task|logs|reset|status|doctor|version|daemon>",
+                "usage: boxctl [--json] [--socket PATH] <settings|config|core|lists|sub|rule-profile|network-rules|task|logs|reset|status|doctor|version|daemon>",
             );
             print_error(&error, args.json)
         }
@@ -450,6 +451,114 @@ fn run_sub(args: &Args) -> i32 {
     match send_request(&socket, method, params, args.timeout) {
         Ok(response) => finish(response, args.json),
         Err(error) => print_error(&error, args.json),
+    }
+}
+
+fn run_network_rules(args: &Args) -> i32 {
+    let Some(subcommand) = args.positional.get(1).map(String::as_str) else {
+        return print_error(
+            &BoxError::usage("network-rules requires get/preview/apply/reset"),
+            args.json,
+        );
+    };
+    let socket = socket_path(args);
+    match subcommand {
+        "get" => {
+            if args.positional.len() != 2 {
+                return print_error(
+                    &BoxError::usage("network-rules get takes no arguments"),
+                    args.json,
+                );
+            }
+            match send_request(&socket, "network_rules.get", json!({}), args.timeout) {
+                Ok(response) => finish(response, args.json),
+                Err(error) => print_error(&error, args.json),
+            }
+        }
+        "preview" | "apply" => {
+            let file_arg = args.positional.get(2);
+            if args.stdin && file_arg.is_some() {
+                return print_error(
+                    &BoxError::usage("network-rules mutation accepts either a file or --stdin"),
+                    args.json,
+                );
+            }
+            if !args.stdin && file_arg.is_none() {
+                return print_error(
+                    &BoxError::usage("network-rules mutation requires a JSON file or --stdin"),
+                    args.json,
+                );
+            }
+            if args.positional.len() > 3 {
+                return print_error(
+                    &BoxError::usage("network-rules mutation takes at most one file"),
+                    args.json,
+                );
+            }
+            let source = if args.stdin {
+                let mut source = String::new();
+                if let Err(error) = io::stdin().read_to_string(&mut source) {
+                    return print_error(&BoxError::from(error), args.json);
+                }
+                source
+            } else {
+                let path = file_arg.expect("file");
+                match fs::read_to_string(path) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        return print_error(
+                            &BoxError::from(error).with_detail(format!("cannot read {path}")),
+                            args.json,
+                        );
+                    }
+                }
+            };
+            if source.trim().is_empty() {
+                return print_error(&BoxError::usage("network-rules input is empty"), args.json);
+            }
+            let value: Value = match serde_json::from_str(&source) {
+                Ok(value) => value,
+                Err(error) => {
+                    return print_error(
+                        &BoxError::validation("network-rules input is not valid JSON")
+                            .with_detail(error.to_string()),
+                        args.json,
+                    );
+                }
+            };
+            let method = if subcommand == "preview" {
+                "network_rules.preview"
+            } else {
+                "network_rules.apply"
+            };
+            match send_request(&socket, method, value, args.timeout) {
+                Ok(response) => finish(response, args.json),
+                Err(error) => print_error(&error, args.json),
+            }
+        }
+        "reset" | "clear" => {
+            let all =
+                subcommand == "clear" || args.positional.get(2).is_some_and(|value| value == "all");
+            if args.positional.len() > 3 {
+                return print_error(
+                    &BoxError::usage("network-rules reset takes at most 'all'"),
+                    args.json,
+                );
+            }
+            match send_request(
+                &socket,
+                "network_rules.reset",
+                json!({"all": all}),
+                args.timeout,
+            ) {
+                Ok(response) => finish(response, args.json),
+                Err(error) => print_error(&error, args.json),
+            }
+        }
+        other => print_error(
+            &BoxError::usage(format!("unknown network-rules command: {other}")),
+            args.json,
+        ),
     }
 }
 

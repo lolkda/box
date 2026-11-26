@@ -267,6 +267,8 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [saving, setSaving] = useState(false);
+  const [restartNeeded, setRestartNeeded] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [packagePickerFor, setPackagePickerFor] = useState<string | null>(null);
   const [tokenSet, setTokenSet] = useState(false);
   const [tokenPreview, setTokenPreview] = useState("");
@@ -304,9 +306,13 @@ export function SettingsPage() {
   const onSubmit = async (values: SettingsFormValues) => {
     setSaving(true);
     try {
+      const previousFindProcess = settingsQuery.data?.find_process_mode;
       const token = formState.dirtyFields.token ? values.token : undefined;
       await api.applySettings(values.settings, values.arrays, token);
       toast({ title: "设置已保存", tone: "success" });
+      if (previousFindProcess !== values.settings.find_process_mode) {
+        setRestartNeeded(true);
+      }
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
       await queryClient.invalidateQueries({ queryKey: queryKeys.status });
       reset(values);
@@ -314,6 +320,21 @@ export function SettingsPage() {
       toast({ title: "保存设置失败", description: getErrorMessage(error), tone: "error" });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const restartCore = async () => {
+    setRestarting(true);
+    try {
+      await api.service("restart");
+      toast({ title: "核心已重启，进程匹配模式已生效", tone: "success" });
+      setRestartNeeded(false);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.status });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
+    } catch (error) {
+      toast({ title: "重启核心失败", description: getErrorMessage(error), tone: "error" });
+    } finally {
+      setRestarting(false);
     }
   };
 
@@ -338,6 +359,14 @@ export function SettingsPage() {
         <PageSkeleton />
       ) : (
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
+          {restartNeeded ? (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-warning/40 bg-warning/10 px-3 py-2.5 text-xs text-fg" role="status">
+              <span>进程匹配模式已保存；重启核心后才会改变实际运行值。</span>
+              <Button variant="secondary" size="sm" loading={restarting} onClick={() => void restartCore()}>
+                重启核心
+              </Button>
+            </div>
+          ) : null}
           <Accordion defaultValue={["basic", "network"]}>
             {settingsGroups.map((group) => (
               <AccordionItem key={group.id} value={group.id} title={group.title} description={group.description}>

@@ -1,0 +1,10 @@
+proxies: []
+proxy-providers:
+  a:
+    type: http
+    url: "http://fixture/normal.yaml"
+    path: ./proxy_provider/a.yaml
+  b:
+    type: http
+    url: "http://fixture/normal2.yaml"
+    path: ./proxy_provider/b.yaml

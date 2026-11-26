@@ -50,6 +50,10 @@ pub struct Paths {
     pub control_state: PathBuf,
     pub cnip_v4_file: PathBuf,
     pub cnip_v6_file: PathBuf,
+    pub ruleset_prefix_state: PathBuf,
+    pub provider_defs_dir: PathBuf,
+    pub network_rules: PathBuf,
+    pub network_rules_default: PathBuf,
 }
 
 impl Paths {
@@ -109,6 +113,10 @@ impl Paths {
             control_state: home.join("state").join("control.json"),
             cnip_v4_file: home.join("run").join("state").join("cn_ip.txt"),
             cnip_v6_file: home.join("run").join("state").join("cn_ipv6.txt"),
+            ruleset_prefix_state: home.join("run").join("state").join("ruleset_prefix"),
+            provider_defs_dir: home.join("run").join("state").join("provider-defs"),
+            network_rules: home.join("run").join("state").join("network-rules.json"),
+            network_rules_default: home.join("network-rules.default.json"),
             run_dir,
             home,
         }

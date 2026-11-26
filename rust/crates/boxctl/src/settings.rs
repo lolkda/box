@@ -403,6 +403,7 @@ fn validate_string(key: &str, value: &str) -> Result<()> {
             value,
             &["tun", "tproxy", "redirect", "mixed", "enhance"],
         )?,
+        "find_process_mode" => require_enum(key, value, &["always", "strict", "off"])?,
         "subscription_mode" => require_enum(key, value, &["auto", "provider"])?,
         "proxy_mode" => require_enum(key, value, &["core", "blacklist", "whitelist"])?,
         "dns_hijack_mode" => require_enum(key, value, &["disable", "tproxy", "redirect"])?,
@@ -674,12 +675,34 @@ mod tests {
     #[test]
     fn defaults_match_schema_and_validate() {
         let (_root, store) = open_store();
-        assert_eq!(store.defaults.len(), 52);
+        assert_eq!(store.defaults.len(), 53);
         assert_eq!(store.revision, 0);
         let data = store.get().expect("get");
         assert_eq!(data["network_mode"], "tun");
         assert_eq!(data["sensitive"]["githubtoken"]["set"], false);
         assert!(data["sensitive"]["githubtoken"].get("preview").is_none());
+    }
+
+    #[test]
+    fn find_process_mode_accepts_only_known_values() {
+        let (_root, mut store) = open_store();
+        for value in ["always", "strict", "off"] {
+            store
+                .set(SetParams {
+                    key: "find_process_mode".to_string(),
+                    value: value.to_string(),
+                    if_revision: None,
+                })
+                .expect("valid find process mode");
+        }
+        let error = store
+            .set(SetParams {
+                key: "find_process_mode".to_string(),
+                value: "sometimes".to_string(),
+                if_revision: None,
+            })
+            .expect_err("invalid find process mode");
+        assert_eq!(error.code, crate::error::ErrorCode::Validation);
     }
 
     #[test]

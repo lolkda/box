@@ -1,0 +1,182 @@
+[
+  {
+    "case": "normal",
+    "legacy": {
+      "add_rc": 0,
+      "update_rc": 0,
+      "subscriptions": "normal|http://fixture/normal.yaml\n",
+      "provider_files": [
+        {
+          "path": "normal.yaml",
+          "sha256": "f1000fcc417e54f7cf37631dcd90b5279428605608641c6a79b0e756881153ab",
+          "yaml": {
+            "proxies": [
+              {
+                "name": "HK1",
+                "type": "ss",
+                "server": "1.1.1.1",
+                "port": 443,
+                "cipher": "aes-256-gcm",
+                "password": "pass"
+              },
+              {
+                "name": "HK2",
+                "type": "ss",
+                "server": "2.2.2.2",
+                "port": 443,
+                "cipher": "aes-256-gcm",
+                "password": "pass"
+              }
+            ]
+          }
+        }
+      ],
+      "config_providers": {
+        "normal": {
+          "type": "http",
+          "url": "http://fixture/normal.yaml",
+          "path": "./proxy_provider/normal.yaml",
+          "interval": 86400,
+          "health-check": {
+            "enable": true,
+            "url": "http://www.gstatic.com/generate_204",
+            "interval": 300,
+            "timeout": 5000,
+            "tolerance": 100
+          }
+        }
+      },
+      "manifest": ""
+    },
+    "rust_observed": {
+      "add_rc": 0,
+      "update_rc": 0
+    }
+  },
+  {
+    "case": "normal.b64",
+    "legacy": {
+      "add_rc": 0,
+      "update_rc": 1,
+      "subscriptions": "normal.b64|http://fixture/normal.b64\n",
+      "provider_files": [],
+      "config_providers": {},
+      "manifest": ""
+    },
+    "rust_observed": {
+      "add_rc": 0,
+      "update_rc": 0
+    }
+  },
+  {
+    "case": "aggregate",
+    "legacy": {
+      "add_rc": 0,
+      "update_rc": 0,
+      "subscriptions": "aggregate|http://fixture/aggregate.yaml\n",
+      "provider_files": [
+        {
+          "path": "a.yaml",
+          "sha256": "f1000fcc417e54f7cf37631dcd90b5279428605608641c6a79b0e756881153ab",
+          "yaml": {
+            "proxies": [
+              {
+                "name": "HK1",
+                "type": "ss",
+                "server": "1.1.1.1",
+                "port": 443,
+                "cipher": "aes-256-gcm",
+                "password": "pass"
+              },
+              {
+                "name": "HK2",
+                "type": "ss",
+                "server": "2.2.2.2",
+                "port": 443,
+                "cipher": "aes-256-gcm",
+                "password": "pass"
+              }
+            ]
+          }
+        },
+        {
+          "path": "b.yaml",
+          "sha256": "26076b741c7803be0de79f8bcec1972307003aa468949a9731787e4634427019",
+          "yaml": {
+            "proxies": [
+              {
+                "name": "JP1",
+                "type": "trojan",
+                "server": "3.3.3.3",
+                "port": 443,
+                "password": "pass"
+              }
+            ]
+          }
+        }
+      ],
+      "config_providers": {
+        "a": {
+          "type": "http",
+          "url": "http://fixture/normal.yaml",
+          "path": "./proxy_provider/a.yaml"
+        },
+        "b": {
+          "type": "http",
+          "url": "http://fixture/normal2.yaml",
+          "path": "./proxy_provider/b.yaml"
+        }
+      },
+      "manifest": "aggregate|a|http://fixture/normal.yaml|/tmp/legacy-oracle-xpsa3kqy/legacy/box/mihomo/proxy_provider/a.yaml\naggregate|b|http://fixture/normal2.yaml|/tmp/legacy-oracle-xpsa3kqy/legacy/box/mihomo/proxy_provider/b.yaml\n"
+    },
+    "rust_observed": {
+      "add_rc": 0,
+      "update_rc": 0
+    }
+  },
+  {
+    "case": "mixed",
+    "legacy": {
+      "add_rc": 0,
+      "update_rc": 1,
+      "subscriptions": "mixed|http://fixture/mixed.yaml\n",
+      "provider_files": [],
+      "config_providers": {},
+      "manifest": ""
+    },
+    "rust_observed": {
+      "add_rc": 0,
+      "update_rc": 3
+    }
+  },
+  {
+    "case": "empty",
+    "legacy": {
+      "add_rc": 0,
+      "update_rc": 1,
+      "subscriptions": "empty|http://fixture/empty.yaml\n",
+      "provider_files": [],
+      "config_providers": {},
+      "manifest": ""
+    },
+    "rust_observed": {
+      "add_rc": 0,
+      "update_rc": 1
+    }
+  },
+  {
+    "case": "fail",
+    "legacy": {
+      "add_rc": 0,
+      "update_rc": 1,
+      "subscriptions": "fail|http://fixture/does-not-exist.yaml\n",
+      "provider_files": [],
+      "config_providers": {},
+      "manifest": ""
+    },
+    "rust_observed": {
+      "add_rc": 0,
+      "update_rc": 1
+    }
+  }
+]

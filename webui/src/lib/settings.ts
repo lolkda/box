@@ -52,6 +52,11 @@ export const settingsGroups: SettingsGroup[] = [
         { value: "mixed", label: "Mixed" },
         { value: "enhance", label: "Enhance" },
       ] },
+      { key: "find_process_mode", label: "进程匹配模式", kind: "select", options: [
+        { value: "always", label: "Always：始终匹配进程（CPU 占用较高）" },
+        { value: "strict", label: "Strict：规则需要时才匹配（推荐）" },
+        { value: "off", label: "Off：不匹配进程（PROCESS-NAME 规则失效）" },
+      ], hint: "Always 持续遍历进程，功能最全但可能增加耗电和 CPU 占用；Strict 只在 PROCESS-NAME/PROCESS-PATH 规则需要时查询，推荐；Off 完全不匹配进程，依赖进程名的规则会失效。保存后需重启核心生效。" },
       { key: "tproxy_port", label: "TProxy 端口", kind: "number", inputMode: "numeric", placeholder: "9898" },
       { key: "redir_port", label: "Redirect 端口", kind: "number", inputMode: "numeric", placeholder: "9797" },
       { key: "ipv6", label: "IPv6", kind: "switch" },

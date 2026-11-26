@@ -89,6 +89,75 @@ pub fn replace_sections(paths: &Paths, data: &Value) -> Result<Value> {
     apply(paths, params)
 }
 
+pub fn sync_ruleset_prefix(paths: &Paths, prefix: &str) -> Result<()> {
+    let old = crate::util::read_to_string_optional(&paths.ruleset_prefix_state)?
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let new = prefix.trim().trim_end_matches('/').to_string();
+    if old.is_empty() && new.is_empty() {
+        return Ok(());
+    }
+    if !paths.config.is_file() {
+        return Ok(());
+    }
+    let mut map = yaml::read_map(&paths.config)?;
+    let Some(providers) = map
+        .get_mut(YamlValue::String("rule-providers".to_string()))
+        .and_then(YamlValue::as_mapping_mut)
+    else {
+        crate::util::atomic_write(
+            &paths.ruleset_prefix_state,
+            format!("{new}\n").as_bytes(),
+            0o600,
+        )?;
+        return Ok(());
+    };
+    for provider in providers.values_mut() {
+        let Some(provider) = provider.as_mapping_mut() else {
+            continue;
+        };
+        let Some(url) = provider
+            .get(YamlValue::String("url".to_string()))
+            .and_then(YamlValue::as_str)
+        else {
+            continue;
+        };
+        let mut url = url.to_string();
+        if !old.is_empty() {
+            let prefix_with_slash = format!("{old}/");
+            if let Some(rest) = url.strip_prefix(&prefix_with_slash) {
+                url = rest.to_string();
+            }
+        }
+        if !new.is_empty() {
+            let prefix_with_slash = format!("{new}/");
+            if !url.starts_with(&prefix_with_slash) {
+                url = format!("{new}/{url}");
+            }
+        }
+        provider.insert(YamlValue::String("url".to_string()), YamlValue::String(url));
+    }
+    yaml::write_map(&paths.config, &map)?;
+    crate::util::atomic_write(
+        &paths.ruleset_prefix_state,
+        format!("{new}\n").as_bytes(),
+        0o600,
+    )?;
+    Ok(())
+}
+
+pub fn sync_ruleset_prefix_from_settings(paths: &Paths) -> Result<()> {
+    let prefix = crate::settings::SettingsStore::open(paths.clone())
+        .ok()
+        .and_then(|store| store.load().ok())
+        .and_then(|settings| settings.get("ruleset_prefix").cloned())
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
+    sync_ruleset_prefix(paths, &prefix)
+}
+
 pub fn delete(paths: &Paths) -> Result<Value> {
     if !paths.config.exists() {
         return Err(BoxError::new(
@@ -249,7 +318,7 @@ fn validate(params: &ApplyParams) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply, delete, get, ApplyParams};
+    use super::{apply, delete, get, sync_ruleset_prefix, ApplyParams};
     use crate::paths::Paths;
     use serde_json::{json, Map};
     use std::fs;
@@ -346,6 +415,44 @@ mod tests {
             apply(&paths, params(vec!["RULE-SET,missing,TEST"])).expect_err("missing provider");
         assert_eq!(error.code, crate::error::ErrorCode::Validation);
         assert_eq!(fs::read(&paths.config).expect("after"), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ruleset_prefix_rewrites_once_and_restores() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        let mut map = crate::yaml::read_map(&paths.config).expect("map");
+        let mut provider = serde_yaml::Mapping::new();
+        provider.insert(
+            serde_yaml::Value::String("type".to_string()),
+            serde_yaml::Value::String("http".to_string()),
+        );
+        provider.insert(
+            serde_yaml::Value::String("url".to_string()),
+            serde_yaml::Value::String("https://raw.githubusercontent.com/a/r.yaml".to_string()),
+        );
+        let mut providers = serde_yaml::Mapping::new();
+        providers.insert(
+            serde_yaml::Value::String("r".to_string()),
+            serde_yaml::Value::Mapping(provider),
+        );
+        map.insert(
+            serde_yaml::Value::String("rule-providers".to_string()),
+            serde_yaml::Value::Mapping(providers),
+        );
+        crate::yaml::write_map(&paths.config, &map).expect("write");
+        sync_ruleset_prefix(&paths, "https://ghfast.top").expect("prefix");
+        let first = fs::read_to_string(&paths.config).expect("first");
+        assert!(first.contains("https://ghfast.top/https://raw.githubusercontent.com/a/r.yaml"));
+        sync_ruleset_prefix(&paths, "https://ghfast.top").expect("prefix twice");
+        let second = fs::read_to_string(&paths.config).expect("second");
+        assert_eq!(first, second);
+        assert!(!second.contains("ghfast.top/https://ghfast.top"));
+        sync_ruleset_prefix(&paths, "").expect("clear");
+        let cleared = fs::read_to_string(&paths.config).expect("cleared");
+        assert!(cleared.contains("https://raw.githubusercontent.com/a/r.yaml"));
+        assert!(!cleared.contains("ghfast.top/https://raw.githubusercontent.com/a/r.yaml"));
         let _ = fs::remove_dir_all(root);
     }
 

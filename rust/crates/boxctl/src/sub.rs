@@ -278,7 +278,28 @@ pub fn remove(paths: &Paths, params: NameParams) -> Result<Value> {
         .retain(|line| parse_entry(line).is_none_or(|entry| entry.name != params.name));
     store.save(&paths.subscriptions)?;
     let safe = safe_name(&params.name);
+    let mut names = vec![params.name.clone()];
+    names.extend(provider_names_for_source(paths, &params.name)?);
+    let manifest =
+        util::read_to_string_optional(&paths.subscriptions_providers)?.unwrap_or_default();
+    let provider_paths = manifest
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('|');
+            (parts.next() == Some(params.name.as_str()))
+                .then(|| {
+                    let _ = parts.next();
+                    let _ = parts.next();
+                    parts.next().map(PathBuf::from)
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    remove_provider_defs(paths, &names)?;
     remove_manifest_source(paths, &params.name)?;
+    for path in provider_paths {
+        let _ = util::remove_file_if_exists(&path);
+    }
     let _ = util::remove_file_if_exists(&provider_file(paths, &safe));
     let _ =
         util::remove_file_if_exists(&provider_file(paths, &safe).with_extension("yaml.download"));
@@ -339,8 +360,15 @@ pub fn update(
         };
         match parse_aggregate(&bytes) {
             Ok(Some(specs)) => {
-                let aggregate =
-                    update_aggregate(paths, &entry.name, &specs, &entry_policy, keep_last_good);
+                let defs = parse_aggregate_defs(&bytes);
+                let aggregate = update_aggregate_with_defs(
+                    paths,
+                    &entry.name,
+                    &specs,
+                    &defs,
+                    &entry_policy,
+                    keep_last_good,
+                );
                 let _ = util::remove_file_if_exists(&temp);
                 match aggregate {
                     Ok((true, aggregate_failures)) => {
@@ -386,6 +414,7 @@ pub fn update(
     }
     if success > 0 {
         sync_proxy_providers(paths, &committed_providers)?;
+        crate::config::sync_ruleset_prefix_from_settings(paths)?;
         restart_core_if_running(paths)?;
     }
     if success == 0 && failures > 0 {
@@ -467,12 +496,6 @@ fn parse_aggregate(bytes: &[u8]) -> Result<Option<Vec<ProviderSpec>>> {
             ));
         };
         validate_url(url)?;
-        if !url.starts_with("https://") {
-            return Err(BoxError::new(
-                ErrorCode::Tls,
-                "aggregate proxy-provider URL must use https",
-            ));
-        }
         result.push(ProviderSpec {
             name: name.to_string(),
             url: url.to_string(),
@@ -481,6 +504,70 @@ fn parse_aggregate(bytes: &[u8]) -> Result<Option<Vec<ProviderSpec>>> {
     Ok(Some(result))
 }
 
+fn parse_aggregate_defs(bytes: &[u8]) -> std::collections::BTreeMap<String, YamlValue> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return std::collections::BTreeMap::new();
+    };
+    let Ok(YamlValue::Mapping(map)) = serde_yaml::from_str::<YamlValue>(text) else {
+        return std::collections::BTreeMap::new();
+    };
+    let Some(providers) = map
+        .get(YamlValue::String("proxy-providers".to_string()))
+        .and_then(YamlValue::as_mapping)
+    else {
+        return std::collections::BTreeMap::new();
+    };
+    providers
+        .iter()
+        .filter_map(|(name, value)| {
+            name.as_str()
+                .filter(|name| !name.is_empty())
+                .map(|name| (name.to_string(), value.clone()))
+        })
+        .collect()
+}
+
+fn write_provider_defs_cache(
+    paths: &Paths,
+    source: &str,
+    success: &[(String, String, PathBuf)],
+    defs: &std::collections::BTreeMap<String, YamlValue>,
+) -> Result<()> {
+    if defs.is_empty() {
+        return Ok(());
+    }
+    util::ensure_dir(&paths.provider_defs_dir, true)?;
+    let names = success
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut providers = Mapping::new();
+    for (name, definition) in defs {
+        if names.contains(name.as_str()) {
+            providers.insert(YamlValue::String(name.clone()), definition.clone());
+        }
+    }
+    if providers.is_empty() {
+        return Ok(());
+    }
+    let mut root = Mapping::new();
+    root.insert(
+        YamlValue::String("proxy-providers".to_string()),
+        YamlValue::Mapping(providers),
+    );
+    let text = serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|error| {
+        BoxError::internal("cannot serialize provider definitions").with_detail(error.to_string())
+    })?;
+    util::atomic_write(
+        &paths
+            .provider_defs_dir
+            .join(format!("{}.yaml", safe_name(source))),
+        text.as_bytes(),
+        0o600,
+    )
+}
+
+#[cfg(test)]
 fn update_aggregate(
     paths: &Paths,
     source: &str,
@@ -488,12 +575,39 @@ fn update_aggregate(
     policy: &Policy,
     keep_last_good: bool,
 ) -> Result<(bool, usize)> {
+    update_aggregate_with_defs(
+        paths,
+        source,
+        specs,
+        &std::collections::BTreeMap::new(),
+        policy,
+        keep_last_good,
+    )
+}
+
+fn update_aggregate_with_defs(
+    paths: &Paths,
+    source: &str,
+    specs: &[ProviderSpec],
+    defs: &std::collections::BTreeMap<String, YamlValue>,
+    policy: &Policy,
+    keep_last_good: bool,
+) -> Result<(bool, usize)> {
     util::ensure_dir(&paths.providers_dir, true)?;
-    let mut success = Vec::new();
-    let mut failures = 0;
     let existing = Store::load(&paths.subscriptions)?;
+    let manifest =
+        util::read_to_string_optional(&paths.subscriptions_providers)?.unwrap_or_default();
+    let mut seen = std::collections::BTreeSet::new();
+    // Validate the complete aggregate before touching any provider file. A
+    // conflict on the second provider must not leave the first one overwritten.
     for spec in specs {
         let safe = safe_name(&spec.name);
+        if !seen.insert(safe.clone()) {
+            return Err(BoxError::new(
+                ErrorCode::Conflict,
+                format!("aggregate provider name is duplicated: {}", spec.name),
+            ));
+        }
         if existing
             .entries()
             .iter()
@@ -507,10 +621,28 @@ fn update_aggregate(
                 ),
             ));
         }
+        if manifest.lines().any(|line| {
+            let mut parts = line.split('|');
+            let owner = parts.next().unwrap_or_default();
+            let name = parts.next().unwrap_or_default();
+            owner != source && !name.is_empty() && safe_name(name) == safe
+        }) {
+            return Err(BoxError::new(
+                ErrorCode::Conflict,
+                format!("aggregate provider conflicts with manifest: {}", spec.name),
+            ));
+        }
+    }
+    let mut aggregate_policy = policy.clone();
+    aggregate_policy.allow_http = true;
+    let mut success = Vec::new();
+    let mut failures = 0;
+    for spec in specs {
+        let safe = safe_name(&spec.name);
         let provider = provider_file(paths, &safe);
         let temp = provider.with_extension("yaml.download");
         let _ = util::remove_file_if_exists(&temp);
-        if download::download_to_file(&temp, &spec.url, policy, None).is_err() {
+        if download::download_to_file(&temp, &spec.url, &aggregate_policy, None).is_err() {
             let _ = util::remove_file_if_exists(&temp);
             failures += 1;
             if !keep_last_good {
@@ -544,8 +676,19 @@ fn update_aggregate(
     if success.is_empty() {
         return Ok((false, failures));
     }
+    let old_names = provider_names_for_source(paths, source).unwrap_or_default();
     write_manifest(paths, source, &success)?;
-    sync_proxy_providers(paths, &success)?;
+    let new_names = success
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let stale = old_names
+        .into_iter()
+        .filter(|name| !new_names.contains(name))
+        .collect::<Vec<_>>();
+    remove_provider_defs(paths, &stale)?;
+    write_provider_defs_cache(paths, source, &success, defs)?;
+    sync_proxy_providers_with_defs(paths, &success, Some(defs))?;
     Ok((true, failures))
 }
 
@@ -561,6 +704,14 @@ fn restart_core_if_running(paths: &Paths) -> Result<()> {
 }
 
 fn sync_proxy_providers(paths: &Paths, entries: &[(String, String, PathBuf)]) -> Result<()> {
+    sync_proxy_providers_with_defs(paths, entries, None)
+}
+
+fn sync_proxy_providers_with_defs(
+    paths: &Paths,
+    entries: &[(String, String, PathBuf)],
+    defs: Option<&std::collections::BTreeMap<String, YamlValue>>,
+) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
@@ -593,6 +744,10 @@ fn sync_proxy_providers(paths: &Paths, entries: &[(String, String, PathBuf)]) ->
             .file_name()
             .and_then(|value| value.to_str())
             .ok_or_else(|| BoxError::internal("provider path has no file name"))?;
+        let existing = providers
+            .get(YamlValue::String(name.clone()))
+            .and_then(YamlValue::as_mapping)
+            .cloned();
         let mut definition = Mapping::new();
         definition.insert(
             YamlValue::String("type".to_string()),
@@ -610,10 +765,109 @@ fn sync_proxy_providers(paths: &Paths, entries: &[(String, String, PathBuf)]) ->
             YamlValue::String("interval".to_string()),
             YamlValue::Number(86400.into()),
         );
+        let mut health = Mapping::new();
+        health.insert(
+            YamlValue::String("enable".to_string()),
+            YamlValue::Bool(true),
+        );
+        health.insert(
+            YamlValue::String("url".to_string()),
+            YamlValue::String("http://www.gstatic.com/generate_204".to_string()),
+        );
+        health.insert(
+            YamlValue::String("interval".to_string()),
+            YamlValue::Number(300.into()),
+        );
+        health.insert(
+            YamlValue::String("timeout".to_string()),
+            YamlValue::Number(5000.into()),
+        );
+        health.insert(
+            YamlValue::String("tolerance".to_string()),
+            YamlValue::Number(100.into()),
+        );
+        definition.insert(
+            YamlValue::String("health-check".to_string()),
+            YamlValue::Mapping(health),
+        );
+        if let Some(source_def) = defs
+            .and_then(|defs| defs.get(name))
+            .and_then(YamlValue::as_mapping)
+        {
+            for (key, value) in source_def {
+                let key_name = key.as_str().unwrap_or_default();
+                if matches!(key_name, "type" | "url" | "path" | "interval") {
+                    continue;
+                }
+                definition.insert(key.clone(), value.clone());
+            }
+        }
+        if let Some(existing) = existing {
+            for (key, value) in existing {
+                let key_name = key.as_str().unwrap_or_default();
+                if matches!(
+                    key_name,
+                    "type" | "url" | "path" | "interval" | "health-check"
+                ) {
+                    continue;
+                }
+                definition.insert(key, value);
+            }
+        }
         providers.insert(
             YamlValue::String(name.clone()),
             YamlValue::Mapping(definition),
         );
+    }
+    let bytes = serde_yaml::to_string(&value).map_err(|error| {
+        BoxError::internal("cannot serialize provider config").with_detail(error.to_string())
+    })?;
+    util::atomic_write(&paths.config, bytes.as_bytes(), 0o600)
+}
+
+fn provider_names_for_source(paths: &Paths, source: &str) -> Result<Vec<String>> {
+    let raw = util::read_to_string_optional(&paths.subscriptions_providers)?.unwrap_or_default();
+    Ok(raw
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('|');
+            (parts.next() == Some(source))
+                .then(|| parts.next().map(str::to_string))
+                .flatten()
+        })
+        .filter(|name| !name.is_empty())
+        .collect())
+}
+
+fn remove_provider_defs(paths: &Paths, names: &[String]) -> Result<()> {
+    if names.is_empty() || !paths.config.is_file() {
+        return Ok(());
+    }
+    let auto_modify = crate::settings::SettingsStore::open(paths.clone())
+        .ok()
+        .and_then(|store| store.load().ok())
+        .and_then(|settings| settings.get("auto_modify_config").cloned())
+        .and_then(|value| value.as_str().map(|value| value == "true"))
+        .unwrap_or(true);
+    if !auto_modify {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&paths.config)
+        .map_err(|error| BoxError::from(error).with_detail("cannot read mihomo config"))?;
+    let mut value: YamlValue = serde_yaml::from_str(&text).map_err(|error| {
+        BoxError::validation("mihomo config is not valid YAML").with_detail(error.to_string())
+    })?;
+    let Some(mapping) = value.as_mapping_mut() else {
+        return Ok(());
+    };
+    let Some(providers) = mapping
+        .get_mut(YamlValue::String("proxy-providers".to_string()))
+        .and_then(YamlValue::as_mapping_mut)
+    else {
+        return Ok(());
+    };
+    for name in names {
+        providers.remove(YamlValue::String(name.clone()));
     }
     let bytes = serde_yaml::to_string(&value).map_err(|error| {
         BoxError::internal("cannot serialize provider config").with_detail(error.to_string())
@@ -812,6 +1066,38 @@ pub fn set_enabled(
     store.save(&paths.subscriptions)?;
     let safe = safe_name(&params.name);
     let missing = !provider_file(paths, &safe).exists();
+    if auto_modify {
+        if enabled {
+            let mut entries = Vec::new();
+            if !missing {
+                if let Some(entry) = store.find(&params.name) {
+                    entries.push((
+                        entry.name.clone(),
+                        entry.url.clone(),
+                        provider_file(paths, &safe),
+                    ));
+                }
+            }
+            for line in util::read_to_string_optional(&paths.subscriptions_providers)?
+                .unwrap_or_default()
+                .lines()
+            {
+                let mut parts = line.split('|');
+                if parts.next() != Some(params.name.as_str()) {
+                    continue;
+                }
+                let Some(name) = parts.next() else { continue };
+                let Some(url) = parts.next() else { continue };
+                let Some(path) = parts.next() else { continue };
+                entries.push((name.to_string(), url.to_string(), PathBuf::from(path)));
+            }
+            sync_proxy_providers(paths, &entries)?;
+        } else {
+            let mut names = vec![params.name.clone()];
+            names.extend(provider_names_for_source(paths, &params.name)?);
+            remove_provider_defs(paths, &names)?;
+        }
+    }
     Ok(json!({
         "name": params.name,
         "enabled": enabled,
@@ -826,7 +1112,34 @@ fn item(paths: &Paths, entry: &Entry, global_ua: &str, detail: bool) -> Result<V
     let provider = provider_file(paths, &safe);
     let provider_count = manifest_count(paths, &entry.name)?;
     let (state, size, updated) = if provider_count > 0 {
-        ("aggregated", 0, String::new())
+        let manifest =
+            util::read_to_string_optional(&paths.subscriptions_providers)?.unwrap_or_default();
+        let mut total = 0u64;
+        let mut latest = 0u64;
+        for line in manifest.lines() {
+            let mut parts = line.split('|');
+            if parts.next() != Some(entry.name.as_str()) {
+                continue;
+            }
+            let _ = parts.next();
+            let _ = parts.next();
+            let Some(path) = parts.next() else { continue };
+            let Ok(metadata) = fs::metadata(path) else {
+                continue;
+            };
+            total = total.saturating_add(metadata.len());
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                    latest = latest.max(duration.as_secs());
+                }
+            }
+        }
+        let updated = if latest > 0 {
+            util::format_unix_utc(latest)
+        } else {
+            String::new()
+        };
+        ("aggregated", total, updated)
     } else if provider.is_file() {
         let metadata = fs::metadata(&provider).ok();
         let size = metadata.as_ref().map_or(0, |value| value.len());
@@ -1021,9 +1334,11 @@ fn not_found(name: &str) -> BoxError {
 #[cfg(test)]
 mod tests {
     use super::{
-        add, get, list, parse_aggregate, parse_provider, remove, set, set_enabled, AddParams,
-        NameParams, SetParams,
+        add, get, list, parse_aggregate, parse_aggregate_defs, parse_provider, remove, set,
+        set_enabled, sync_proxy_providers, update_aggregate, AddParams, NameParams, ProviderSpec,
+        SetParams,
     };
+    use crate::download::Policy;
     use crate::paths::Paths;
     use base64::Engine;
     use std::fs;
@@ -1037,6 +1352,13 @@ mod tests {
         let root = std::env::temp_dir().join(format!("boxctl-sub-{}-{suffix}", std::process::id()));
         fs::create_dir_all(root.join("mihomo")).expect("mkdir");
         root
+    }
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
     }
 
     fn ua() -> &'static str {
@@ -1087,6 +1409,57 @@ mod tests {
             .as_array()
             .expect("items")
             .is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disabling_subscription_removes_provider_definition() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::copy(
+            repo_root().join("box/mihomo/config.yaml"),
+            root.join("mihomo/config.yaml"),
+        )
+        .expect("config");
+        add(
+            &paths,
+            AddParams {
+                name: Some("p".to_string()),
+                url: "https://example.com/p.yaml".to_string(),
+                user_agent: None,
+            },
+            ua(),
+        )
+        .expect("add");
+        fs::create_dir_all(root.join("mihomo/proxy_provider")).expect("dir");
+        let provider = root.join("mihomo/proxy_provider/p.yaml");
+        fs::write(&provider, b"proxies: []\n").expect("provider");
+        sync_proxy_providers(
+            &paths,
+            &[(
+                "p".to_string(),
+                "https://example.com/p.yaml".to_string(),
+                provider,
+            )],
+        )
+        .expect("sync");
+        let before = crate::config::get(&paths).expect("get");
+        assert!(before["rule-providers"].is_object());
+        assert!(fs::read_to_string(root.join("mihomo/config.yaml"))
+            .expect("read")
+            .contains("p:"));
+        set_enabled(
+            &paths,
+            NameParams {
+                name: "p".to_string(),
+            },
+            false,
+            true,
+            "global-agent/1.0",
+        )
+        .expect("disable");
+        let text = fs::read_to_string(root.join("mihomo/config.yaml")).expect("read");
+        assert!(!text.lines().any(|line| line.trim() == "p:"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1177,6 +1550,88 @@ mod tests {
         assert_eq!(mixed.code, crate::error::ErrorCode::Content);
         let plain = parse_aggregate(b"proxies: []\n").expect("plain");
         assert!(plain.is_none());
+    }
+
+    #[test]
+    fn aggregate_parser_preserves_provider_specific_fields() {
+        let defs = parse_aggregate_defs(
+            b"proxy-providers:\n  p:\n    url: https://example.com/p.yaml\n    filter: 'HK|JP'\n    override:\n      udp: true\n",
+        );
+        let def = defs
+            .get("p")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("definition");
+        assert_eq!(
+            def.get(serde_yaml::Value::String("filter".to_string()))
+                .and_then(serde_yaml::Value::as_str),
+            Some("HK|JP")
+        );
+        assert!(def.contains_key(serde_yaml::Value::String("override".to_string())));
+    }
+
+    #[test]
+    fn aggregate_parser_accepts_http_provider_urls() {
+        let parsed =
+            parse_aggregate(b"proxy-providers:\n  p1:\n    url: http://example.com/p.yaml\n")
+                .expect("parse")
+                .expect("aggregate");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "http://example.com/p.yaml");
+    }
+
+    #[test]
+    fn aggregate_conflict_prevalidates_before_writing() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::create_dir_all(root.join("run")).expect("run");
+        fs::write(
+            paths.subscriptions.clone(),
+            "other|https://example.com/other\n",
+        )
+        .expect("subscriptions");
+        let specs = vec![
+            ProviderSpec {
+                name: "first".to_string(),
+                url: "http://example.com/a.yaml".to_string(),
+            },
+            ProviderSpec {
+                name: "other".to_string(),
+                url: "http://example.com/b.yaml".to_string(),
+            },
+        ];
+        let error = update_aggregate(&paths, "aggregate", &specs, &Policy::default(), true)
+            .expect_err("conflict");
+        assert_eq!(error.code, crate::error::ErrorCode::Conflict);
+        assert!(!paths.providers_dir.join("first.yaml").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_definition_contains_health_check() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::copy(
+            repo_root().join("box/mihomo/config.yaml"),
+            root.join("mihomo/config.yaml"),
+        )
+        .expect("config");
+        fs::create_dir_all(root.join("mihomo/proxy_provider")).expect("provider dir");
+        fs::write(root.join("mihomo/proxy_provider/p.yaml"), b"proxies: []\n").expect("provider");
+        sync_proxy_providers(
+            &paths,
+            &[(
+                "p".to_string(),
+                "https://example.com/p.yaml".to_string(),
+                root.join("mihomo/proxy_provider/p.yaml"),
+            )],
+        )
+        .expect("sync");
+        let config = crate::config::get(&paths).expect("get");
+        assert!(config["rule-providers"].is_object());
+        let text = fs::read_to_string(root.join("mihomo/config.yaml")).expect("read");
+        assert!(text.contains("health-check"));
+        assert!(text.contains("tolerance"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

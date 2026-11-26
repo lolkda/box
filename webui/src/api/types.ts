@@ -214,3 +214,86 @@ export interface AppListsPayload {
     ignore: string[];
   };
 }
+
+export type NetworkRuleAction = "bypass" | "reject";
+export type NetworkRuleScope = "local" | "forward" | "dns" | "filter";
+export type NetworkRuleMode = "tun" | "tproxy" | "redirect" | "mixed" | "enhance";
+export type NetworkRuleFamily = "ipv4" | "ipv6" | "both";
+export type NetworkRuleProtocol = "any" | "tcp" | "udp";
+export type NetworkRuleDstType = "local" | "multicast" | "broadcast";
+
+export interface NetworkRuleMatch {
+  dst_cidrs: string[];
+  src_cidrs: string[];
+  dst_ports: string[];
+  src_ports: string[];
+  src_ifaces: string[];
+  dst_ifaces: string[];
+  uids: number[];
+  gids: number[];
+  dst_types: NetworkRuleDstType[];
+}
+
+export interface NetworkRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  action: NetworkRuleAction;
+  scopes: NetworkRuleScope[];
+  modes: NetworkRuleMode[];
+  family: NetworkRuleFamily;
+  protocol: NetworkRuleProtocol;
+  match: NetworkRuleMatch;
+  origin: "default" | "user";
+}
+
+export interface NetworkSystemRule {
+  id: string;
+  name: string;
+  description: string;
+  scopes: string[];
+  readOnly: true;
+}
+
+export interface NetworkRulesData {
+  schema_version: number;
+  revision: number;
+  defaults_version: string;
+  rules: NetworkRule[];
+  tombstones: string[];
+  system: NetworkSystemRule[];
+  warnings: string[];
+}
+
+export interface NetworkRuleDiff {
+  added: number;
+  updated: number;
+  removed: number;
+  reordered: boolean;
+  enabled: number;
+  disabled: number;
+  added_ids: string[];
+  removed_ids: string[];
+}
+
+export interface NetworkRulesPreview {
+  document: Omit<NetworkRulesData, "system" | "warnings">;
+  diff: NetworkRuleDiff;
+  warnings: string[];
+  plan?: {
+    available: boolean;
+    effective_mode?: string;
+    rule_count?: number;
+    chains?: Record<string, number>;
+    warnings?: string[];
+  };
+}
+
+export interface NetworkRulesApplyResult {
+  schema_version: number;
+  revision: number;
+  defaults_version: string;
+  rules: NetworkRule[];
+  tombstones: string[];
+  applied?: boolean;
+}

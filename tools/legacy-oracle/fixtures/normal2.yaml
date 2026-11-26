@@ -1,0 +1,6 @@
+proxies:
+  - name: JP1
+    type: trojan
+    server: 3.3.3.3
+    port: 443
+    password: pass

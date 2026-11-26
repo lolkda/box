@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{BoxError, ErrorCode, Result};
 use crate::network;
+use crate::network_rules;
 use crate::paths::Paths;
 use crate::settings::SettingsStore;
 use crate::upgrade;
@@ -82,9 +83,12 @@ fn start_with_window(
     let tx = begin_tx(paths, "start")?;
     set_phase(paths, &tx, "preparing", None)?;
     let mode = selected_mode(paths);
-    if mode.as_deref() != Some("tun") {
+    if !matches!(mode.as_deref(), Some("tun") | Some("mixed")) {
         disable_tun_candidate(paths, &tx.candidate)?;
+    } else if mode.as_deref() == Some("mixed") {
+        enable_tun_candidate(paths, &tx.candidate)?;
     }
+    prepare_candidate(paths, &tx.candidate, mode.as_deref())?;
     if !check_candidate(paths, &tx.candidate) {
         fail_manual(paths, &tx, "core config validation failed")?;
         return Err(BoxError::new(
@@ -150,8 +154,8 @@ fn start_with_window(
             .with_detail(plan.warnings.join("; ")));
         }
         if !plan.rules.is_empty() {
-            // Remove leftovers from an interrupted previous apply before adding.
-            let _ = network::cleanup(plan, runner);
+            // Remove leftovers from any previous mode before adding the new plan.
+            let _ = cleanup_all_network(paths, runner);
             if let Err(error) = network::apply(plan, runner) {
                 let _ = set_phase(paths, &tx, "rolling_back", Some(&error.message));
                 if fault == Some("rolling_back") {
@@ -243,17 +247,10 @@ fn stop_internal(paths: &Paths, interrupt_tasks: bool) -> Result<Value> {
     }
     let tx = begin_tx(paths, "stop")?;
     set_phase(paths, &tx, "switching", None)?;
-    let mut rules_cleaned = false;
-    if let Some(plan) = load_network_plan(paths)? {
-        if !plan.rules.is_empty() {
-            let mut runner = network::SystemRunner;
-            if let Err(error) = network::cleanup(&plan, &mut runner) {
-                fail_manual(paths, &tx, &error.message)?;
-                return Err(error);
-            }
-            rules_cleaned = true;
-        }
-    }
+    let rules_cleaned = {
+        let mut runner = network::SystemRunner;
+        cleanup_all_network(paths, &mut runner)?
+    };
     let pid = read_pid(paths)?;
     if let Some(pid) = pid {
         if core_alive(paths, pid) {
@@ -423,18 +420,168 @@ fn health_check(config: &Path) -> Result<()> {
     Ok(())
 }
 
+fn cleanup_all_network(paths: &Paths, runner: &mut dyn network::Runner) -> Result<bool> {
+    if !paths.settings.is_file() {
+        return Ok(false);
+    }
+    let store = SettingsStore::open(paths.clone())?;
+    let settings = Value::Object(store.load()?);
+    let caps = network::detect(paths);
+    let cleaned =
+        network::cleanup_all(&settings, caps, dns_listen_port(paths), runner).unwrap_or(false);
+    Ok(network::cleanup_stale(runner) || cleaned)
+}
+
 fn load_network_plan(paths: &Paths) -> Result<Option<network::Plan>> {
     if !paths.settings.is_file() {
         return Ok(None);
     }
     let store = SettingsStore::open(paths.clone())?;
-    let settings = store.load()?;
+    let mut settings = Value::Object(store.load()?);
+    settings["__proxy_uids"] = Value::Array(
+        proxy_uids(paths, &settings)
+            .into_iter()
+            .map(|uid| Value::Number(uid.into()))
+            .collect(),
+    );
+    settings["__proxy_gids"] = Value::Array(
+        proxy_gids(paths)
+            .into_iter()
+            .map(|gid| Value::Number(gid.into()))
+            .collect(),
+    );
+    let rules = network_rules::load_for_plan(paths)?;
+    build_network_plan(paths, &settings, &rules)
+}
+
+fn build_network_plan(
+    paths: &Paths,
+    settings: &Value,
+    rules: &network_rules::Document,
+) -> Result<Option<network::Plan>> {
     let capabilities = network::detect(paths);
-    Ok(Some(network::plan_with_dns(
-        &Value::Object(settings),
+    Ok(Some(network::plan_with_dns_and_rules(
+        settings,
         capabilities,
         dns_listen_port(paths),
+        Some(rules),
     )?))
+}
+
+pub fn preview_network_plan(paths: &Paths, rules: &network_rules::Document) -> Result<Value> {
+    if !paths.settings.is_file() {
+        return Ok(json!({"available": false, "reason": "settings.json is missing"}));
+    }
+    let store = SettingsStore::open(paths.clone())?;
+    let mut settings = Value::Object(store.load()?);
+    settings["__proxy_uids"] = Value::Array(
+        proxy_uids(paths, &settings)
+            .into_iter()
+            .map(|uid| Value::Number(uid.into()))
+            .collect(),
+    );
+    settings["__proxy_gids"] = Value::Array(
+        proxy_gids(paths)
+            .into_iter()
+            .map(|gid| Value::Number(gid.into()))
+            .collect(),
+    );
+    let plan = build_network_plan(paths, &settings, rules)?
+        .ok_or_else(|| BoxError::new(ErrorCode::NotFound, "network settings are unavailable"))?;
+    let mut chains = std::collections::BTreeMap::<String, usize>::new();
+    for rule in &plan.rules {
+        let key = format!("{}/{}/{}", rule.family, rule.table, rule.chain);
+        *chains.entry(key).or_default() += 1;
+    }
+    Ok(json!({
+        "available": true,
+        "requested_mode": plan.requested_mode,
+        "effective_mode": plan.effective_mode,
+        "degraded": plan.degraded,
+        "rule_count": plan.rules.len(),
+        "chains": chains,
+        "warnings": plan.warnings
+    }))
+}
+
+pub fn apply_network_rules(
+    paths: &Paths,
+    previous: Option<&network_rules::Document>,
+) -> Result<Value> {
+    let store = SettingsStore::open(paths.clone())?;
+    let mut settings = Value::Object(store.load()?);
+    settings["__proxy_uids"] = Value::Array(
+        proxy_uids(paths, &settings)
+            .into_iter()
+            .map(|uid| Value::Number(uid.into()))
+            .collect(),
+    );
+    settings["__proxy_gids"] = Value::Array(
+        proxy_gids(paths)
+            .into_iter()
+            .map(|gid| Value::Number(gid.into()))
+            .collect(),
+    );
+    let rules = network_rules::load_for_plan(paths)?;
+    let plan = build_network_plan(paths, &settings, &rules)?
+        .ok_or_else(|| BoxError::new(ErrorCode::NotFound, "network settings are unavailable"))?;
+    let mut runner = network::SystemRunner;
+    cleanup_all_network(paths, &mut runner)?;
+    if let Err(error) = network::apply(&plan, &mut runner) {
+        let _ = network::cleanup_stale(&mut runner);
+        if let Some(previous) = previous {
+            if let Ok(Some(old_plan)) = build_network_plan(paths, &settings, previous) {
+                let _ = network::apply(&old_plan, &mut runner);
+            }
+        }
+        return Err(error);
+    }
+    Ok(json!({
+        "applied": true,
+        "effective_mode": plan.effective_mode,
+        "rules": plan.rules.len(),
+        "warnings": plan.warnings
+    }))
+}
+
+fn proxy_uids(paths: &Paths, settings: &Value) -> Vec<u32> {
+    if settings.get("proxy_mode").and_then(Value::as_str) == Some("core") {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_to_string(&paths.package_list) else {
+        return Vec::new();
+    };
+    let Ok(packages_text) = fs::read_to_string("/data/system/packages.list") else {
+        return Vec::new();
+    };
+    let mut packages = std::collections::BTreeMap::new();
+    for line in packages_text.lines() {
+        let mut fields = line.split_whitespace();
+        if let (Some(package), Some(uid)) = (fields.next(), fields.next()) {
+            if let Ok(uid) = uid.parse::<u32>() {
+                packages.insert(package, uid);
+            }
+        }
+    }
+    let mut uids = std::collections::BTreeSet::new();
+    for entry in entries.lines() {
+        let (prefix, package) = entry.split_once(':').unwrap_or(("0", entry));
+        let prefix = prefix.parse::<u32>().unwrap_or(0);
+        if let Some(uid) = packages.get(package) {
+            uids.insert(uid.saturating_add(prefix.saturating_mul(100_000)));
+        }
+    }
+    uids.into_iter().collect()
+}
+
+fn proxy_gids(paths: &Paths) -> Vec<u32> {
+    fs::read_to_string(&paths.gid_list)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn dns_listen_port(paths: &Paths) -> Option<u16> {
@@ -649,6 +796,336 @@ fn selected_mode(paths: &Paths) -> Option<String> {
         .map(str::to_string)
 }
 
+fn yaml_mapping(value: &serde_yaml::Value) -> Option<&serde_yaml::Mapping> {
+    value.as_mapping()
+}
+
+fn yaml_key(key: &str) -> serde_yaml::Value {
+    serde_yaml::Value::String(key.to_string())
+}
+
+fn yaml_insert_missing(
+    mapping: &mut serde_yaml::Mapping,
+    key: &str,
+    value: serde_yaml::Value,
+) -> bool {
+    let key = yaml_key(key);
+    if mapping.contains_key(&key) {
+        false
+    } else {
+        mapping.insert(key, value);
+        true
+    }
+}
+
+fn proxy_lists_configured(paths: &Paths) -> bool {
+    [&paths.package_list, &paths.gid_list, &paths.ap_list]
+        .into_iter()
+        .any(|path| {
+            fs::read_to_string(path)
+                .map(|text| {
+                    text.lines().any(|line| {
+                        let line = line.trim();
+                        !line.is_empty() && !line.starts_with('#')
+                    })
+                })
+                .unwrap_or(false)
+        })
+}
+
+fn proxy_uid_values(paths: &Paths, settings: &Value) -> Vec<u64> {
+    let mut values = proxy_uids(paths, settings)
+        .into_iter()
+        .map(u64::from)
+        .collect::<Vec<_>>();
+    values.extend(proxy_gids(paths).into_iter().map(u64::from));
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+fn prepare_tun_block(
+    mapping: &mut serde_yaml::Mapping,
+    paths: &Paths,
+    settings: &Value,
+    mode: &str,
+) -> bool {
+    if !matches!(mode, "tun" | "mixed") {
+        return false;
+    }
+    let tun_key = yaml_key("tun");
+    let existed = mapping.contains_key(&tun_key);
+    let mut tun = mapping
+        .get(&tun_key)
+        .and_then(yaml_mapping)
+        .cloned()
+        .unwrap_or_default();
+    let cnip = settings
+        .get("bypass_cn_ip")
+        .and_then(Value::as_str)
+        .map(|value| value == "true")
+        .unwrap_or(false);
+    let proxy_mode = settings
+        .get("proxy_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("core");
+    let changed_before = tun.clone();
+
+    tun.insert(yaml_key("enable"), serde_yaml::Value::Bool(true));
+    yaml_insert_missing(&mut tun, "mtu", serde_yaml::Value::Number(9000u64.into()));
+    yaml_insert_missing(
+        &mut tun,
+        "device",
+        serde_yaml::Value::String("meta".to_string()),
+    );
+    yaml_insert_missing(
+        &mut tun,
+        "dns-hijack",
+        serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("any:53".to_string()),
+            serde_yaml::Value::String("tcp://any:53".to_string()),
+        ]),
+    );
+    yaml_insert_missing(
+        &mut tun,
+        "include-android-user",
+        serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::Number(0u64.into()),
+            serde_yaml::Value::Number(10u64.into()),
+        ]),
+    );
+    if cnip {
+        // box.iptables owns policy routing when CNIP bypass is active.
+        tun.insert(
+            yaml_key("stack"),
+            serde_yaml::Value::String("gvisor".to_string()),
+        );
+        for key in [
+            "auto-route",
+            "strict-route",
+            "auto-redirect",
+            "auto-detect-interface",
+        ] {
+            tun.insert(yaml_key(key), serde_yaml::Value::Bool(false));
+        }
+    } else {
+        yaml_insert_missing(
+            &mut tun,
+            "stack",
+            serde_yaml::Value::String("mixed".to_string()),
+        );
+        tun.insert(yaml_key("auto-route"), serde_yaml::Value::Bool(true));
+        tun.insert(
+            yaml_key("auto-detect-interface"),
+            serde_yaml::Value::Bool(true),
+        );
+        yaml_insert_missing(&mut tun, "strict-route", serde_yaml::Value::Bool(false));
+        yaml_insert_missing(&mut tun, "auto-redirect", serde_yaml::Value::Bool(false));
+    }
+
+    if proxy_mode == "core" {
+        tun.insert(
+            yaml_key("include-uid"),
+            serde_yaml::Value::Sequence(Vec::new()),
+        );
+        tun.insert(
+            yaml_key("exclude-uid"),
+            serde_yaml::Value::Sequence(Vec::new()),
+        );
+    } else {
+        let uids = proxy_uid_values(paths, settings)
+            .into_iter()
+            .map(|uid| serde_yaml::Value::Number(uid.into()))
+            .collect::<Vec<_>>();
+        if proxy_mode == "whitelist" {
+            tun.insert(yaml_key("include-uid"), serde_yaml::Value::Sequence(uids));
+            tun.insert(
+                yaml_key("exclude-uid"),
+                serde_yaml::Value::Sequence(Vec::new()),
+            );
+        } else {
+            tun.insert(yaml_key("exclude-uid"), serde_yaml::Value::Sequence(uids));
+            tun.insert(
+                yaml_key("include-uid"),
+                serde_yaml::Value::Sequence(Vec::new()),
+            );
+        }
+    }
+
+    let changed = !existed || changed_before != tun;
+    if changed {
+        mapping.insert(tun_key, serde_yaml::Value::Mapping(tun));
+    }
+    changed
+}
+
+fn prepare_dns_block(
+    mapping: &mut serde_yaml::Mapping,
+    paths: &Paths,
+    settings: &Value,
+    mode: &str,
+) -> bool {
+    let dns_key = yaml_key("dns");
+    let existed = mapping.contains_key(&dns_key);
+    let mut dns = mapping
+        .get(&dns_key)
+        .and_then(yaml_mapping)
+        .cloned()
+        .unwrap_or_default();
+    let before = dns.clone();
+    yaml_insert_missing(
+        &mut dns,
+        "enhanced-mode",
+        serde_yaml::Value::String("fake-ip".to_string()),
+    );
+    let proxy_mode = settings
+        .get("proxy_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("core");
+    let enhanced = dns
+        .get(yaml_key("enhanced-mode"))
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or("fake-ip");
+    let should_switch = mode != "tun"
+        && proxy_mode != "core"
+        && proxy_lists_configured(paths)
+        && enhanced == "fake-ip";
+    if should_switch {
+        dns.insert(
+            yaml_key("enhanced-mode"),
+            serde_yaml::Value::String("redir-host".to_string()),
+        );
+        let sniffer_key = yaml_key("sniffer");
+        let mut sniffer = dns
+            .get(&sniffer_key)
+            .and_then(yaml_mapping)
+            .cloned()
+            .unwrap_or_default();
+        sniffer.insert(yaml_key("enable"), serde_yaml::Value::Bool(true));
+        dns.insert(sniffer_key, serde_yaml::Value::Mapping(sniffer));
+    }
+    let changed = !existed || before != dns;
+    if changed {
+        mapping.insert(dns_key, serde_yaml::Value::Mapping(dns));
+    }
+    changed
+}
+
+pub fn find_process_mode(paths: &Paths) -> String {
+    SettingsStore::open(paths.clone())
+        .ok()
+        .and_then(|store| store.load().ok())
+        .and_then(|settings| settings.get("find_process_mode").cloned())
+        .and_then(|value| value.as_str().map(str::to_string))
+        .filter(|value| matches!(value.as_str(), "always" | "strict" | "off"))
+        .unwrap_or_else(|| "strict".to_string())
+}
+
+fn prepare_candidate(paths: &Paths, candidate: &Path, mode: Option<&str>) -> Result<()> {
+    // Tests build a deliberately minimal HOME without settings.json. Real
+    // installations always have it, and only they need the legacy config
+    // preparation (controller/UI/ports/TUN).
+    if !paths.settings.is_file() {
+        return Ok(());
+    }
+    let store = SettingsStore::open(paths.clone())?;
+    let settings = store.load()?;
+    let text = fs::read_to_string(candidate)?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|error| {
+        BoxError::validation("core config is not valid YAML").with_detail(error.to_string())
+    })?;
+    let Some(mapping) = value.as_mapping_mut() else {
+        return Err(BoxError::validation("core config must be a mapping"));
+    };
+    let mut changed = false;
+    let ensure = |mapping: &mut serde_yaml::Mapping, key: &str, value: serde_yaml::Value| {
+        let key = serde_yaml::Value::String(key.to_string());
+        if !mapping.contains_key(&key) {
+            mapping.insert(key, value);
+            true
+        } else {
+            false
+        }
+    };
+    changed |= ensure(
+        mapping,
+        "external-controller",
+        serde_yaml::Value::String("0.0.0.0:9090".to_string()),
+    );
+    changed |= ensure(
+        mapping,
+        "external-ui",
+        serde_yaml::Value::String("./dashboard".to_string()),
+    );
+    let process_mode = find_process_mode(paths);
+    let process_key = serde_yaml::Value::String("find-process-mode".to_string());
+    if mapping
+        .get(&process_key)
+        .and_then(serde_yaml::Value::as_str)
+        != Some(process_mode.as_str())
+    {
+        mapping.insert(process_key, serde_yaml::Value::String(process_mode.clone()));
+        changed = true;
+    }
+    for (key, setting, fallback) in [
+        ("tproxy-port", "tproxy_port", 9898u64),
+        ("redir-port", "redir_port", 9797u64),
+    ] {
+        let port = settings
+            .get(setting)
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(fallback);
+        let key = serde_yaml::Value::String(key.to_string());
+        let wanted = serde_yaml::Value::Number(port.into());
+        if mapping.get(&key) != Some(&wanted) {
+            mapping.insert(key, wanted);
+            changed = true;
+        }
+    }
+    if let Some(mode) = mode {
+        let settings_value = Value::Object(settings.clone());
+        changed |= prepare_tun_block(mapping, paths, &settings_value, mode);
+        changed |= prepare_dns_block(mapping, paths, &settings_value, mode);
+    }
+    if changed {
+        let bytes = serde_yaml::to_string(&value).map_err(|error| {
+            BoxError::internal("cannot serialize core config").with_detail(error.to_string())
+        })?;
+        util::atomic_write(candidate, bytes.as_bytes(), 0o600)?;
+    }
+    Ok(())
+}
+
+fn enable_tun_candidate(paths: &Paths, candidate: &Path) -> Result<()> {
+    let text = fs::read_to_string(candidate)?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|error| {
+        BoxError::validation("core config is not valid YAML").with_detail(error.to_string())
+    })?;
+    let Some(mapping) = value.as_mapping_mut() else {
+        return Err(BoxError::validation("core config must be a mapping"));
+    };
+    let tun_key = serde_yaml::Value::String("tun".to_string());
+    let mut tun = mapping
+        .get(&tun_key)
+        .and_then(serde_yaml::Value::as_mapping)
+        .cloned()
+        .unwrap_or_default();
+    tun.insert(
+        serde_yaml::Value::String("enable".to_string()),
+        serde_yaml::Value::Bool(true),
+    );
+    mapping.insert(tun_key, serde_yaml::Value::Mapping(tun));
+    mapping.insert(
+        serde_yaml::Value::String("find-process-mode".to_string()),
+        serde_yaml::Value::String(find_process_mode(paths)),
+    );
+    let bytes = serde_yaml::to_string(&value).map_err(|error| {
+        BoxError::internal("cannot serialize core config").with_detail(error.to_string())
+    })?;
+    util::atomic_write(candidate, bytes.as_bytes(), 0o600)
+}
+
 fn disable_tun_candidate(paths: &Paths, candidate: &Path) -> Result<()> {
     let auto_modify = SettingsStore::open(paths.clone())
         .ok()
@@ -679,12 +1156,10 @@ fn disable_tun_candidate(paths: &Paths, candidate: &Path) -> Result<()> {
         );
         changed = true;
     }
-    // Android exposes a large /proc tree. The default "always" process finder
-    // walks sockets/processes for every connection and can spin a core; the
-    // default config has no PROCESS-NAME/UID rules, so disable it.
+    let process_mode = find_process_mode(paths);
     let process_key = serde_yaml::Value::String("find-process-mode".to_string());
     if mapping.contains_key(&process_key) {
-        mapping.insert(process_key, serde_yaml::Value::String("off".to_string()));
+        mapping.insert(process_key, serde_yaml::Value::String(process_mode));
         changed = true;
     }
     if changed {
@@ -1005,6 +1480,39 @@ while :; do sleep 0.1; done
     }
 
     #[test]
+    fn candidate_preparation_adds_controller_ports_and_tun() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(root.join("settings.json"), r#"{"network_mode":"mixed"}"#).expect("settings");
+        let candidate = root.join("candidate.yaml");
+        fs::write(&candidate, "mode: rule\n").expect("candidate");
+        super::prepare_candidate(&paths, &candidate, Some("mixed")).expect("prepare");
+        let text = fs::read_to_string(&candidate).expect("read");
+        assert!(text.contains("external-controller"), "{text}");
+        assert!(text.contains("tproxy-port"), "{text}");
+        assert!(text.contains("redir-port"), "{text}");
+        assert!(text.contains("tun:"), "{text}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mixed_candidate_keeps_tun_and_uses_strict_process_mode() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        let candidate = root.join("candidate.yaml");
+        fs::write(
+            &candidate,
+            "tun:\n  enable: false\nfind-process-mode: always\n",
+        )
+        .expect("candidate");
+        super::enable_tun_candidate(&paths, &candidate).expect("enable mixed tun");
+        let prepared = fs::read_to_string(&candidate).expect("read");
+        assert!(prepared.contains("enable: true"), "{prepared}");
+        assert!(prepared.contains("find-process-mode: strict"), "{prepared}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn candidate_disables_tun_and_process_scanner_for_non_tun_modes() {
         let root = temp_root();
         let paths = Paths::new(root.clone());
@@ -1017,11 +1525,130 @@ while :; do sleep 0.1; done
         super::disable_tun_candidate(&paths, &candidate).expect("prepare candidate");
         let prepared = fs::read_to_string(&candidate).expect("read candidate");
         assert!(prepared.contains("enable: false"), "{prepared}");
-        assert!(prepared.contains("find-process-mode: off"), "{prepared}");
+        assert!(prepared.contains("find-process-mode: strict"), "{prepared}");
         assert!(
             !prepared.contains("find-process-mode: always"),
             "{prepared}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tun_block_is_completed_with_legacy_fields() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(root.join("settings.json"), r#"{"network_mode":"tun"}"#).expect("settings");
+        let candidate = root.join("candidate.yaml");
+        fs::write(&candidate, "mode: rule\n").expect("candidate");
+        super::prepare_candidate(&paths, &candidate, Some("tun")).expect("prepare");
+        let text = fs::read_to_string(&candidate).expect("read");
+        for expected in [
+            "mtu: 9000",
+            "device: meta",
+            "stack: mixed",
+            "dns-hijack:",
+            "auto-route: true",
+            "strict-route: false",
+            "auto-detect-interface: true",
+            "include-uid: []",
+            "exclude-uid: []",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn existing_tun_block_preserves_custom_stack_and_mtu() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(root.join("settings.json"), r#"{"network_mode":"tun"}"#).expect("settings");
+        let candidate = root.join("candidate.yaml");
+        fs::write(
+            &candidate,
+            "tun:\n  enable: false\n  stack: system\n  mtu: 1500\n  auto-route: false\n",
+        )
+        .expect("candidate");
+        super::prepare_candidate(&paths, &candidate, Some("tun")).expect("prepare");
+        let text = fs::read_to_string(&candidate).expect("read");
+        assert!(text.contains("enable: true"), "{text}");
+        assert!(text.contains("stack: system"), "{text}");
+        assert!(text.contains("mtu: 1500"), "{text}");
+        assert!(text.contains("auto-route: true"), "{text}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_core_dns_switches_to_redir_host_with_sniffer() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(
+            root.join("settings.json"),
+            r#"{"network_mode":"tproxy","proxy_mode":"blacklist"}"#,
+        )
+        .expect("settings");
+        fs::write(root.join("package.list.cfg"), "com.example.app\n").expect("packages");
+        let candidate = root.join("candidate.yaml");
+        fs::write(&candidate, "dns:\n  enhanced-mode: fake-ip\n").expect("candidate");
+        super::prepare_candidate(&paths, &candidate, Some("tproxy")).expect("prepare");
+        let text = fs::read_to_string(&candidate).expect("read");
+        assert!(text.contains("enhanced-mode: redir-host"), "{text}");
+        assert!(text.contains("sniffer:"), "{text}");
+        assert!(text.contains("enable: true"), "{text}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn core_dns_keeps_fake_ip_even_with_lists() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(root.join("settings.json"), r#"{"network_mode":"tproxy"}"#).expect("settings");
+        fs::write(root.join("package.list.cfg"), "com.example.app\n").expect("packages");
+        let candidate = root.join("candidate.yaml");
+        fs::write(&candidate, "dns:\n  enhanced-mode: fake-ip\n").expect("candidate");
+        super::prepare_candidate(&paths, &candidate, Some("tproxy")).expect("prepare");
+        let text = fs::read_to_string(&candidate).expect("read");
+        assert!(text.contains("enhanced-mode: fake-ip"), "{text}");
+        assert!(!text.contains("sniffer:"), "{text}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn candidate_uses_find_process_mode_from_settings() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(
+            root.join("settings.json"),
+            r#"{"network_mode":"mixed","find_process_mode":"always"}"#,
+        )
+        .expect("settings");
+        let candidate = root.join("candidate.yaml");
+        fs::write(&candidate, "mode: rule\n").expect("candidate");
+        super::prepare_candidate(&paths, &candidate, Some("mixed")).expect("prepare");
+        let text = fs::read_to_string(&candidate).expect("read");
+        assert!(text.contains("find-process-mode: always"), "{text}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_tun_candidate_keeps_requested_off_mode() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(
+            root.join("settings.json"),
+            r#"{"network_mode":"tproxy","find_process_mode":"off"}"#,
+        )
+        .expect("settings");
+        let candidate = root.join("candidate.yaml");
+        fs::write(
+            &candidate,
+            "tun:\n  enable: true\nfind-process-mode: always\n",
+        )
+        .expect("candidate");
+        super::disable_tun_candidate(&paths, &candidate).expect("prepare candidate");
+        let text = fs::read_to_string(&candidate).expect("read");
+        assert!(text.contains("find-process-mode: off"), "{text}");
+        assert!(!text.contains("find-process-mode: always"), "{text}");
         let _ = fs::remove_dir_all(root);
     }
 

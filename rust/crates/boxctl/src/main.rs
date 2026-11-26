@@ -11,6 +11,7 @@ mod install;
 mod lists;
 mod logs;
 mod network;
+mod network_rules;
 mod paths;
 mod peer;
 mod protocol;

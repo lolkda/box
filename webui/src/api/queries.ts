@@ -16,6 +16,7 @@ export const queryKeys = {
   taskLogs: (id: string) => ["tasks", id, "logs"] as const,
   coreConfig: ["core-config"] as const,
   appLists: ["app-lists"] as const,
+  networkRules: ["network-rules"] as const,
 };
 
 export function useStatusQuery(options: { enabled?: boolean; live?: boolean } = {}) {
@@ -97,6 +98,14 @@ export function useTasksQuery(options: { enabled?: boolean } = {}) {
   });
 }
 
+export function useNetworkRulesQuery() {
+  return useQuery({
+    queryKey: queryKeys.networkRules,
+    queryFn: api.networkRules,
+    staleTime: 10_000,
+  });
+}
+
 export function useCoreConfigQuery(enabled = true) {
   return useQuery({
     queryKey: queryKeys.coreConfig,
@@ -153,6 +162,7 @@ export function useInvalidateOperationalQueries() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
     void queryClient.invalidateQueries({ queryKey: queryKeys.coreConfig });
     void queryClient.invalidateQueries({ queryKey: queryKeys.appLists });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.networkRules });
   }, [queryClient]);
 }
 

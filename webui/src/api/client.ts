@@ -6,6 +6,10 @@ import type {
   CoreConfigData,
   MihomoStructuredConfig,
   LogsData,
+  NetworkRulesApplyResult,
+  NetworkRulesData,
+  NetworkRulesPreview,
+  NetworkRule,
   PackageInfo,
   RuleProfileApplied,
   RuleProfileData,
@@ -316,6 +320,17 @@ export const api = {
   },
 
   taskCancel: (id: string) => runJson<TaskInfo>(["task", "cancel", id, "--json"]),
+
+  networkRules: () => runJson<NetworkRulesData>(["network-rules", "get", "--json"]),
+
+  previewNetworkRules: (payload: { base_revision: number; rules: NetworkRule[]; tombstones: string[] }) =>
+    runJsonWithFile<NetworkRulesPreview>(["network-rules", "preview"], payload),
+
+  applyNetworkRules: (payload: { base_revision: number; rules: NetworkRule[]; tombstones: string[] }) =>
+    runJsonWithFile<NetworkRulesApplyResult>(["network-rules", "apply"], payload),
+
+  resetNetworkRules: (all = false) =>
+    runJson<NetworkRulesApplyResult>(["network-rules", "reset", ...(all ? ["all"] : []), "--json"]),
 
   coreConfig: () => runJson<CoreConfigData>(["core", "get", "--json"]),
 

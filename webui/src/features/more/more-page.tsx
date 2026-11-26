@@ -1,4 +1,4 @@
-import { ChevronRight, Database, FileWarning, ListChecks, Network, ScrollText, Settings2, SlidersHorizontal } from "lucide-react";
+import { ChevronRight, Database, FileWarning, ListChecks, Network, ScrollText, Settings2, ShieldCheck, SlidersHorizontal } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTasksQuery } from "../../api/queries";
 import { Badge } from "../../components/ui/badge";
@@ -10,6 +10,7 @@ const items = [
   { to: "/providers", title: "规则集", description: "规则来源、格式与更新间隔", icon: Database },
   { to: "/core-config", title: "核心配置", description: "mihomo 安全运行项与完整 YAML", icon: SlidersHorizontal },
   { to: "/apps-network", title: "应用与网络", description: "应用包、GID 与网络接口清单", icon: Network },
+  { to: "/network-rules", title: "网络规则", description: "本机、转发、DNS 与过滤规则的增删改", icon: ShieldCheck },
   { to: "/logs", title: "日志", description: "运行日志、自动刷新与过滤", icon: ScrollText },
   { to: "/tasks", title: "任务中心", description: "订阅更新、内核更新等后台任务", icon: ListChecks },
   { to: "/danger", title: "危险操作", description: "删除配置、清空日志、更新核心", icon: FileWarning, danger: true },

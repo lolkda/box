@@ -17,6 +17,7 @@ const TasksPage = lazy(() => import("../features/tasks/tasks-page").then((module
 const DangerPage = lazy(() => import("../features/danger/danger-page").then((module) => ({ default: module.DangerPage })));
 const CoreConfigPage = lazy(() => import("../features/core-config/core-config-page").then((module) => ({ default: module.CoreConfigPage })));
 const AppsNetworkPage = lazy(() => import("../features/apps-network/apps-network-page").then((module) => ({ default: module.AppsNetworkPage })));
+const NetworkRulesPage = lazy(() => import("../features/network-rules/network-rules-page").then((module) => ({ default: module.NetworkRulesPage })));
 
 function withSuspense(node: ReactNode): ReactNode {
   return <Suspense fallback={<PageSkeleton />}>{node}</Suspense>;
@@ -47,6 +48,7 @@ export const router = createHashRouter([
       { path: "danger", element: withSuspense(<DangerPage />) },
       { path: "core-config", element: withSuspense(<CoreConfigPage />) },
       { path: "apps-network", element: withSuspense(<AppsNetworkPage />) },
+      { path: "network-rules", element: withSuspense(<NetworkRulesPage />) },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

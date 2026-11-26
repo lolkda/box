@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "revision": 0,
+  "defaults_version": "2026-11-26.1",
+  "tombstones": [],
+  "rules": [
+    {
+      "id": "default-private-v4",
+      "name": "IPv4 本机、私网与保留地址",
+      "enabled": true,
+      "action": "bypass",
+      "scopes": [
+        "local",
+        "forward"
+      ],
+      "modes": [
+        "tun",
+        "tproxy",
+        "redirect",
+        "mixed",
+        "enhance"
+      ],
+      "family": "ipv4",
+      "protocol": "any",
+      "match": {
+        "dst_cidrs": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.88.99.0/24",
+          "192.168.0.0/16",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "224.0.0.0/4",
+          "240.0.0.0/4",
+          "255.0.0.0/4",
+          "255.255.255.0/24",
+          "255.255.255.255/32"
+        ]
+      },
+      "origin": "default"
+    },
+    {
+      "id": "default-private-v6",
+      "name": "IPv6 本机、链路本地与组播",
+      "enabled": true,
+      "action": "bypass",
+      "scopes": [
+        "local",
+        "forward"
+      ],
+      "modes": [
+        "tun",
+        "tproxy",
+        "redirect",
+        "mixed",
+        "enhance"
+      ],
+      "family": "ipv6",
+      "protocol": "any",
+      "match": {
+        "dst_cidrs": [
+          "::/128",
+          "::1/128",
+          "::ffff:0:0/96",
+          "100::/64",
+          "64:ff9b::/96",
+          "2001::/32",
+          "2001:10::/28",
+          "2001:20::/28",
+          "2001:db8::/32",
+          "2002::/16",
+          "fe80::/10",
+          "ff00::/8"
+        ]
+      },
+      "origin": "default"
+    },
+    {
+      "id": "default-discovery",
+      "name": "DHCP、mDNS、SSDP 与 NetBIOS",
+      "enabled": true,
+      "action": "bypass",
+      "scopes": [
+        "local",
+        "forward"
+      ],
+      "modes": [
+        "tun",
+        "tproxy",
+        "redirect",
+        "mixed",
+        "enhance"
+      ],
+      "family": "both",
+      "protocol": "any",
+      "match": {
+        "dst_ports": [
+          "67",
+          "68",
+          "137",
+          "138",
+          "139",
+          "1900",
+          "5353",
+          "5355"
+        ]
+      },
+      "origin": "default"
+    },
+    {
+      "id": "default-adb",
+      "name": "ADB 无线调试",
+      "enabled": true,
+      "action": "bypass",
+      "scopes": [
+        "local",
+        "forward"
+      ],
+      "modes": [
+        "tun",
+        "tproxy",
+        "redirect",
+        "mixed",
+        "enhance"
+      ],
+      "family": "both",
+      "protocol": "tcp",
+      "match": {
+        "dst_ports": [
+          "5555"
+        ]
+      },
+      "origin": "default"
+    }
+  ]
+}

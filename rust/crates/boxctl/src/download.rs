@@ -19,6 +19,7 @@ pub struct Policy {
     pub user_agent: String,
     pub timeout: Duration,
     pub max_bytes: usize,
+    pub allow_http: bool,
 }
 
 impl Default for Policy {
@@ -30,6 +31,7 @@ impl Default for Policy {
             user_agent: "boxctl".to_string(),
             timeout: Duration::from_secs(30),
             max_bytes: DEFAULT_MAX_BYTES,
+            allow_http: false,
         }
     }
 }
@@ -69,6 +71,7 @@ pub fn policy_from_settings(store: &SettingsStore) -> Result<Policy> {
             .to_string(),
         timeout: Duration::from_secs(30),
         max_bytes: DEFAULT_MAX_BYTES,
+        allow_http: true,
     })
 }
 
@@ -155,7 +158,7 @@ fn fetch_body(url: &str, policy: &Policy, expected_sha256: Option<&str>) -> Resu
                 .join(location)
                 .map_err(|_| BoxError::new(ErrorCode::Download, "invalid redirect target"))?
                 .to_string();
-            validate_https(&current)?;
+            validate_download_url(&current, policy.allow_http)?;
             continue;
         }
         if !(200..300).contains(&status) {
@@ -210,7 +213,7 @@ fn fetch_body(url: &str, policy: &Policy, expected_sha256: Option<&str>) -> Resu
 }
 
 pub fn effective_url(url: &str, policy: &Policy) -> Result<(String, bool)> {
-    validate_https(url)?;
+    validate_download_url(url, policy.allow_http)?;
     if !policy.use_ghproxy {
         return Ok((url.to_string(), false));
     }
@@ -235,7 +238,7 @@ pub fn effective_url(url: &str, policy: &Policy) -> Result<(String, bool)> {
             "use_ghproxy is enabled but url_ghproxy is empty",
         ));
     }
-    validate_https(mirror)?;
+    validate_download_url(mirror, policy.allow_http)?;
     Ok((format!("{mirror}/{url}"), true))
 }
 
@@ -256,6 +259,21 @@ fn host_of(url: &str) -> Result<String> {
         .host_str()
         .map(str::to_string)
         .ok_or_else(|| BoxError::new(ErrorCode::Validation, "download URL has no host"))
+}
+
+fn validate_download_url(url: &str, allow_http: bool) -> Result<()> {
+    if allow_http {
+        let parsed = Url::parse(url)
+            .map_err(|_| BoxError::new(ErrorCode::Validation, "invalid download URL"))?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(BoxError::new(
+                ErrorCode::Validation,
+                "download URL must use http or https",
+            ));
+        }
+        return Ok(());
+    }
+    validate_https(url)
 }
 
 fn validate_https(url: &str) -> Result<()> {

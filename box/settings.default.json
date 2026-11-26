@@ -2,6 +2,7 @@
   "auto_modify_config": "true",
   "boot_auto_start": "false",
   "network_mode": "tun",
+  "find_process_mode": "strict",
   "tproxy_port": "9898",
   "redir_port": "9797",
   "ipv6": "true",

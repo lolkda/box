@@ -23,6 +23,7 @@ use crate::install;
 use crate::lists;
 use crate::logs;
 use crate::network;
+use crate::network_rules;
 use crate::paths::Paths;
 use crate::peer;
 use crate::protocol::{Request, Response, MAX_FRAME_BYTES, PROTOCOL_VERSION};
@@ -387,6 +388,89 @@ fn dispatch(store: &Arc<Mutex<SettingsStore>>, request: &Request) -> Result<(Val
             let revision = bump_revision(store)?;
             Ok((data, Some(revision)))
         }
+        "network_rules.get" => {
+            ensure_empty_params(request)?;
+            let paths = paths_for(store)?;
+            let data = network_rules::get(&paths)?;
+            let revision = lock_store(store)?.revision();
+            Ok((
+                serde_json::to_value(data).map_err(|error| {
+                    BoxError::internal("cannot serialize network rules")
+                        .with_detail(error.to_string())
+                })?,
+                Some(revision),
+            ))
+        }
+        "network_rules.preview" => {
+            let params = parse_params::<network_rules::Mutation>(request)?;
+            let paths = paths_for(store)?;
+            let mut data = network_rules::preview(&paths, params)?;
+            if let Ok(plan) = service::preview_network_plan(&paths, &data.document) {
+                data.plan = Some(plan);
+            }
+            let revision = lock_store(store)?.revision();
+            Ok((
+                serde_json::to_value(data).map_err(|error| {
+                    BoxError::internal("cannot serialize network preview")
+                        .with_detail(error.to_string())
+                })?,
+                Some(revision),
+            ))
+        }
+        "network_rules.apply" => {
+            let params = parse_params::<network_rules::Mutation>(request)?;
+            let paths = paths_for(store)?;
+            let old = network_rules::load_for_plan(&paths)?;
+            let data = network_rules::apply(&paths, params)?;
+            let running = match service::status(&paths) {
+                Ok(status) => status["running"].as_bool().unwrap_or(false),
+                Err(error) => {
+                    let _ = network_rules::save_document(&paths, &old);
+                    return Err(error);
+                }
+            };
+            if running {
+                if let Err(error) = service::apply_network_rules(&paths, Some(&old)) {
+                    let _ = network_rules::save_document(&paths, &old);
+                    return Err(error);
+                }
+            }
+            let mut value = serde_json::to_value(data).map_err(|error| {
+                BoxError::internal("cannot serialize network rules").with_detail(error.to_string())
+            })?;
+            if let Some(map) = value.as_object_mut() {
+                map.insert("applied".to_string(), Value::Bool(running));
+            }
+            let revision = bump_revision(store)?;
+            Ok((value, Some(revision)))
+        }
+        "network_rules.reset" => {
+            let params = parse_params::<ResetNetworkRulesParams>(request)?;
+            let paths = paths_for(store)?;
+            let old = network_rules::load_for_plan(&paths)?;
+            let data = network_rules::reset_defaults(&paths, params.all)?;
+            let running = match service::status(&paths) {
+                Ok(status) => status["running"].as_bool().unwrap_or(false),
+                Err(error) => {
+                    let _ = network_rules::save_document(&paths, &old);
+                    return Err(error);
+                }
+            };
+            if running {
+                if let Err(error) = service::apply_network_rules(&paths, Some(&old)) {
+                    let _ = network_rules::save_document(&paths, &old);
+                    return Err(error);
+                }
+            }
+            let mut value = serde_json::to_value(data).map_err(|error| {
+                BoxError::internal("cannot serialize network rules").with_detail(error.to_string())
+            })?;
+            if let Some(map) = value.as_object_mut() {
+                map.insert("applied".to_string(), Value::Bool(running));
+            }
+            let revision = bump_revision(store)?;
+            Ok((value, Some(revision)))
+        }
         "config.delete" => {
             ensure_empty_params(request)?;
             let paths = paths_for(store)?;
@@ -397,7 +481,13 @@ fn dispatch(store: &Arc<Mutex<SettingsStore>>, request: &Request) -> Result<(Val
         "core.get" => {
             ensure_empty_params(request)?;
             let paths = paths_for(store)?;
-            let data = core::get(&paths)?;
+            let mut data = core::get(&paths)?;
+            if let Some(structured) = data.get_mut("structured").and_then(Value::as_object_mut) {
+                structured.insert(
+                    "find-process-mode".to_string(),
+                    json!(service::find_process_mode(&paths)),
+                );
+            }
             let revision = lock_store(store)?.revision();
             Ok((data, Some(revision)))
         }
@@ -861,6 +951,13 @@ fn paths_for(store: &Arc<Mutex<SettingsStore>>) -> Result<Paths> {
 
 fn bump_revision(store: &Arc<Mutex<SettingsStore>>) -> Result<u64> {
     lock_store(store)?.bump_revision()
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResetNetworkRulesParams {
+    #[serde(default)]
+    all: bool,
 }
 
 fn parse_params<T: DeserializeOwned>(request: &Request) -> Result<T> {

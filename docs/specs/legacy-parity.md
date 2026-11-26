@@ -7,7 +7,7 @@
 | 行为 | 旧 shell 参考 | Rust 实现/测试 | 状态 |
 |---|---|---|---|
 | 非 TUN 模式关闭 TUN | `legacy/box-scripts/box.service` 非 TUN 分支 | `service::disable_tun_candidate`；`candidate_disables_tun_and_process_scanner_for_non_tun_modes` | 已覆盖 |
-| Android 进程扫描不拖垮 core | 旧服务未把 `find-process-mode: always` 带入代理路径 | 候选配置强制 `find-process-mode: off`；同一测试 | 已覆盖 |
+| Android 进程扫描不拖垮 core | 旧服务未把 `find-process-mode: always` 带入代理路径 | 候选配置由 `find_process_mode` 设置控制，默认 `strict`；同一测试 | 已覆盖 |
 | 聚合订阅空 `proxies: []` | `box.tool::sub_is_aggregate_file` 按数量判断 | `sub::parse_aggregate`；`aggregate_parser_reads_provider_urls_and_rejects_mixed` | 已覆盖 |
 | provider 合并而非整段丢弃 | `box.tool::update_mihomo_providers` 以现有 provider 为基线 | `rule_profile::use_pending` 合并已有 provider；`use_pending_applies_config_and_marks_active` | 已覆盖 |
 | `RULE-SET,...,no-resolve` 取第三列 | `box.tool` 规则校验使用 `cut -f3` | `config::validate` 去掉修饰符；`rule_set_target_allows_no_resolve_suffix` | 已覆盖 |

@@ -188,16 +188,12 @@ export function CoreConfigPage() {
               <Field label="外部 UI 路径" htmlFor="core-ui" hint="固定为 ./dashboard，由模块内置 zashboard 提供">
                 <Input id="core-ui" value={form["external-ui"]} readOnly className="bg-surface-muted text-fg-muted" />
               </Field>
-              <Field label="进程匹配模式" htmlFor="core-find-process">
-                <Select
+              <Field label="进程匹配模式" htmlFor="core-find-process" hint="实际值由设置页统一管理；保存后需重启核心">
+                <Input
                   id="core-find-process"
                   value={form["find-process-mode"]}
-                  options={[
-                    { value: "always", label: "Always" },
-                    { value: "strict", label: "Strict" },
-                    { value: "off", label: "Off" },
-                  ]}
-                  onChange={(event) => updateField("find-process-mode", event.currentTarget.value)}
+                  readOnly
+                  className="bg-surface-muted text-fg-muted"
                 />
               </Field>
             </div>

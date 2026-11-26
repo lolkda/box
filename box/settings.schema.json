@@ -29,6 +29,14 @@
         "enhance"
       ]
     },
+    "find_process_mode": {
+      "type": "string",
+      "enum": [
+        "always",
+        "strict",
+        "off"
+      ]
+    },
     "tproxy_port": {
       "type": "string",
       "pattern": "^[0-9]+$",

@@ -61,6 +61,13 @@ describe("CoreConfigPage", () => {
     expect(screen.getByText("高级 YAML")).toBeInTheDocument();
   });
 
+  it("shows the prepared find-process-mode as read-only", async () => {
+    renderPage();
+    const field = await screen.findByLabelText("进程匹配模式");
+    expect(field).toHaveAttribute("readonly");
+    expect(field).toHaveValue("always");
+  });
+
   it("keeps external-ui readonly and exposes dashboard update", async () => {
     renderPage();
     const externalUi = await screen.findByLabelText("外部 UI 路径");

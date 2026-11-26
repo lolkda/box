@@ -325,8 +325,11 @@ pub fn use_pending(paths: &Paths, params: UseParams) -> Result<Value> {
             providers.as_object_mut(),
             current.get("rule-providers").and_then(Value::as_object),
         ) {
-            for (name, value) in existing {
-                target.entry(name.clone()).or_insert_with(|| value.clone());
+            let referenced = dns_referenced_providers(paths);
+            for name in referenced {
+                if let Some(value) = existing.get(&name) {
+                    target.entry(name).or_insert_with(|| value.clone());
+                }
             }
         }
     }
@@ -337,6 +340,7 @@ pub fn use_pending(paths: &Paths, params: UseParams) -> Result<Value> {
         "rules": rules
     });
     let changed = config::replace_sections(paths, &data)?;
+    config::sync_ruleset_prefix_from_settings(paths)?;
     let counts = counts_from_map(&map);
     let now = util::format_unix_utc(util::now_ms() / 1000);
     write_entry(paths, &id, "applied_at", &now)?;
@@ -360,6 +364,50 @@ pub fn use_pending(paths: &Paths, params: UseParams) -> Result<Value> {
         "updated_at": now,
         "counts": counts.json()
     }))
+}
+
+fn dns_referenced_providers(paths: &Paths) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let Ok(map) = yaml::read_map(&paths.config) else {
+        return names;
+    };
+    let Some(dns) = map
+        .get(YamlValue::String("dns".to_string()))
+        .and_then(YamlValue::as_mapping)
+    else {
+        return names;
+    };
+    if let Some(items) = dns
+        .get(YamlValue::String("fake-ip-filter".to_string()))
+        .and_then(YamlValue::as_sequence)
+    {
+        for item in items {
+            if let Some(value) = item
+                .as_str()
+                .and_then(|value| value.strip_prefix("rule-set:"))
+            {
+                if !value.is_empty() {
+                    names.insert(value.to_string());
+                }
+            }
+        }
+    }
+    if let Some(items) = dns
+        .get(YamlValue::String("nameserver-policy".to_string()))
+        .and_then(YamlValue::as_mapping)
+    {
+        for key in items.keys() {
+            if let Some(value) = key
+                .as_str()
+                .and_then(|value| value.strip_prefix("rule-set:"))
+            {
+                if !value.is_empty() {
+                    names.insert(value.to_string());
+                }
+            }
+        }
+    }
+    names
 }
 
 fn item(paths: &Paths, id: &str, active: bool) -> Result<Value> {
@@ -762,6 +810,7 @@ rules:
         let config = crate::config::get(&paths).expect("config");
         assert!(config["rule-providers"].get("custom").is_some());
         assert!(config["rule-providers"].get("cn_domain").is_some());
+        assert!(config["rule-providers"].get("Fake-IP-Filter").is_some());
         let _ = fs::remove_dir_all(root);
     }
 
