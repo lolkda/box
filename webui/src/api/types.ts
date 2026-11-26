@@ -73,7 +73,6 @@ export interface ConfigData {
 export interface SettingsSensitive {
   githubtoken: {
     set: boolean;
-    preview: string;
   };
 }
 

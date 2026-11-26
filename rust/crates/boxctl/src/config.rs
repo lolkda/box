@@ -311,6 +311,18 @@ fn validate(params: &ApplyParams) -> Result<()> {
                     "rule references a missing proxy-group: {target}"
                 )));
             }
+        } else if let Some(rest) = rule.strip_prefix("MATCH,") {
+            let target = rest.split(',').next().unwrap_or_default().trim();
+            if !group_names.contains(target)
+                && !matches!(
+                    target,
+                    "DIRECT" | "REJECT" | "REJECT-DROP" | "PASS" | "COMPATIBLE"
+                )
+            {
+                return Err(BoxError::validation(format!(
+                    "MATCH rule references a missing proxy-group: {target}"
+                )));
+            }
         }
     }
     Ok(())

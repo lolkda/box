@@ -54,6 +54,8 @@ pub struct Paths {
     pub provider_defs_dir: PathBuf,
     pub network_rules: PathBuf,
     pub network_rules_default: PathBuf,
+    pub crontab: PathBuf,
+    pub module_disable: PathBuf,
 }
 
 impl Paths {
@@ -117,6 +119,11 @@ impl Paths {
             provider_defs_dir: home.join("run").join("state").join("provider-defs"),
             network_rules: home.join("run").join("state").join("network-rules.json"),
             network_rules_default: home.join("network-rules.default.json"),
+            crontab: home.join("crontab.cfg"),
+            module_disable: std::env::var_os("BOX_MODULE_DISABLE_PATH")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/data/adb/modules/box_for_root/disable")),
             run_dir,
             home,
         }

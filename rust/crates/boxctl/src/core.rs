@@ -78,7 +78,7 @@ fn structured_json(map: &Mapping) -> Result<Value> {
         "profile.store-fake-ip": profile_bool(map, "store-fake-ip", true)?,
         "unified-delay": bool_value(map, "unified-delay", false)?,
         "tcp-concurrent": bool_value(map, "tcp-concurrent", true)?,
-        "find-process-mode": string_value(map, "find-process-mode", "always", &["always", "strict", "off"])?
+        "find-process-mode": string_value(map, "find-process-mode", "off", &["always", "strict", "off"])?
     }))
 }
 
@@ -170,7 +170,14 @@ fn profile_map(map: &mut Mapping) -> Result<&mut Mapping> {
 fn string_value(map: &Mapping, key: &str, default: &str, allowed: &[&str]) -> Result<String> {
     let key_value = YamlValue::String(key.to_string());
     let value = match map.get(&key_value) {
-        Some(YamlValue::String(value)) => value.to_lowercase(),
+        Some(YamlValue::String(value)) => {
+            if !allowed.is_empty() {
+                value.to_lowercase()
+            } else {
+                // Preserve exact case for free-form strings like external-ui / external-controller.
+                value.clone()
+            }
+        }
         Some(_) => {
             return Err(BoxError::validation(format!("{key} must be a string")));
         }

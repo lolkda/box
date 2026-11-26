@@ -23,7 +23,13 @@ pub fn get(paths: &Paths, params: GetParams) -> Result<Value> {
     let token = util::read_to_string_optional(&paths.token)?
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let text = util::read_to_string_optional(&paths.runs_log)?.unwrap_or_default();
+    let (source_path, text) = match util::read_to_string_optional(&paths.runs_log)? {
+        Some(text) => (&paths.runs_log, text),
+        None => match util::read_to_string_optional(&paths.tool_log)? {
+            Some(text) => (&paths.tool_log, text),
+            None => (&paths.runs_log, String::new()),
+        },
+    };
     let mut lines = text
         .lines()
         .rev()
@@ -35,7 +41,7 @@ pub fn get(paths: &Paths, params: GetParams) -> Result<Value> {
         .collect::<Vec<_>>();
     lines.reverse();
     Ok(json!({
-        "file": paths.runs_log.display().to_string(),
+        "file": source_path.display().to_string(),
         "lines": lines
     }))
 }

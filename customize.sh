@@ -418,6 +418,18 @@ if [ "${backup_box}" = "true" ]; then
     cp -af "${temp_dir}/run/." "/data/adb/box/run/"
     rm -f "/data/adb/box/run/settings.runtime.sh" 2>/dev/null || true
   fi
+
+  if [ -d "${temp_dir}/state" ]; then
+    ui_print "  - 恢复持久状态目录"
+    mkdir -p "/data/adb/box/state"
+    cp -af "${temp_dir}/state/." "/data/adb/box/state/"
+  fi
+
+  if [ -f "${temp_dir}/githubtoken" ]; then
+    ui_print "  - 恢复 GitHub Token"
+    cp -f "${temp_dir}/githubtoken" "/data/adb/box/githubtoken"
+    chmod 600 "/data/adb/box/githubtoken" 2>/dev/null || true
+  fi
 fi
 
 # 旧 settings/renew 迁移交由 Rust 准备步骤：先备份，再重置并写升级确认门槛。

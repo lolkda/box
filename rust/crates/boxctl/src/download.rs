@@ -1,3 +1,4 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use crate::util;
 
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
+const NET_ADMIN_GID: u32 = 3005;
 
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -110,12 +112,192 @@ pub fn download_to_file(
     policy: &Policy,
     expected_sha256: Option<&str>,
 ) -> Result<Report> {
-    let fetched = fetch_body(url, policy, expected_sha256)?;
+    let fetched = fetch_body_with_egress(url, policy, expected_sha256)?;
     util::atomic_write(path, &fetched.bytes, 0o600)?;
     Ok(fetched.report)
 }
 
-fn fetch_body(url: &str, policy: &Policy, expected_sha256: Option<&str>) -> Result<Fetched> {
+/// Q10 download egress policy:
+/// When running as root on Linux/Android, try a direct egress attempt first under
+/// `gid=3005 (net_admin)` + real DNS (bypassing transparent proxy and fake-ip DNS)
+/// so broken proxy nodes never deadlock subscription updates. If direct fails,
+/// automatically fall back to system default egress (which goes through the running proxy).
+fn fetch_body_with_egress(
+    url: &str,
+    policy: &Policy,
+    expected_sha256: Option<&str>,
+) -> Result<Fetched> {
+    let is_loopback = Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .is_some_and(|h| h == "127.0.0.1" || h == "localhost" || h == "::1");
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if is_root && !is_loopback {
+        // Attempt direct bypass (thread-local setegid(3005) via SYS_setresgid on Linux so
+        // only this thread's socket creation carries gid=3005, restored immediately after).
+        if let Ok(fetched) = run_with_thread_gid(NET_ADMIN_GID, || {
+            fetch_body(url, policy, expected_sha256, true)
+        }) {
+            return Ok(fetched);
+        }
+    }
+    fetch_body(url, policy, expected_sha256, false)
+}
+
+fn run_with_thread_gid<T>(gid: u32, f: impl FnOnce() -> T) -> T {
+    let orig = unsafe { libc::getegid() };
+    // Linux raw syscall SYS_setresgid modifies ONLY the calling thread's credentials
+    // (unlike glibc's setegid which broadcasts to all threads).
+    let switched = unsafe {
+        libc::syscall(
+            libc::SYS_setresgid,
+            -1 as libc::c_long,
+            gid as libc::c_long,
+            -1 as libc::c_long,
+        ) == 0
+    };
+    let result = f();
+    if switched {
+        unsafe {
+            let _ = libc::syscall(
+                libc::SYS_setresgid,
+                -1 as libc::c_long,
+                orig as libc::c_long,
+                -1 as libc::c_long,
+            );
+        }
+    }
+    result
+}
+
+#[derive(Debug)]
+struct DirectDnsResolver;
+
+impl ureq::unversioned::resolver::Resolver for DirectDnsResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> std::result::Result<ureq::unversioned::resolver::ArrayVec<SocketAddr, 16>, ureq::Error> {
+        let host = uri.host().unwrap_or_default();
+        let port = uri.port_u16().unwrap_or_else(|| {
+            if uri.scheme_str() == Some("http") {
+                80
+            } else {
+                443
+            }
+        });
+        if let Ok(ip) = host.trim_matches(|c| c == '[' || c == ']').parse::<IpAddr>() {
+            let mut addrs = ureq::unversioned::resolver::ArrayVec::from_fn(|_| {
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+            });
+            addrs.truncate(0);
+            addrs.push(SocketAddr::new(ip, port));
+            return Ok(addrs);
+        }
+        // Query real upstream DNS (223.5.5.5, then 1.1.1.1) directly over UDP 53 to bypass fake-ip.
+        for server in ["223.5.5.5:53", "1.1.1.1:53"] {
+            if let Some(ips) = udp_dns_query_a(host, server) {
+                let mut addrs = ureq::unversioned::resolver::ArrayVec::from_fn(|_| {
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+                });
+                addrs.truncate(0);
+                for ip in ips.into_iter().take(16) {
+                    addrs.push(SocketAddr::new(IpAddr::V4(ip), port));
+                }
+                if !addrs.is_empty() {
+                    return Ok(addrs);
+                }
+            }
+        }
+        ureq::unversioned::resolver::DefaultResolver::default().resolve(uri, config, timeout)
+    }
+}
+
+fn udp_dns_query_a(host: &str, server: &str) -> Option<Vec<Ipv4Addr>> {
+    let mut packet = Vec::with_capacity(64);
+    let txid: u16 = (util::now_ms() & 0xffff) as u16;
+    packet.extend_from_slice(&txid.to_be_bytes());
+    packet.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return None;
+        }
+        packet.push(label.len() as u8);
+        packet.extend_from_slice(label.as_bytes());
+    }
+    packet.push(0);
+    packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // QTYPE=A, QCLASS=IN
+
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+    let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+    socket.send_to(&packet, server).ok()?;
+    let mut buf = [0u8; 512];
+    let n = socket.recv(&mut buf).ok()?;
+    if n < 12 || buf[0] != (txid >> 8) as u8 || buf[1] != (txid & 0xff) as u8 {
+        return None;
+    }
+    let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let mut pos = 12usize;
+    for _ in 0..qdcount {
+        pos = skip_dns_name(&buf[..n], pos)?;
+        pos = pos.checked_add(4)?;
+        if pos > n {
+            return None;
+        }
+    }
+    let mut results = Vec::new();
+    for _ in 0..ancount {
+        pos = skip_dns_name(&buf[..n], pos)?;
+        if pos + 10 > n {
+            break;
+        }
+        let rtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        let rdlen = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlen > n {
+            break;
+        }
+        if rtype == 1 && rdlen == 4 {
+            let ip = Ipv4Addr::new(buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]);
+            // Skip fake-ip 198.18.0.0/15 just in case.
+            if !(ip.octets()[0] == 198 && (ip.octets()[1] == 18 || ip.octets()[1] == 19)) {
+                results.push(ip);
+            }
+        }
+        pos += rdlen;
+    }
+    (!results.is_empty()).then_some(results)
+}
+
+fn skip_dns_name(buf: &[u8], mut pos: usize) -> Option<usize> {
+    let mut jumped = 0usize;
+    while pos < buf.len() {
+        let len = buf[pos];
+        if len == 0 {
+            return Some(pos + 1);
+        }
+        if (len & 0xC0) == 0xC0 {
+            return pos.checked_add(2);
+        }
+        pos = pos.checked_add(1 + len as usize)?;
+        jumped += 1;
+        if jumped > 128 {
+            return None;
+        }
+    }
+    None
+}
+
+fn fetch_body(
+    url: &str,
+    policy: &Policy,
+    expected_sha256: Option<&str>,
+    direct_dns: bool,
+) -> Result<Fetched> {
     let (mut current, mirrored) = effective_url(url, policy)?;
     let roots = system_root_certs()
         .map(ureq::tls::RootCerts::from)
@@ -126,7 +308,15 @@ fn fetch_body(url: &str, policy: &Policy, expected_sha256: Option<&str>) -> Resu
         .http_status_as_error(false)
         .tls_config(ureq::tls::TlsConfig::builder().root_certs(roots).build())
         .build();
-    let agent: ureq::Agent = config.into();
+    let agent: ureq::Agent = if direct_dns {
+        ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::default(),
+            DirectDnsResolver,
+        )
+    } else {
+        config.into()
+    };
 
     for _ in 0..=MAX_REDIRECTS {
         let host = host_of(&current)?;

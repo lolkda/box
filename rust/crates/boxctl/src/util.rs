@@ -148,6 +148,18 @@ pub fn file_mode(path: &Path) -> Result<u32> {
 }
 
 pub fn format_unix_utc(seconds: u64) -> String {
+    let ts = seconds as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ptr = unsafe { libc::localtime_r(&ts, &mut tm) };
+    if !ptr.is_null() {
+        let year = tm.tm_year + 1900;
+        let month = tm.tm_mon + 1;
+        let day = tm.tm_mday;
+        let hour = tm.tm_hour;
+        let minute = tm.tm_min;
+        let second = tm.tm_sec;
+        return format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}");
+    }
     let days = (seconds / 86_400) as i64;
     let rest = seconds % 86_400;
     let (year, month, day) = civil_from_days(days);

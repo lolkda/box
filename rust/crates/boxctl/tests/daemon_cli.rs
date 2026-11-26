@@ -523,7 +523,7 @@ fn subscription_management_round_trip() {
     );
     assert_eq!(changed["ok"], true, "{changed}");
     assert_eq!(changed["data"]["name"], "renamed");
-    assert_eq!(changed["data"]["renamed"], true);
+    assert_eq!(changed["data"]["renamed"], false);
     assert_eq!(
         changed["data"]["user_agent_effective"],
         "clash-verge/v2.4.5"

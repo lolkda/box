@@ -68,15 +68,29 @@ pub fn start(paths: &Paths, params: StartParams) -> Result<Value> {
         if arg.chars().count() > 255 || arg.chars().any(char::is_control) {
             return Err(BoxError::validation("task argument is invalid"));
         }
+        if params.kind == "upkernel"
+            && !arg.is_empty()
+            && !matches!(arg.as_str(), "mihomo" | "mihomo_smart")
+        {
+            return Err(BoxError::manager_unavailable(format!(
+                "unsupported core: {arg}"
+            )));
+        }
     }
     util::ensure_dir(&paths.tasks_dir, true)?;
+    cleanup_old_tasks(paths, 20);
     let id = new_task_id(paths)?;
     let dir = paths.tasks_dir.join(&id);
     util::ensure_dir(&dir, true)?;
     write_value(&dir, "kind", &params.kind)?;
     write_value(&dir, "title", title)?;
     write_value(&dir, "state", STATE_RUNNING)?;
-    write_value(&dir, "cancelable", "true")?;
+    let cancelable = if params.kind == "upkernel" {
+        "false"
+    } else {
+        "true"
+    };
+    write_value(&dir, "cancelable", cancelable)?;
     write_value(&dir, "started_at", &now())?;
     if let Some(arg) = &params.arg {
         write_value(&dir, "arg", arg)?;
@@ -93,14 +107,23 @@ pub fn start(paths: &Paths, params: StartParams) -> Result<Value> {
         .map_err(|error| BoxError::from(error).with_detail("cannot clone task output"))?;
     let exe = std::env::current_exe()
         .map_err(|error| BoxError::from(error).with_detail("cannot resolve boxctl executable"))?;
-    let mut child = Command::new(exe)
-        .arg("task-run")
+    let mut cmd = Command::new(exe);
+    cmd.arg("task-run")
         .arg(&id)
         .arg("--root")
         .arg(&paths.home)
         .stdin(Stdio::null())
         .stdout(Stdio::from(output))
-        .stderr(Stdio::from(error_output))
+        .stderr(Stdio::from(error_output));
+    // Put task runner in its own process group so cancel can terminate child tools cleanly.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            let _ = libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|error| BoxError::from(error).with_detail("cannot spawn task runner"))?;
     write_value(&dir, "pid", &child.id().to_string())?;
@@ -306,13 +329,20 @@ fn update_cnip(paths: &Paths, store: &SettingsStore) -> Result<Value> {
             "sha256": report.sha256
         }));
     }
-    if v4_enabled {
-        reload_cnip_set(&paths.cnip_v4_file, "cnip", "inet")?;
-        reloaded.push("cnip");
-    }
-    if v6_enabled {
-        reload_cnip_set(&paths.cnip_v6_file, "cnip6", "inet6")?;
-        reloaded.push("cnip6");
+    let core_running = crate::service::status(paths)
+        .ok()
+        .and_then(|s| s["running"].as_bool())
+        .unwrap_or(false);
+    let ipset_available = crate::network::detect(paths).ipset;
+    if core_running && ipset_available {
+        if v4_enabled {
+            reload_cnip_set(&paths.cnip_v4_file, "cnip", "inet")?;
+            reloaded.push("cnip");
+        }
+        if v6_enabled {
+            reload_cnip_set(&paths.cnip_v6_file, "cnip6", "inet6")?;
+            reloaded.push("cnip6");
+        }
     }
     Ok(json!({"updated": updated, "reloaded": reloaded}))
 }
@@ -327,7 +357,7 @@ fn string_setting(settings: &serde_json::Map<String, Value>, key: &str) -> Resul
         .ok_or_else(|| BoxError::validation(format!("{key} is not configured")))
 }
 
-fn reload_cnip_set(path: &Path, set: &str, family: &str) -> Result<()> {
+pub fn reload_cnip_set(path: &Path, set: &str, family: &str) -> Result<()> {
     let text = fs::read_to_string(path).map_err(|error| {
         BoxError::from(error).with_detail(format!("cannot read {}", path.display()))
     })?;
@@ -487,9 +517,13 @@ pub fn cancel(paths: &Paths, params: IdParams) -> Result<Value> {
     };
     write_value(&dir, "cancel_requested", "canceled")?;
     let result = unsafe {
-        // SAFETY: the PID is parsed from a root-owned task directory; kill only
-        // delivers SIGTERM and does not dereference memory.
-        libc::kill(pid as libc::pid_t, libc::SIGTERM)
+        // Kill the entire task process group first, falling back to single PID.
+        let pg = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
+        if pg == 0 {
+            0
+        } else {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM)
+        }
     };
     if result != 0 {
         let error = std::io::Error::last_os_error();
@@ -507,10 +541,40 @@ pub fn cancel(paths: &Paths, params: IdParams) -> Result<Value> {
             return info(&dir);
         }
     }
-    Err(BoxError::new(
-        ErrorCode::Timeout,
-        "task did not stop after SIGTERM",
-    ))
+    // Force SIGKILL after 1s grace period so cancel never leaves a stuck running task.
+    unsafe {
+        let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+    thread::sleep(Duration::from_millis(100));
+    write_value(&dir, "state", "canceled")?;
+    write_value(&dir, "finished_at", &now())?;
+    info(&dir)
+}
+
+fn cleanup_old_tasks(paths: &Paths, keep: usize) {
+    let Ok(entries) = fs::read_dir(&paths.tasks_dir) else {
+        return;
+    };
+    let mut dirs = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter(|e| read_value(&e.path(), "state") != STATE_RUNNING)
+        .map(|e| {
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (mtime, e.path())
+        })
+        .collect::<Vec<_>>();
+    if dirs.len() <= keep {
+        return;
+    }
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in dirs.into_iter().skip(keep) {
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 fn task_dir(paths: &Paths, id: &str) -> Result<PathBuf> {

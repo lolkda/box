@@ -64,18 +64,21 @@ cp -a "${DASHBOARD_SOURCE}/." "${DASHBOARD_STAGE}/"
 ZIP_NAME="box-${VERSION}.zip"
 rm -f "${ZIP_NAME}"
 zip -r -o -X -ll "${ZIP_NAME}" ./ \
+  -x '.git' \
   -x '.git/*' \
+  -x '.gitignore' \
   -x 'CHANGELOG.md' \
   -x 'update.json' \
   -x 'build.sh' \
   -x '.github/*' \
   -x 'docs/*' \
   -x 'test/*' \
+  -x 'tools/*' \
   -x 'webui/*' \
   -x 'rust/*' \
   -x 'legacy/*' \
   -x 'artifacts/*' \
-  -x 'box-*.zip' \
+  -x '*.zip' \
   -x 'LICENSE' \
   -x 'box/mihomo/dashboard/*'
 (

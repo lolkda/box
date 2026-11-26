@@ -65,6 +65,16 @@ def prepare_root(root: Path, *, legacy: bool, fixture_base: str):
     (root / "bin").mkdir()
     for name in ("settings.json", "settings.default.json", "settings.schema.json"):
         shutil.copy2(ROOT / "box" / name, box / name)
+    if legacy:
+        # Legacy settings-gen.awk does not know newer Rust-only setting keys like `find_process_mode`.
+        for name in ("settings.json", "settings.default.json"):
+            data = json.loads((box / name).read_text())
+            data.pop("find_process_mode", None)
+            (box / name).write_text(json.dumps(data, indent=2) + "\n")
+        schema = json.loads((box / "settings.schema.json").read_text())
+        if isinstance(schema.get("properties"), dict):
+            schema["properties"].pop("find_process_mode", None)
+        (box / "settings.schema.json").write_text(json.dumps(schema, indent=2) + "\n")
     shutil.copy2(ROOT / "box" / "mihomo" / "config.yaml", box / "mihomo" / "config.yaml")
     if legacy:
         shutil.copy2(ROOT / "legacy" / "settings.base.sh", box / "settings.base.sh")

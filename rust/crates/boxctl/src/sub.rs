@@ -233,10 +233,23 @@ pub fn set(paths: &Paths, params: SetParams, global_ua: &str) -> Result<Value> {
     }
     store.save(&paths.subscriptions)?;
 
-    if old_safe != new_safe && old_provider.exists() {
+    let renamed_file = if old_safe != new_safe && old_provider.exists() {
         if let Err(error) = fs::rename(&old_provider, &new_provider) {
             let _ = store_with_lines(&old_lines).save(&paths.subscriptions);
             return Err(BoxError::from(error).with_detail("cannot rename provider file"));
+        }
+        true
+    } else {
+        false
+    };
+
+    // Migrate aggregate manifest source name and provider-defs cache on rename.
+    if params.old_name != new_name {
+        rename_manifest_source(paths, &params.old_name, &new_name)?;
+        let old_defs = paths.provider_defs_dir.join(format!("{old_safe}.yaml"));
+        let new_defs = paths.provider_defs_dir.join(format!("{new_safe}.yaml"));
+        if old_safe != new_safe && old_defs.is_file() {
+            let _ = fs::rename(&old_defs, &new_defs);
         }
     }
 
@@ -252,10 +265,24 @@ pub fn set(paths: &Paths, params: SetParams, global_ua: &str) -> Result<Value> {
     };
     if let Err(error) = ua_result {
         let _ = store_with_lines(&old_lines).save(&paths.subscriptions);
-        if old_safe != new_safe && new_provider.exists() {
+        if renamed_file && new_provider.exists() {
             let _ = fs::rename(&new_provider, &old_provider);
         }
         return Err(error);
+    }
+
+    // Sync config.yaml proxy-providers when auto_modify_config is enabled and subscription is enabled.
+    if old_entry.enabled {
+        let is_aggregate = manifest_count(paths, &new_name).unwrap_or(0) > 0;
+        if !is_aggregate {
+            if params.old_name != new_name {
+                let _ = remove_provider_defs(paths, &[params.old_name.clone()]);
+            }
+            let _ = sync_proxy_providers(
+                paths,
+                &[(new_name.clone(), params.url.clone(), new_provider.clone())],
+            );
+        }
     }
 
     let entry = Entry {
@@ -264,7 +291,7 @@ pub fn set(paths: &Paths, params: SetParams, global_ua: &str) -> Result<Value> {
         enabled: old_entry.enabled,
     };
     let mut data = item(paths, &entry, global_ua, true)?;
-    data["renamed"] = Value::Bool(new_name != params.old_name);
+    data["renamed"] = Value::Bool(renamed_file);
     Ok(data)
 }
 
@@ -380,7 +407,11 @@ pub fn update(
                         content_failures += 1;
                     }
                     Err(error) => {
-                        return Err(error);
+                        if params.name.is_some() {
+                            return Err(error);
+                        }
+                        failures += 1;
+                        content_failures += 1;
                     }
                 }
                 continue;
@@ -412,10 +443,11 @@ pub fn update(
         success += 1;
         committed_providers.push((entry.name.clone(), entry.url.clone(), provider));
     }
+    let mut reloaded = false;
     if success > 0 {
         sync_proxy_providers(paths, &committed_providers)?;
         crate::config::sync_ruleset_prefix_from_settings(paths)?;
-        restart_core_if_running(paths)?;
+        reloaded = crate::service::reload_if_running(paths)?;
     }
     if success == 0 && failures > 0 {
         let code = if content_failures > 0 {
@@ -429,6 +461,7 @@ pub fn update(
         "updated": true,
         "partial": failures > 0,
         "failed": failures > 0,
+        "reloaded": reloaded,
         "success": success,
         "failures": failures
     }))
@@ -636,6 +669,7 @@ fn update_aggregate_with_defs(
     let mut aggregate_policy = policy.clone();
     aggregate_policy.allow_http = true;
     let mut success = Vec::new();
+    let mut failed_names = std::collections::BTreeSet::new();
     let mut failures = 0;
     for spec in specs {
         let safe = safe_name(&spec.name);
@@ -645,6 +679,7 @@ fn update_aggregate_with_defs(
         if download::download_to_file(&temp, &spec.url, &aggregate_policy, None).is_err() {
             let _ = util::remove_file_if_exists(&temp);
             failures += 1;
+            failed_names.insert(spec.name.clone());
             if !keep_last_good {
                 let _ = util::remove_file_if_exists(&provider);
             }
@@ -655,6 +690,7 @@ fn update_aggregate_with_defs(
             Err(_) => {
                 let _ = util::remove_file_if_exists(&temp);
                 failures += 1;
+                failed_names.insert(spec.name.clone());
                 continue;
             }
         };
@@ -663,6 +699,7 @@ fn update_aggregate_with_defs(
             Err(_) => {
                 let _ = util::remove_file_if_exists(&temp);
                 failures += 1;
+                failed_names.insert(spec.name.clone());
                 if !keep_last_good {
                     let _ = util::remove_file_if_exists(&provider);
                 }
@@ -676,9 +713,28 @@ fn update_aggregate_with_defs(
     if success.is_empty() {
         return Ok((false, failures));
     }
+    // Preserve last-good manifest entries for sub-providers that failed when keep_last_good=true.
+    let mut effective_entries = success.clone();
+    if keep_last_good && !failed_names.is_empty() {
+        let existing_manifest =
+            util::read_to_string_optional(&paths.subscriptions_providers)?.unwrap_or_default();
+        for line in existing_manifest.lines() {
+            let mut parts = line.split('|');
+            if parts.next() != Some(source) {
+                continue;
+            }
+            let Some(name) = parts.next() else { continue };
+            let Some(url) = parts.next() else { continue };
+            let Some(path_str) = parts.next() else { continue };
+            let path = PathBuf::from(path_str);
+            if failed_names.contains(name) && path.is_file() {
+                effective_entries.push((name.to_string(), url.to_string(), path));
+            }
+        }
+    }
     let old_names = provider_names_for_source(paths, source).unwrap_or_default();
-    write_manifest(paths, source, &success)?;
-    let new_names = success
+    write_manifest(paths, source, &effective_entries)?;
+    let new_names = effective_entries
         .iter()
         .map(|(name, _, _)| name.clone())
         .collect::<std::collections::BTreeSet<_>>();
@@ -687,18 +743,48 @@ fn update_aggregate_with_defs(
         .filter(|name| !new_names.contains(name))
         .collect::<Vec<_>>();
     remove_provider_defs(paths, &stale)?;
-    write_provider_defs_cache(paths, source, &success, defs)?;
+    write_provider_defs_cache(paths, source, &effective_entries, defs)?;
+    // Only overwrite config blocks for providers that actually updated (keep old blocks intact for failed ones).
     sync_proxy_providers_with_defs(paths, &success, Some(defs))?;
     Ok((true, failures))
 }
 
-fn restart_core_if_running(paths: &Paths) -> Result<()> {
-    let running = crate::service::status(paths)
-        .ok()
-        .and_then(|status| status["running"].as_bool())
-        .unwrap_or(false);
-    if running {
-        crate::service::restart(paths)?;
+fn load_provider_defs_cache(
+    paths: &Paths,
+    source: &str,
+) -> std::collections::BTreeMap<String, YamlValue> {
+    let cache = paths
+        .provider_defs_dir
+        .join(format!("{}.yaml", safe_name(source)));
+    let Ok(text) = fs::read_to_string(&cache) else {
+        return std::collections::BTreeMap::new();
+    };
+    parse_aggregate_defs(text.as_bytes())
+}
+
+fn rename_manifest_source(paths: &Paths, old_source: &str, new_source: &str) -> Result<()> {
+    let Some(raw) = util::read_to_string_optional(&paths.subscriptions_providers)? else {
+        return Ok(());
+    };
+    let mut changed = false;
+    let mut lines = Vec::new();
+    for line in raw.lines() {
+        let mut parts = line.splitn(2, '|');
+        if parts.next() == Some(old_source) {
+            if let Some(rest) = parts.next() {
+                lines.push(format!("{new_source}|{rest}"));
+                changed = true;
+                continue;
+            }
+        }
+        lines.push(line.to_string());
+    }
+    if changed {
+        let mut text = lines.join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        util::atomic_write(&paths.subscriptions_providers, text.as_bytes(), 0o600)?;
     }
     Ok(())
 }
@@ -790,19 +876,24 @@ fn sync_proxy_providers_with_defs(
             YamlValue::String("health-check".to_string()),
             YamlValue::Mapping(health),
         );
+        // When an aggregate source provides an explicit provider definition (`source_def`),
+        // replace the provider block cleanly from `source_def` (preserving its `interval`,
+        // `health-check`, `filter`, `exclude-filter`, `override`, `header`, etc. and dropping
+        // stale fields that the upstream aggregate removed), only overriding `path`.
+        // For plain subscriptions (no `source_def`), keep default interval/health-check and
+        // preserve any user-added custom keys from `existing`.
         if let Some(source_def) = defs
             .and_then(|defs| defs.get(name))
             .and_then(YamlValue::as_mapping)
         {
             for (key, value) in source_def {
                 let key_name = key.as_str().unwrap_or_default();
-                if matches!(key_name, "type" | "url" | "path" | "interval") {
+                if matches!(key_name, "type" | "url" | "path") {
                     continue;
                 }
                 definition.insert(key.clone(), value.clone());
             }
-        }
-        if let Some(existing) = existing {
+        } else if let Some(existing) = existing {
             for (key, value) in existing {
                 let key_name = key.as_str().unwrap_or_default();
                 if matches!(
@@ -822,6 +913,26 @@ fn sync_proxy_providers_with_defs(
     let bytes = serde_yaml::to_string(&value).map_err(|error| {
         BoxError::internal("cannot serialize provider config").with_detail(error.to_string())
     })?;
+    // Validate with `mihomo -t` on a temporary file before overwriting config.yaml (legacy box.tool:858-864).
+    if paths.core_bin.is_file() {
+        let check_file = paths.config.with_extension("yaml.check");
+        util::atomic_write(&check_file, bytes.as_bytes(), 0o600)?;
+        let ok = std::process::Command::new(&paths.core_bin)
+            .arg("-t")
+            .arg("-d")
+            .arg(paths.home.join("mihomo"))
+            .arg("-f")
+            .arg(&check_file)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let _ = util::remove_file_if_exists(&check_file);
+        if !ok {
+            return Err(BoxError::validation(
+                "updated proxy-providers failed mihomo -t validation; old config preserved",
+            ));
+        }
+    }
     util::atomic_write(&paths.config, bytes.as_bytes(), 0o600)
 }
 
@@ -975,22 +1086,36 @@ fn parse_provider(bytes: &[u8]) -> Result<Vec<u8>> {
         }) {
             return Ok(bytes.to_vec());
         }
-        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(text.trim()) {
-            if let Ok(decoded_text) = std::str::from_utf8(&decoded) {
-                if decoded_text.lines().any(|line| {
-                    [
-                        "vless://",
-                        "vmess://",
-                        "ss://",
-                        "hysteria://",
-                        "hysteria2://",
-                        "anytls://",
-                        "trojan://",
-                    ]
-                    .iter()
-                    .any(|prefix| line.starts_with(prefix))
-                }) {
-                    return Ok(decoded);
+        // Support standard, URL-safe, multiline-wrapped, and unpadded Base64 subscriptions.
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        if !compact.is_empty() {
+            let decoded_opt = base64::engine::general_purpose::STANDARD
+                .decode(&compact)
+                .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&compact))
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&compact))
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&compact))
+                .ok();
+            if let Some(decoded) = decoded_opt {
+                if let Ok(decoded_text) = std::str::from_utf8(&decoded) {
+                    if decoded_text.lines().any(|line| {
+                        [
+                            "vless://",
+                            "vmess://",
+                            "ss://",
+                            "ssr://",
+                            "hysteria://",
+                            "hysteria2://",
+                            "hy2://",
+                            "anytls://",
+                            "trojan://",
+                            "tuic://",
+                            "wireguard://",
+                        ]
+                        .iter()
+                        .any(|prefix| line.trim_start().starts_with(prefix))
+                    }) {
+                        return Ok(decoded);
+                    }
                 }
             }
         }
@@ -1049,6 +1174,17 @@ pub fn set_enabled(
     if store.find(&params.name).is_none() {
         return Err(not_found(&params.name));
     }
+    let derived_names = provider_names_for_source(paths, &params.name)?;
+    if !enabled {
+        // Legacy proxy-groups[].use[] reference protection before disabling.
+        let mut protected = vec![params.name.clone()];
+        protected.extend(derived_names.iter().cloned());
+        if let Some((group, provider)) = find_group_provider_reference(paths, &protected) {
+            return Err(BoxError::validation(format!(
+                "provider '{provider}' is still referenced by proxy-group '{group}'"
+            )));
+        }
+    }
     let mut found = false;
     for line in &mut store.lines {
         if let Some(mut value) = parse_entry(line) {
@@ -1065,46 +1201,73 @@ pub fn set_enabled(
     }
     store.save(&paths.subscriptions)?;
     let safe = safe_name(&params.name);
-    let missing = !provider_file(paths, &safe).exists();
-    if auto_modify {
-        if enabled {
-            let mut entries = Vec::new();
-            if !missing {
-                if let Some(entry) = store.find(&params.name) {
-                    entries.push((
-                        entry.name.clone(),
-                        entry.url.clone(),
-                        provider_file(paths, &safe),
-                    ));
-                }
-            }
-            for line in util::read_to_string_optional(&paths.subscriptions_providers)?
-                .unwrap_or_default()
-                .lines()
-            {
-                let mut parts = line.split('|');
-                if parts.next() != Some(params.name.as_str()) {
-                    continue;
-                }
-                let Some(name) = parts.next() else { continue };
-                let Some(url) = parts.next() else { continue };
-                let Some(path) = parts.next() else { continue };
-                entries.push((name.to_string(), url.to_string(), PathBuf::from(path)));
-            }
-            sync_proxy_providers(paths, &entries)?;
-        } else {
-            let mut names = vec![params.name.clone()];
-            names.extend(provider_names_for_source(paths, &params.name)?);
-            remove_provider_defs(paths, &names)?;
+    let mut manifest_entries = Vec::new();
+    for line in util::read_to_string_optional(&paths.subscriptions_providers)?
+        .unwrap_or_default()
+        .lines()
+    {
+        let mut parts = line.split('|');
+        if parts.next() != Some(params.name.as_str()) {
+            continue;
         }
+        let Some(name) = parts.next() else { continue };
+        let Some(url) = parts.next() else { continue };
+        let Some(path) = parts.next() else { continue };
+        manifest_entries.push((name.to_string(), url.to_string(), PathBuf::from(path)));
     }
+    let missing = if !manifest_entries.is_empty() {
+        manifest_entries.iter().any(|(_, _, p)| !p.exists())
+    } else {
+        !provider_file(paths, &safe).exists()
+    };
+    if enabled {
+        if !manifest_entries.is_empty() {
+            let defs = load_provider_defs_cache(paths, &params.name);
+            let defs_opt = (!defs.is_empty()).then_some(&defs);
+            sync_proxy_providers_with_defs(paths, &manifest_entries, defs_opt)?;
+        } else if let Some(entry) = store.find(&params.name) {
+            // Even if local provider file has not been downloaded yet, write provider block back
+            // to config.yaml (matches legacy module-webui.test.sh:90-94).
+            sync_proxy_providers(
+                paths,
+                &[(entry.name.clone(), entry.url.clone(), provider_file(paths, &safe))],
+            )?;
+        }
+    } else {
+        let mut names = vec![params.name.clone()];
+        names.extend(derived_names);
+        remove_provider_defs(paths, &names)?;
+    }
+    let reloaded = crate::service::reload_if_running(paths)?;
     Ok(json!({
         "name": params.name,
         "enabled": enabled,
-        "reloaded": false,
+        "reloaded": reloaded,
         "missing": missing,
         "user_agent_effective": effective_ua(paths, &params.name, global_ua)
     }))
+}
+
+fn find_group_provider_reference(paths: &Paths, names: &[String]) -> Option<(String, String)> {
+    let text = fs::read_to_string(&paths.config).ok()?;
+    let yaml: YamlValue = serde_yaml::from_str(&text).ok()?;
+    let groups = yaml.get("proxy-groups")?.as_sequence()?;
+    for group in groups {
+        let group_name = group
+            .get("name")
+            .and_then(YamlValue::as_str)
+            .unwrap_or("unknown");
+        if let Some(uses) = group.get("use").and_then(YamlValue::as_sequence) {
+            for item in uses {
+                if let Some(provider) = item.as_str() {
+                    if names.iter().any(|n| n == provider) {
+                        return Some((group_name.to_string(), provider.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn item(paths: &Paths, entry: &Entry, global_ua: &str, detail: bool) -> Result<Value> {
@@ -1499,7 +1662,8 @@ mod tests {
         )
         .expect("set");
         assert_eq!(changed["name"], "new");
-        assert_eq!(changed["renamed"], true);
+        // No local provider file existed yet, so renamed (provider file rename) is false (legacy parity).
+        assert_eq!(changed["renamed"], false);
         assert_eq!(changed["enabled"], false);
         let detail = get(
             &paths,
@@ -1527,6 +1691,78 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode("ss://abc@example.com:443#node\n");
         let decoded = parse_provider(encoded.as_bytes()).expect("base64");
         assert!(String::from_utf8(decoded).expect("utf8").contains("ss://"));
+        // Multiline wrapped + unpadded base64
+        let raw_no_pad = base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode("trojan://pw@example.com:443#jp\n");
+        let wrapped = format!("{}\n{}\n", &raw_no_pad[..10], &raw_no_pad[10..]);
+        let decoded_wrapped = parse_provider(wrapped.as_bytes()).expect("wrapped base64");
+        assert!(String::from_utf8(decoded_wrapped)
+            .expect("utf8")
+            .contains("trojan://"));
+    }
+
+    #[test]
+    fn disable_blocks_provider_referenced_by_proxy_group() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(
+            &paths.config,
+            "proxy-providers:\n  one:\n    type: http\n    url: https://one.example/sub\n    path: ./proxy_provider/one.yaml\nproxy-groups:\n  - name: Proxy\n    type: select\n    use:\n      - one\n",
+        )
+        .expect("config");
+        add(
+            &paths,
+            AddParams {
+                url: "https://one.example/sub".to_string(),
+                name: Some("one".to_string()),
+                user_agent: None,
+            },
+            ua(),
+        )
+        .expect("add");
+        let err = set_enabled(
+            &paths,
+            NameParams {
+                name: "one".to_string(),
+            },
+            false,
+            true,
+            ua(),
+        )
+        .expect_err("must reject disabling referenced provider");
+        assert_eq!(err.code, crate::error::ErrorCode::Validation);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn aggregate_sync_preserves_source_interval_and_drops_stale_fields() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(
+            &paths.config,
+            "proxy-providers:\n  p1:\n    type: http\n    url: https://old.example/p1.yaml\n    path: ./proxy_provider/p1.yaml\n    stale-field: old-junk\n",
+        )
+        .expect("config");
+        let defs = parse_aggregate_defs(
+            b"proxy-providers:\n  p1:\n    type: http\n    url: https://new.example/p1.yaml\n    interval: 600\n    exclude-filter: expired\n",
+        );
+        super::sync_proxy_providers_with_defs(
+            &paths,
+            &[(
+                "p1".to_string(),
+                "https://new.example/p1.yaml".to_string(),
+                paths.providers_dir.join("p1.yaml"),
+            )],
+            Some(&defs),
+        )
+        .expect("sync");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&paths.config).expect("read")).expect("yaml");
+        let p1 = &yaml["proxy-providers"]["p1"];
+        assert_eq!(p1["interval"].as_u64(), Some(600));
+        assert_eq!(p1["exclude-filter"].as_str(), Some("expired"));
+        assert!(p1.get("stale-field").is_none(), "stale-field must be dropped");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

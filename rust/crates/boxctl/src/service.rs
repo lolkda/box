@@ -20,6 +20,9 @@ use crate::util;
 
 const DEFAULT_HEALTH_WINDOW: Duration = Duration::from_secs(5);
 const STOP_WINDOW: Duration = Duration::from_secs(2);
+const NET_ADMIN_GID: u32 = 3005;
+const MAX_RETAINED_CANDIDATES: usize = 20;
+const CORE_NOFILE_LIMIT: u64 = 1_000_000;
 
 #[derive(Debug, Clone)]
 struct Tx {
@@ -96,6 +99,8 @@ fn start_with_window(
             "core config validation failed",
         ));
     }
+    // Reap any orphan core process not tracked by box.pid before binding ports.
+    kill_orphan_cores(paths, None);
     set_phase(paths, &tx, "switching", None)?;
     if fault == Some("switching") {
         return Err(BoxError::internal("injected fault after switching"));
@@ -105,6 +110,7 @@ fn start_with_window(
     })?;
     let pid = child.id();
     write_pid(paths, pid)?;
+    let cgroup_warnings = apply_cgroups_for_pid(paths, pid);
     if fault == Some("spawned") {
         let _ = child.kill();
         let _ = child.wait();
@@ -142,7 +148,9 @@ fn start_with_window(
     }
     let plan = load_network_plan(paths)?;
     if let Some(plan) = &plan {
-        if plan.rules.is_empty() && plan.requested_mode.as_str() != "tun" {
+        if plan.rules.is_empty()
+            && !matches!(plan.requested_mode.as_str(), "tun" | "mixed")
+        {
             let _ = child.kill();
             let _ = child.wait();
             let _ = util::remove_file_if_exists(&paths.box_pid);
@@ -153,6 +161,13 @@ fn start_with_window(
             )
             .with_detail(plan.warnings.join("; ")));
         }
+        if matches!(plan.requested_mode.as_str(), "tun" | "mixed") {
+            let tun_dev = tun_device_name(paths);
+            let _ = wait_tun_device(&tun_dev, Duration::from_secs(6));
+        }
+        // Always ensure CNIP ipsets are loaded when ipset is available and enabled.
+        let cnip_warnings = load_cnip_ipsets_if_needed(paths);
+        let _ = cnip_warnings;
         if !plan.rules.is_empty() {
             // Remove leftovers from any previous mode before adding the new plan.
             let _ = cleanup_all_network(paths, runner);
@@ -186,6 +201,8 @@ fn start_with_window(
                 return Err(error.with_detail(detail));
             }
         }
+        // Apply sysctl / IPv6 disable / dynamic LOCAL_IP_V4/6 after rules are active.
+        apply_runtime_network_post_start(paths, plan, runner);
     }
     if let Err(error) = health_check(&tx.candidate) {
         let _ = set_phase(paths, &tx, "rolling_back", Some(&error.message));
@@ -202,10 +219,11 @@ fn start_with_window(
     }
     set_phase(paths, &tx, "applied", None)?;
     write_last_good(paths, &tx)?;
+    cleanup_old_candidates(paths, MAX_RETAINED_CANDIDATES);
     set_intent(paths, "running")?;
     let _ = write_control(paths, "manual", "running")?;
     let _ = util::remove_file_if_exists(&paths.event_stop);
-    let warnings = plan
+    let mut warnings = plan
         .as_ref()
         .map(|plan| {
             plan.warnings
@@ -216,6 +234,9 @@ fn start_with_window(
         .unwrap_or_else(|| {
             vec![json!({"code": "E_NETWORK_PLAN_UNAVAILABLE", "message": "settings are unavailable; network rules were not applied"})]
         });
+    for message in cgroup_warnings {
+        warnings.push(json!({"code": "E_CGROUP_DEGRADED", "message": message}));
+    }
     Ok(json!({
         "action": "start",
         "status": status(paths)?,
@@ -235,22 +256,43 @@ pub fn start_for_restart(paths: &Paths) -> Result<Value> {
 }
 
 pub fn stop(paths: &Paths) -> Result<Value> {
-    stop_internal(paths, true)
+    let mut runner = network::SystemRunner;
+    stop_internal_with_runner(paths, true, &mut runner)
 }
 
 fn stop_internal(paths: &Paths, interrupt_tasks: bool) -> Result<Value> {
+    let mut runner = network::SystemRunner;
+    stop_internal_with_runner(paths, interrupt_tasks, &mut runner)
+}
+
+fn stop_internal_with_runner(
+    paths: &Paths,
+    interrupt_tasks: bool,
+    runner: &mut dyn network::Runner,
+) -> Result<Value> {
+    let tx = begin_tx(paths, "stop")?;
+    set_phase(paths, &tx, "switching", None)?;
+    // Clean up network rules BEFORE stopping the core (module-service-stop-cleanup R-002).
+    // If cleanup fails, abort stop and leave core running so transparent proxy does not blackhole traffic.
+    let rules_cleaned = match cleanup_all_network(paths, runner) {
+        Ok(cleaned) => cleaned,
+        Err(error) => {
+            let _ = fail_manual(
+                paths,
+                &tx,
+                error.detail.as_deref().unwrap_or(&error.message),
+            );
+            return Err(error);
+        }
+    };
+    // Restore IPv6 sysctl / unreachable rule if previously disabled.
+    network::restore_ipv6_policy(runner);
     let _ = util::remove_file_if_exists(&paths.event_stop);
     set_intent(paths, "stopped")?;
     let _ = write_control(paths, "manual", "stopped")?;
     if interrupt_tasks {
         let _ = crate::task::interrupt_all(paths);
     }
-    let tx = begin_tx(paths, "stop")?;
-    set_phase(paths, &tx, "switching", None)?;
-    let rules_cleaned = {
-        let mut runner = network::SystemRunner;
-        cleanup_all_network(paths, &mut runner)?
-    };
     let pid = read_pid(paths)?;
     if let Some(pid) = pid {
         if core_alive(paths, pid) {
@@ -272,6 +314,8 @@ fn stop_internal(paths: &Paths, interrupt_tasks: bool) -> Result<Value> {
     if let Some(pid) = pid {
         reap_child(pid);
     }
+    // Also clean up any orphan core processes not tracked by box.pid.
+    kill_orphan_cores(paths, pid);
     let _ = util::remove_file_if_exists(&paths.box_pid);
     set_phase(paths, &tx, "applied", None)?;
     Ok(json!({
@@ -314,7 +358,11 @@ fn reload_url(endpoint: &str) -> Result<String> {
 }
 
 pub fn reload(paths: &Paths) -> Result<Value> {
-    let config = fs::read_to_string(&paths.config)
+    // Stage and prepare a fresh candidate config so Mihomo reloads the latest
+    // config.yaml + settings without modifying the user's source config.yaml.
+    let candidate_path = stage_reload_candidate(paths)?;
+    let config_to_read = candidate_path.as_deref().unwrap_or(&paths.config);
+    let config = fs::read_to_string(config_to_read)
         .map_err(|error| BoxError::from(error).with_detail("cannot read core config"))?;
     let value: serde_yaml::Value = serde_yaml::from_str(&config).map_err(|error| {
         BoxError::new(ErrorCode::Reload, "core config is not valid YAML")
@@ -343,8 +391,14 @@ pub fn reload(paths: &Paths) -> Result<Value> {
     if !secret.is_empty() {
         request = request.header("Authorization", &format!("Bearer {secret}"));
     }
+    let payload = json!({
+        "path": "",
+        "payload": if candidate_path.is_some() { config.as_str() } else { "" }
+    })
+    .to_string();
     let response = request
-        .send("{\"path\":\"\",\"payload\":\"\"}")
+        .header("Content-Type", "application/json")
+        .send(&payload)
         .map_err(|error| {
             BoxError::new(ErrorCode::Reload, "core reload request failed")
                 .with_detail(error.to_string())
@@ -355,9 +409,88 @@ pub fn reload(paths: &Paths) -> Result<Value> {
             format!("core reload returned HTTP {}", response.status().as_u16()),
         ));
     }
+    cleanup_old_candidates(paths, MAX_RETAINED_CANDIDATES);
     Ok(json!({
         "action": "reload",
-        "status": response.status().as_u16()
+        "status": response.status().as_u16(),
+        "candidate": candidate_path.map(|p| p.display().to_string())
+    }))
+}
+
+pub fn reload_if_running(paths: &Paths) -> Result<bool> {
+    if !status(paths)?["running"].as_bool().unwrap_or(false) {
+        return Ok(false);
+    }
+    reload(paths)?;
+    Ok(true)
+}
+
+fn stage_reload_candidate(paths: &Paths) -> Result<Option<std::path::PathBuf>> {
+    if !paths.config.is_file() {
+        return Ok(None);
+    }
+    if !paths.settings.is_file() {
+        return Ok(None);
+    }
+    let txid = format!("reload-{}-{}", util::now_ms(), std::process::id());
+    let candidate_dir = paths.candidates_dir.join(&txid);
+    util::ensure_dir(&candidate_dir, true)?;
+    let candidate = candidate_dir.join("config.yaml");
+    fs::copy(&paths.config, &candidate)
+        .map_err(|error| BoxError::from(error).with_detail("cannot stage reload candidate"))?;
+    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o600))
+        .map_err(|error| BoxError::from(error).with_detail("cannot chmod reload candidate"))?;
+    let mode = selected_mode(paths);
+    if !matches!(mode.as_deref(), Some("tun") | Some("mixed")) {
+        disable_tun_candidate(paths, &candidate)?;
+    } else if mode.as_deref() == Some("mixed") {
+        enable_tun_candidate(paths, &candidate)?;
+    }
+    prepare_candidate(paths, &candidate, mode.as_deref())?;
+    if paths.core_bin.is_file() && !check_candidate(paths, &candidate) {
+        let _ = fs::remove_dir_all(&candidate_dir);
+        return Err(BoxError::new(
+            ErrorCode::Reload,
+            "core config validation failed before reload",
+        ));
+    }
+    Ok(Some(candidate))
+}
+
+pub fn check_config(paths: &Paths) -> Result<Value> {
+    if !paths.core_bin.is_file() {
+        return Err(
+            BoxError::new(ErrorCode::NotFound, "core binary does not exist")
+                .with_detail(paths.core_bin.display().to_string()),
+        );
+    }
+    if !paths.config.is_file() {
+        return Err(
+            BoxError::new(ErrorCode::NotFound, "core config does not exist")
+                .with_detail(paths.config.display().to_string()),
+        );
+    }
+    let output = Command::new(&paths.core_bin)
+        .arg("-t")
+        .arg("-d")
+        .arg(paths.home.join("mihomo"))
+        .arg("-f")
+        .arg(&paths.config)
+        .output()
+        .map_err(|error| BoxError::from(error).with_detail("cannot run mihomo -t"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(BoxError::new(
+            ErrorCode::Validation,
+            "mihomo configuration check failed",
+        )
+        .with_detail(format!("{stdout}{stderr}").trim().to_string()));
+    }
+    Ok(json!({
+        "valid": true,
+        "config": paths.config.display().to_string(),
+        "output": format!("{stdout}{stderr}").trim()
     }))
 }
 
@@ -425,21 +558,34 @@ fn cleanup_all_network(paths: &Paths, runner: &mut dyn network::Runner) -> Resul
         return Ok(false);
     }
     let store = SettingsStore::open(paths.clone())?;
-    let settings = Value::Object(store.load()?);
+    let mut settings = Value::Object(store.load()?);
+    enrich_network_settings(paths, &mut settings);
     let caps = network::detect(paths);
-    let cleaned =
-        network::cleanup_all(&settings, caps, dns_listen_port(paths), runner).unwrap_or(false);
+    let rules = network_rules::load_for_plan(paths).ok();
+    let cleaned = network::cleanup_all(
+        &settings,
+        caps,
+        dns_listen_port(paths),
+        rules.as_ref(),
+        runner,
+    )?;
     Ok(network::cleanup_stale(runner) || cleaned)
 }
 
-fn load_network_plan(paths: &Paths) -> Result<Option<network::Plan>> {
+pub fn load_network_plan(paths: &Paths) -> Result<Option<network::Plan>> {
     if !paths.settings.is_file() {
         return Ok(None);
     }
     let store = SettingsStore::open(paths.clone())?;
     let mut settings = Value::Object(store.load()?);
+    enrich_network_settings(paths, &mut settings);
+    let rules = network_rules::load_for_plan(paths)?;
+    build_network_plan(paths, &settings, &rules)
+}
+
+pub fn enrich_network_settings(paths: &Paths, settings: &mut Value) {
     settings["__proxy_uids"] = Value::Array(
-        proxy_uids(paths, &settings)
+        proxy_uids(paths, settings)
             .into_iter()
             .map(|uid| Value::Number(uid.into()))
             .collect(),
@@ -450,8 +596,17 @@ fn load_network_plan(paths: &Paths) -> Result<Option<network::Plan>> {
             .map(|gid| Value::Number(gid.into()))
             .collect(),
     );
-    let rules = network_rules::load_for_plan(paths)?;
-    build_network_plan(paths, &settings, &rules)
+    let (allow_aps, ignore_aps) = read_ap_lists(paths);
+    settings["__ap_allow"] = Value::Array(allow_aps.into_iter().map(Value::String).collect());
+    settings["__ap_ignore"] = Value::Array(ignore_aps.into_iter().map(Value::String).collect());
+    settings["__tun_device"] = Value::String(tun_device_name(paths));
+    let (fake_ip_v4, fake_ip_v6) = fake_ip_ranges(paths);
+    if let Some(range) = fake_ip_v4 {
+        settings["__fake_ip_range"] = Value::String(range);
+    }
+    if let Some(range6) = fake_ip_v6 {
+        settings["__fake_ip_range6"] = Value::String(range6);
+    }
 }
 
 fn build_network_plan(
@@ -474,18 +629,7 @@ pub fn preview_network_plan(paths: &Paths, rules: &network_rules::Document) -> R
     }
     let store = SettingsStore::open(paths.clone())?;
     let mut settings = Value::Object(store.load()?);
-    settings["__proxy_uids"] = Value::Array(
-        proxy_uids(paths, &settings)
-            .into_iter()
-            .map(|uid| Value::Number(uid.into()))
-            .collect(),
-    );
-    settings["__proxy_gids"] = Value::Array(
-        proxy_gids(paths)
-            .into_iter()
-            .map(|gid| Value::Number(gid.into()))
-            .collect(),
-    );
+    enrich_network_settings(paths, &mut settings);
     let plan = build_network_plan(paths, &settings, rules)?
         .ok_or_else(|| BoxError::new(ErrorCode::NotFound, "network settings are unavailable"))?;
     let mut chains = std::collections::BTreeMap::<String, usize>::new();
@@ -510,18 +654,7 @@ pub fn apply_network_rules(
 ) -> Result<Value> {
     let store = SettingsStore::open(paths.clone())?;
     let mut settings = Value::Object(store.load()?);
-    settings["__proxy_uids"] = Value::Array(
-        proxy_uids(paths, &settings)
-            .into_iter()
-            .map(|uid| Value::Number(uid.into()))
-            .collect(),
-    );
-    settings["__proxy_gids"] = Value::Array(
-        proxy_gids(paths)
-            .into_iter()
-            .map(|gid| Value::Number(gid.into()))
-            .collect(),
-    );
+    enrich_network_settings(paths, &mut settings);
     let rules = network_rules::load_for_plan(paths)?;
     let plan = build_network_plan(paths, &settings, &rules)?
         .ok_or_else(|| BoxError::new(ErrorCode::NotFound, "network settings are unavailable"))?;
@@ -536,6 +669,7 @@ pub fn apply_network_rules(
         }
         return Err(error);
     }
+    apply_runtime_network_post_start(paths, &plan, &mut runner);
     Ok(json!({
         "applied": true,
         "effective_mode": plan.effective_mode,
@@ -564,8 +698,15 @@ fn proxy_uids(paths: &Paths, settings: &Value) -> Vec<u32> {
         }
     }
     let mut uids = std::collections::BTreeSet::new();
-    for entry in entries.lines() {
-        let (prefix, package) = entry.split_once(':').unwrap_or(("0", entry));
+    for raw in entries.lines() {
+        let entry = raw.trim();
+        if entry.is_empty() || entry.starts_with('#') || entry.starts_with("mode:") {
+            continue;
+        }
+        let (prefix, package) = match entry.split_once(':') {
+            Some((prefix, package)) => (prefix.trim(), package.trim()),
+            None => ("0", entry),
+        };
         let prefix = prefix.parse::<u32>().unwrap_or(0);
         if let Some(uid) = packages.get(package) {
             uids.insert(uid.saturating_add(prefix.saturating_mul(100_000)));
@@ -578,20 +719,99 @@ fn proxy_gids(paths: &Paths) -> Vec<u32> {
     fs::read_to_string(&paths.gid_list)
         .unwrap_or_default()
         .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.parse::<u32>().ok())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
 }
 
+fn read_ap_lists(paths: &Paths) -> (Vec<String>, Vec<String>) {
+    let mut allow = Vec::new();
+    let mut ignore = Vec::new();
+    let Ok(text) = fs::read_to_string(&paths.ap_list) else {
+        return (allow, ignore);
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(action) = parts.next() else { continue };
+        let Some(iface) = parts.next() else { continue };
+        match action {
+            "allow" => allow.push(iface.to_string()),
+            "ignore" => ignore.push(iface.to_string()),
+            _ => {}
+        }
+    }
+    (allow, ignore)
+}
+
+pub fn tun_device_name(paths: &Paths) -> String {
+    fs::read_to_string(&paths.config)
+        .ok()
+        .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok())
+        .and_then(|yaml| {
+            yaml.get("tun")
+                .and_then(|tun| tun.get("device"))
+                .and_then(serde_yaml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "meta".to_string())
+}
+
+fn fake_ip_ranges(paths: &Paths) -> (Option<String>, Option<String>) {
+    let Ok(text) = fs::read_to_string(&paths.config) else {
+        return (None, None);
+    };
+    let Ok(config) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+        return (None, None);
+    };
+    let Some(dns) = config.get("dns") else {
+        return (None, None);
+    };
+    let enhanced = dns
+        .get("enhanced-mode")
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or("fake-ip");
+    if enhanced != "fake-ip" {
+        return (None, None);
+    }
+    let v4 = dns
+        .get("fake-ip-range")
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| Some("198.18.0.1/16".to_string()));
+    let v6 = dns
+        .get("fake-ip-range6")
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| Some("fc00::/18".to_string()));
+    (v4, v6)
+}
+
 fn dns_listen_port(paths: &Paths) -> Option<u16> {
     let text = fs::read_to_string(&paths.config).ok()?;
     let config: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
-    let listen = config
+    if let Some(listen) = config
         .get("dns")
         .and_then(|dns| dns.get("listen"))
-        .and_then(serde_yaml::Value::as_str)?;
-    listen.rsplit(':').next()?.trim().parse().ok()
+        .and_then(serde_yaml::Value::as_str)
+    {
+        if let Some(port) = listen.rsplit(':').next().and_then(|v| v.trim().parse().ok()) {
+            return Some(port);
+        }
+    }
+    Some(1053)
 }
 
 pub fn recover(paths: &Paths) -> Result<Value> {
@@ -819,18 +1039,21 @@ fn yaml_insert_missing(
 }
 
 fn proxy_lists_configured(paths: &Paths) -> bool {
-    [&paths.package_list, &paths.gid_list, &paths.ap_list]
-        .into_iter()
-        .any(|path| {
-            fs::read_to_string(path)
-                .map(|text| {
-                    text.lines().any(|line| {
-                        let line = line.trim();
-                        !line.is_empty() && !line.starts_with('#')
-                    })
+    let has_pkg_or_gid = [&paths.package_list, &paths.gid_list].into_iter().any(|path| {
+        fs::read_to_string(path)
+            .map(|text| {
+                text.lines().any(|line| {
+                    let line = line.trim();
+                    !line.is_empty() && !line.starts_with('#') && !line.starts_with("mode:")
                 })
-                .unwrap_or(false)
-        })
+            })
+            .unwrap_or(false)
+    });
+    if has_pkg_or_gid {
+        return true;
+    }
+    let (_, ignore_aps) = read_ap_lists(paths);
+    !ignore_aps.is_empty()
 }
 
 fn proxy_uid_values(paths: &Paths, settings: &Value) -> Vec<u64> {
@@ -966,7 +1189,9 @@ fn prepare_dns_block(
     mode: &str,
 ) -> bool {
     let dns_key = yaml_key("dns");
-    let existed = mapping.contains_key(&dns_key);
+    if !mapping.contains_key(&dns_key) {
+        return false;
+    }
     let mut dns = mapping
         .get(&dns_key)
         .and_then(yaml_mapping)
@@ -990,25 +1215,45 @@ fn prepare_dns_block(
         && proxy_mode != "core"
         && proxy_lists_configured(paths)
         && enhanced == "fake-ip";
+    let mut changed = before != dns;
     if should_switch {
         dns.insert(
             yaml_key("enhanced-mode"),
             serde_yaml::Value::String("redir-host".to_string()),
         );
+        changed = true;
+    }
+    if changed {
+        mapping.insert(dns_key, serde_yaml::Value::Mapping(dns));
+    }
+    if should_switch {
+        // Mihomo's `sniffer:` is a top-level section, NOT nested under `dns:`.
         let sniffer_key = yaml_key("sniffer");
-        let mut sniffer = dns
+        let mut sniffer = mapping
             .get(&sniffer_key)
             .and_then(yaml_mapping)
             .cloned()
             .unwrap_or_default();
-        sniffer.insert(yaml_key("enable"), serde_yaml::Value::Bool(true));
-        dns.insert(sniffer_key, serde_yaml::Value::Mapping(sniffer));
-    }
-    let changed = !existed || before != dns;
-    if changed {
-        mapping.insert(dns_key, serde_yaml::Value::Mapping(dns));
+        if sniffer
+            .get(yaml_key("enable"))
+            .and_then(serde_yaml::Value::as_bool)
+            != Some(true)
+        {
+            sniffer.insert(yaml_key("enable"), serde_yaml::Value::Bool(true));
+            mapping.insert(sniffer_key, serde_yaml::Value::Mapping(sniffer));
+            changed = true;
+        }
     }
     changed
+}
+
+fn auto_modify_config_enabled(paths: &Paths) -> bool {
+    SettingsStore::open(paths.clone())
+        .ok()
+        .and_then(|store| store.load().ok())
+        .and_then(|settings| settings.get("auto_modify_config").cloned())
+        .and_then(|value| value.as_str().map(|value| value == "true"))
+        .unwrap_or(true)
 }
 
 pub fn find_process_mode(paths: &Paths) -> String {
@@ -1018,7 +1263,7 @@ pub fn find_process_mode(paths: &Paths) -> String {
         .and_then(|settings| settings.get("find_process_mode").cloned())
         .and_then(|value| value.as_str().map(str::to_string))
         .filter(|value| matches!(value.as_str(), "always" | "strict" | "off"))
-        .unwrap_or_else(|| "strict".to_string())
+        .unwrap_or_else(|| "off".to_string())
 }
 
 fn prepare_candidate(paths: &Paths, candidate: &Path, mode: Option<&str>) -> Result<()> {
@@ -1030,6 +1275,13 @@ fn prepare_candidate(paths: &Paths, candidate: &Path, mode: Option<&str>) -> Res
     }
     let store = SettingsStore::open(paths.clone())?;
     let settings = store.load()?;
+    if settings
+        .get("auto_modify_config")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value != "true")
+    {
+        return Ok(());
+    }
     let text = fs::read_to_string(candidate)?;
     let mut value: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|error| {
         BoxError::validation("core config is not valid YAML").with_detail(error.to_string())
@@ -1098,6 +1350,9 @@ fn prepare_candidate(paths: &Paths, candidate: &Path, mode: Option<&str>) -> Res
 }
 
 fn enable_tun_candidate(paths: &Paths, candidate: &Path) -> Result<()> {
+    if !auto_modify_config_enabled(paths) {
+        return Ok(());
+    }
     let text = fs::read_to_string(candidate)?;
     let mut value: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|error| {
         BoxError::validation("core config is not valid YAML").with_detail(error.to_string())
@@ -1274,6 +1529,7 @@ fn spawn_core(paths: &Paths, config: &Path) -> Result<std::process::Child> {
     let error_log = log
         .try_clone()
         .map_err(|error| BoxError::from(error).with_detail("cannot clone core log"))?;
+    let cpu_list = taskset_cpus(paths);
     let mut command = Command::new(&paths.core_bin);
     command
         .current_dir(paths.home.join("mihomo"))
@@ -1285,10 +1541,38 @@ fn spawn_core(paths: &Paths, config: &Path) -> Result<std::process::Child> {
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(error_log));
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             // Do not leak daemon control sockets or event fds into the Go core.
             for fd in 3..256 {
                 libc::close(fd);
+            }
+            // Raise RLIMIT_NOFILE toward 1_000_000 (legacy ulimit -SHn 1000000); degrade cleanly if denied.
+            for target in [CORE_NOFILE_LIMIT, 262_144, 65_536] {
+                let lim = libc::rlimit {
+                    rlim_cur: target as libc::rlim_t,
+                    rlim_max: target as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+                    break;
+                }
+            }
+            // Run mihomo under gid=3005 (Android net_admin) when running as root so
+            // iptables `--uid-owner 0 --gid-owner 3005` bypasses only the core itself.
+            if libc::geteuid() == 0 {
+                let _ = libc::setgid(NET_ADMIN_GID as libc::gid_t);
+            }
+            // Apply CPU affinity if taskset_cpu=true and allow_cpu parsed successfully.
+            if let Some(ref cpus) = cpu_list {
+                let mut set: libc::cpu_set_t = std::mem::zeroed();
+                libc::CPU_ZERO(&mut set);
+                for &cpu in cpus {
+                    libc::CPU_SET(cpu, &mut set);
+                }
+                let _ = libc::sched_setaffinity(
+                    0,
+                    std::mem::size_of::<libc::cpu_set_t>(),
+                    &set,
+                );
             }
             Ok(())
         });
@@ -1296,6 +1580,308 @@ fn spawn_core(paths: &Paths, config: &Path) -> Result<std::process::Child> {
     command
         .spawn()
         .map_err(|error| BoxError::from(error).with_detail("cannot spawn core"))
+}
+
+fn taskset_cpus(paths: &Paths) -> Option<Vec<usize>> {
+    let store = SettingsStore::open(paths.clone()).ok()?;
+    let settings = store.load().ok()?;
+    if settings.get("taskset_cpu").and_then(Value::as_str) != Some("true") {
+        return None;
+    }
+    let spec = settings
+        .get("allow_cpu")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    parse_cpu_list(spec)
+}
+
+pub fn parse_cpu_list(spec: &str) -> Option<Vec<usize>> {
+    let mut cpus = std::collections::BTreeSet::new();
+    for item in spec.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if let Some((start, end)) = item.split_once('-') {
+            let start = start.trim().parse::<usize>().ok()?;
+            let end = end.trim().parse::<usize>().ok()?;
+            if start > end || end >= 1024 {
+                return None;
+            }
+            for cpu in start..=end {
+                cpus.insert(cpu);
+            }
+        } else {
+            let cpu = item.parse::<usize>().ok()?;
+            if cpu >= 1024 {
+                return None;
+            }
+            cpus.insert(cpu);
+        }
+    }
+    if cpus.is_empty() {
+        None
+    } else {
+        Some(cpus.into_iter().collect())
+    }
+}
+
+pub fn parse_memcg_limit(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (digits, mult) = match raw.as_bytes().last().copied() {
+        Some(b'k' | b'K') => (&raw[..raw.len() - 1], 1024u64),
+        Some(b'm' | b'M') => (&raw[..raw.len() - 1], 1024u64 * 1024),
+        Some(b'g' | b'G') => (&raw[..raw.len() - 1], 1024u64 * 1024 * 1024),
+        _ => (raw, 1u64),
+    };
+    digits.trim().parse::<u64>().ok()?.checked_mul(mult)
+}
+
+fn find_cgroup_mount(controller: &str) -> Option<(std::path::PathBuf, bool)> {
+    let mounts = fs::read_to_string("/proc/mounts").ok()?;
+    // Prefer cgroup v1 dedicated mount matching controller name.
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let _dev = fields.next()?;
+        let mount_point = fields.next()?;
+        let fstype = fields.next()?;
+        let options = fields.next()?;
+        if fstype == "cgroup"
+            && options
+                .split(',')
+                .any(|opt| opt == controller || (controller == "memory" && opt == "memcg"))
+        {
+            return Some((std::path::PathBuf::from(mount_point), false));
+        }
+    }
+    // Fallback: cgroup2 unified mount if controller is listed in cgroup.controllers.
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let _dev = fields.next()?;
+        let mount_point = fields.next()?;
+        let fstype = fields.next()?;
+        if fstype == "cgroup2" {
+            let path = std::path::PathBuf::from(mount_point);
+            let controllers = fs::read_to_string(path.join("cgroup.controllers")).unwrap_or_default();
+            let v2_name = if controller == "blkio" { "io" } else { controller };
+            if controllers.split_whitespace().any(|c| c == v2_name) {
+                return Some((path, true));
+            }
+        }
+    }
+    None
+}
+
+fn apply_cgroups_for_pid(paths: &Paths, pid: u32) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Ok(store) = SettingsStore::open(paths.clone()) else {
+        return warnings;
+    };
+    let Ok(settings) = store.load() else {
+        return warnings;
+    };
+    if settings.get("cgroup_memcg").and_then(Value::as_str) == Some("true") {
+        let raw_limit = settings
+            .get("memcg_limit")
+            .and_then(Value::as_str)
+            .unwrap_or("100M");
+        if let Err(msg) = apply_memcg(pid, raw_limit) {
+            warnings.push(format!("cgroup_memcg degraded: {msg}"));
+        }
+    }
+    if settings.get("cgroup_blkio").and_then(Value::as_str) == Some("true") {
+        let raw_weight = settings
+            .get("weight")
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or("900");
+        if let Err(msg) = apply_blkio(pid, raw_weight) {
+            warnings.push(format!("cgroup_blkio degraded: {msg}"));
+        }
+    }
+    warnings
+}
+
+fn apply_memcg(pid: u32, raw_limit: &str) -> std::result::Result<(), String> {
+    let limit = parse_memcg_limit(raw_limit)
+        .ok_or_else(|| format!("invalid memcg_limit: {raw_limit}"))?;
+    let (mount, is_v2) = find_cgroup_mount("memory")
+        .ok_or_else(|| "memory cgroup mount not found".to_string())?;
+    let mut target = mount.join("box");
+    if !target.is_dir() && fs::create_dir_all(&target).is_err() {
+        target = mount.join("mihomo");
+        fs::create_dir_all(&target)
+            .map_err(|e| format!("cannot create memory cgroup dir {}: {e}", target.display()))?;
+    }
+    let limit_file = if is_v2 {
+        target.join("memory.max")
+    } else {
+        target.join("memory.limit_in_bytes")
+    };
+    fs::write(&limit_file, format!("{limit}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", limit_file.display()))?;
+    fs::write(target.join("cgroup.procs"), format!("{pid}\n"))
+        .map_err(|e| format!("cannot assign pid {pid} to {}: {e}", target.display()))?;
+    Ok(())
+}
+
+fn apply_blkio(pid: u32, raw_weight: &str) -> std::result::Result<(), String> {
+    let weight: u32 = raw_weight
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid blkio weight: {raw_weight}"))?;
+    let (mount, is_v2) = find_cgroup_mount("blkio")
+        .ok_or_else(|| "blkio/io cgroup mount not found".to_string())?;
+    let mut target = mount.join("box");
+    let mut created_own = true;
+    if !target.is_dir() && fs::create_dir_all(&target).is_err() {
+        created_own = false;
+        if mount.join("foreground").is_dir() {
+            target = mount.join("foreground");
+        } else if mount.join("top-app").is_dir() {
+            target = mount.join("top-app");
+        } else {
+            return Err(format!("cannot create blkio cgroup dir {}", target.display()));
+        }
+    }
+    if created_own {
+        let weight_file = if is_v2 {
+            target.join("io.weight")
+        } else {
+            target.join("blkio.weight")
+        };
+        let content = if is_v2 {
+            format!("default {weight}\n")
+        } else {
+            format!("{weight}\n")
+        };
+        let _ = fs::write(&weight_file, content);
+    }
+    fs::write(target.join("cgroup.procs"), format!("{pid}\n"))
+        .map_err(|e| format!("cannot assign pid {pid} to {}: {e}", target.display()))?;
+    Ok(())
+}
+
+fn cleanup_old_candidates(paths: &Paths, keep: usize) {
+    let Ok(entries) = fs::read_dir(&paths.candidates_dir) else {
+        return;
+    };
+    let mut dirs = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            let mtime = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (mtime, entry.path())
+        })
+        .collect::<Vec<_>>();
+    if dirs.len() <= keep {
+        return;
+    }
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in dirs.into_iter().skip(keep) {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+fn kill_orphan_cores(paths: &Paths, exclude_pid: Option<u32>) {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    let my_pid = std::process::id();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        if pid == my_pid || exclude_pid == Some(pid) {
+            continue;
+        }
+        if core_alive(paths, pid) {
+            terminate(pid, libc::SIGTERM);
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_millis(500) && core_alive(paths, pid) {
+                thread::sleep(Duration::from_millis(50));
+            }
+            if core_alive(paths, pid) {
+                terminate(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+fn wait_tun_device(device: &str, timeout: Duration) -> bool {
+    let started = Instant::now();
+    let sys_path = Path::new("/sys/class/net").join(device);
+    while started.elapsed() < timeout {
+        if sys_path.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    sys_path.exists()
+}
+
+fn load_cnip_ipsets_if_needed(paths: &Paths) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Ok(store) = SettingsStore::open(paths.clone()) else {
+        return warnings;
+    };
+    let Ok(settings) = store.load() else {
+        return warnings;
+    };
+    if settings.get("bypass_cn_ip").and_then(Value::as_str) != Some("true") {
+        return warnings;
+    }
+    let caps = network::detect(paths);
+    if !caps.ipset {
+        return warnings;
+    }
+    let ipv6 = settings.get("ipv6").and_then(Value::as_str) == Some("true");
+    let v4 = settings.get("bypass_cn_ip_v4").and_then(Value::as_str) == Some("true");
+    let v6 = ipv6 && settings.get("bypass_cn_ip_v6").and_then(Value::as_str) == Some("true");
+    if v4 && paths.cnip_v4_file.is_file() {
+        if let Err(err) = crate::task::reload_cnip_set(&paths.cnip_v4_file, "cnip", "inet") {
+            warnings.push(format!("cnip v4 ipset load failed: {err}"));
+        }
+    }
+    if v6 && paths.cnip_v6_file.is_file() {
+        if let Err(err) = crate::task::reload_cnip_set(&paths.cnip_v6_file, "cnip6", "inet6") {
+            warnings.push(format!("cnip v6 ipset load failed: {err}"));
+        }
+    }
+    warnings
+}
+
+fn apply_runtime_network_post_start(
+    paths: &Paths,
+    plan: &network::Plan,
+    runner: &mut dyn network::Runner,
+) {
+    let Ok(store) = SettingsStore::open(paths.clone()) else {
+        return;
+    };
+    let Ok(settings) = store.load() else {
+        return;
+    };
+    let ipv6 = settings.get("ipv6").and_then(Value::as_str) == Some("true");
+    if !ipv6 {
+        network::disable_ipv6_policy(runner);
+    } else {
+        network::restore_ipv6_policy(runner);
+    }
+    if matches!(plan.effective_mode.as_str(), "tun" | "mixed") {
+        let tun_dev = tun_device_name(paths);
+        network::apply_tun_sysctl(&tun_dev, runner);
+    }
+    let _ = network::refresh_local_ip_chains(paths, runner);
 }
 
 fn write_pid(paths: &Paths, pid: u32) -> Result<()> {
@@ -1496,7 +2082,7 @@ while :; do sleep 0.1; done
     }
 
     #[test]
-    fn mixed_candidate_keeps_tun_and_uses_strict_process_mode() {
+    fn mixed_candidate_keeps_tun_and_uses_default_off_process_mode() {
         let root = temp_root();
         let paths = Paths::new(root.clone());
         let candidate = root.join("candidate.yaml");
@@ -1508,7 +2094,7 @@ while :; do sleep 0.1; done
         super::enable_tun_candidate(&paths, &candidate).expect("enable mixed tun");
         let prepared = fs::read_to_string(&candidate).expect("read");
         assert!(prepared.contains("enable: true"), "{prepared}");
-        assert!(prepared.contains("find-process-mode: strict"), "{prepared}");
+        assert!(prepared.contains("find-process-mode: off"), "{prepared}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1525,7 +2111,7 @@ while :; do sleep 0.1; done
         super::disable_tun_candidate(&paths, &candidate).expect("prepare candidate");
         let prepared = fs::read_to_string(&candidate).expect("read candidate");
         assert!(prepared.contains("enable: false"), "{prepared}");
-        assert!(prepared.contains("find-process-mode: strict"), "{prepared}");
+        assert!(prepared.contains("find-process-mode: off"), "{prepared}");
         assert!(
             !prepared.contains("find-process-mode: always"),
             "{prepared}"
@@ -1579,7 +2165,7 @@ while :; do sleep 0.1; done
     }
 
     #[test]
-    fn non_core_dns_switches_to_redir_host_with_sniffer() {
+    fn non_core_dns_switches_to_redir_host_with_top_level_sniffer() {
         let root = temp_root();
         let paths = Paths::new(root.clone());
         fs::write(
@@ -1592,10 +2178,99 @@ while :; do sleep 0.1; done
         fs::write(&candidate, "dns:\n  enhanced-mode: fake-ip\n").expect("candidate");
         super::prepare_candidate(&paths, &candidate, Some("tproxy")).expect("prepare");
         let text = fs::read_to_string(&candidate).expect("read");
-        assert!(text.contains("enhanced-mode: redir-host"), "{text}");
-        assert!(text.contains("sniffer:"), "{text}");
-        assert!(text.contains("enable: true"), "{text}");
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&text).expect("yaml");
+        assert_eq!(yaml["dns"]["enhanced-mode"].as_str(), Some("redir-host"));
+        // sniffer MUST be top-level, NOT nested under dns.
+        assert!(yaml["dns"].get("sniffer").is_none(), "{text}");
+        assert_eq!(yaml["sniffer"]["enable"].as_bool(), Some(true), "{text}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn auto_modify_config_false_leaves_candidate_untouched() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(
+            root.join("settings.json"),
+            r#"{"auto_modify_config":"false","network_mode":"mixed","tproxy_port":"9999"}"#,
+        )
+        .expect("settings");
+        let candidate = root.join("candidate.yaml");
+        let original = "mode: rule\ntun:\n  enable: false\n";
+        fs::write(&candidate, original).expect("candidate");
+        super::enable_tun_candidate(&paths, &candidate).expect("enable tun");
+        super::prepare_candidate(&paths, &candidate, Some("mixed")).expect("prepare");
+        assert_eq!(fs::read_to_string(&candidate).expect("read"), original);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn allow_only_ap_list_does_not_trigger_redir_host() {
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(
+            root.join("settings.json"),
+            r#"{"network_mode":"tproxy","proxy_mode":"blacklist"}"#,
+        )
+        .expect("settings");
+        fs::write(root.join("ap.list.cfg"), "allow wlan+\nallow ap+\n").expect("ap list");
+        let candidate = root.join("candidate.yaml");
+        fs::write(&candidate, "dns:\n  enhanced-mode: fake-ip\n").expect("candidate");
+        super::prepare_candidate(&paths, &candidate, Some("tproxy")).expect("prepare");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&candidate).expect("read")).expect("yaml");
+        assert_eq!(yaml["dns"]["enhanced-mode"].as_str(), Some("fake-ip"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stop_aborts_and_keeps_core_when_cleanup_fails() {
+        struct FailCleanupRunner;
+        impl Runner for FailCleanupRunner {
+            fn run(&mut self, _command: &str, _args: &[String]) -> crate::error::Result<()> {
+                Err(crate::error::BoxError::new(
+                    crate::error::ErrorCode::Command,
+                    "Operation not permitted",
+                ))
+            }
+        }
+        let root = temp_root();
+        let paths = Paths::new(root.clone());
+        fs::write(
+            root.join("settings.json"),
+            r#"{"network_mode":"tproxy","auto_modify_config":"false"}"#,
+        )
+        .expect("settings");
+        let _guard = PATH_LOCK.lock().expect("path lock");
+        let fake_bin = root.join("fake-bin");
+        fs::create_dir_all(&fake_bin).expect("fake bin");
+        for name in ["iptables", "ip6tables"] {
+            let path = fake_bin.join(name);
+            fs::write(&path, "#!/bin/sh\nexit 0\n").expect("fake command");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", fake_bin.display(), old_path));
+        start_with_window(&paths, Duration::from_millis(150), &mut NoopRunner, None)
+            .expect("start");
+        let err = super::stop_internal_with_runner(&paths, false, &mut FailCleanupRunner)
+            .expect_err("stop must fail when cleanup fails");
+        std::env::set_var("PATH", old_path);
+        assert_eq!(err.code, crate::error::ErrorCode::Command);
+        // Core MUST still be alive!
+        assert_eq!(status(&paths).expect("status")["running"], true);
+        super::stop_internal_with_runner(&paths, false, &mut NoopRunner).expect("cleanup stop");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parse_cpu_list_and_memcg_limit_work() {
+        assert_eq!(super::parse_cpu_list("0-3,6"), Some(vec![0, 1, 2, 3, 6]));
+        assert_eq!(super::parse_cpu_list("bad"), None);
+        assert_eq!(super::parse_memcg_limit("100M"), Some(100 * 1024 * 1024));
+        assert_eq!(super::parse_memcg_limit("1G"), Some(1024 * 1024 * 1024));
+        assert_eq!(super::parse_memcg_limit("512K"), Some(512 * 1024));
+        assert_eq!(super::parse_memcg_limit("invalid"), None);
     }
 
     #[test]

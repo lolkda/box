@@ -229,14 +229,28 @@ pub fn parse_mac(output: &str) -> Option<String> {
 
 pub fn current_state(route: &str, wifi: &str) -> NetworkState {
     let (transport, iface) = parse_route(route);
-    let (ssid, bssid, unknown) = parse_wifi_status(wifi);
+    let (ssid, bssid, wifi_unknown) = parse_wifi_status(wifi);
+    // When on Wi-Fi, validation requires a known SSID (not <unknown ssid>).
+    // When NOT on Wi-Fi (e.g. cellular/ethernet/disconnected), absence of Wi-Fi SSID is
+    // expected and MUST NOT mark the state unvalidated, otherwise wifi-disconnect policies never fire!
+    let validated = match transport {
+        Transport::Wifi => {
+            if wifi_unknown {
+                None
+            } else {
+                Some(true)
+            }
+        }
+        Transport::Cellular | Transport::Ethernet | Transport::None => Some(true),
+        Transport::Unknown => None,
+    };
     NetworkState {
         transport,
         iface,
         ssid,
         bssid,
         mac: None,
-        validated: if unknown { None } else { Some(true) },
+        validated,
     }
 }
 
@@ -247,6 +261,10 @@ pub enum Decision {
     Keep,
 }
 
+/// Legacy `ctr.utils::should_enable_service` aligned decision logic:
+/// - `use_module_on_wifi_disconnect = "true"` means KEEP module enabled when Wi-Fi disconnects.
+/// - `use_module_on_wifi_disconnect = "false"` means STOP module when Wi-Fi disconnects.
+/// - On Wi-Fi: requires `use_module_on_wifi = "true"` AND `allowed_network` (SSID/BSSID list).
 pub fn decide(state: &NetworkState, settings: &Value) -> Decision {
     let enabled = settings
         .get("enable_network_service_control")
@@ -258,21 +276,29 @@ pub fn decide(state: &NetworkState, settings: &Value) -> Decision {
     if state.validated.is_none() {
         return Decision::Keep;
     }
-    let on_wifi = state.transport == Transport::Wifi;
-    let start_on_wifi = settings
-        .get("use_module_on_wifi")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "true");
-    let stop_on_disconnect = settings
-        .get("use_module_on_wifi_disconnect")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "true");
-    if on_wifi && start_on_wifi {
-        Decision::Start
-    } else if !on_wifi && stop_on_disconnect {
-        Decision::Stop
+    if state.transport == Transport::Wifi {
+        let use_on_wifi = settings
+            .get("use_module_on_wifi")
+            .and_then(Value::as_str)
+            .map(|value| value == "true")
+            .unwrap_or(true);
+        if use_on_wifi && allowed_network(state, settings) {
+            Decision::Start
+        } else {
+            Decision::Stop
+        }
     } else {
-        Decision::Keep
+        // Not on Wi-Fi (cellular / ethernet / disconnected)
+        let keep_on_disconnect = settings
+            .get("use_module_on_wifi_disconnect")
+            .and_then(Value::as_str)
+            .map(|value| value == "true")
+            .unwrap_or(true);
+        if keep_on_disconnect {
+            Decision::Start
+        } else {
+            Decision::Stop
+        }
     }
 }
 
@@ -351,21 +377,7 @@ pub fn snapshot(settings: &Value) -> Value {
 }
 
 pub fn should_stop(state: &NetworkState, settings: &Value, running: bool) -> bool {
-    if !running {
-        return false;
-    }
-    let enabled = settings
-        .get("enable_network_service_control")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "true");
-    if !enabled || state.validated.is_none() {
-        return false;
-    }
-    let stop_on_disconnect = settings
-        .get("use_module_on_wifi_disconnect")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "true");
-    stop_on_disconnect && state.transport != Transport::Wifi
+    running && decide(state, settings) == Decision::Stop
 }
 
 pub fn allowed_mac(state: &NetworkState, settings: &Value) -> bool {
@@ -399,9 +411,6 @@ pub fn allowed_mac(state: &NetworkState, settings: &Value) -> bool {
 }
 
 pub fn allowed_network(state: &NetworkState, settings: &Value) -> bool {
-    if !allowed_mac(state, settings) {
-        return false;
-    }
     let matching = settings
         .get("use_ssid_matching")
         .and_then(Value::as_str)
@@ -447,19 +456,8 @@ pub fn allowed_network(state: &NetworkState, settings: &Value) -> bool {
     }
 }
 
-pub fn should_start(state: &NetworkState, settings: &Value, event_stop: bool) -> bool {
-    if !event_stop || state.validated.is_none() || state.transport != Transport::Wifi {
-        return false;
-    }
-    let enabled = settings
-        .get("enable_network_service_control")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "true");
-    let start_on_wifi = settings
-        .get("use_module_on_wifi")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "true");
-    enabled && start_on_wifi && allowed_network(state, settings)
+pub fn should_start(state: &NetworkState, settings: &Value, _event_stop: bool) -> bool {
+    decide(state, settings) == Decision::Start
 }
 
 #[derive(Debug)]
@@ -556,8 +554,32 @@ pub fn control_status(paths: &crate::paths::Paths) -> Value {
 pub fn control_loop(paths: crate::paths::Paths) {
     let mut tracker = EventTracker::new(Duration::from_millis(2500));
     let mut retry = EventRetry::load(&paths);
+    let mut last_ips: Option<(Vec<String>, Vec<String>)> = None;
+    let mut first_observed = true;
     loop {
         std::thread::sleep(Duration::from_secs(3));
+        // Module disabled: do not auto-start or refresh rules.
+        if paths.module_disable.exists() {
+            continue;
+        }
+        // Native net.inotify equivalent: refresh LOCAL_IP_V4 / LOCAL_IP_V6 whenever host IPs change.
+        let running_now = crate::service::status(&paths)
+            .ok()
+            .and_then(|status| status["running"].as_bool())
+            .unwrap_or(false);
+        if running_now {
+            let tun_dev = crate::service::tun_device_name(&paths);
+            let current_ips = crate::network::collect_dynamic_local_ips(&tun_dev);
+            if last_ips.as_ref() != Some(&current_ips) {
+                let mut runner = crate::network::SystemRunner;
+                if crate::network::refresh_local_ip_chains(&paths, &mut runner).is_ok() {
+                    last_ips = Some(current_ips);
+                }
+            }
+        } else {
+            last_ips = None;
+        }
+
         let now = crate::util::now_ms();
         if !retry.ready(now) {
             continue;
@@ -576,19 +598,35 @@ pub fn control_loop(paths: crate::paths::Paths) {
             continue;
         };
         let settings = Value::Object(settings);
-        let control = crate::service::control(&paths);
-        if control["mode"].as_str() != Some("auto") {
+        let control_enabled = settings
+            .get("enable_network_service_control")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v == "true");
+        if !control_enabled {
+            first_observed = false;
             continue;
         }
-        let running = crate::service::status(&paths)
-            .ok()
-            .and_then(|status| status["running"].as_bool())
-            .unwrap_or(false);
-        if running && should_stop(&state, &settings, running) {
+        // On a genuine subsequent network transition (not initial daemon boot), release any
+        // prior single-network manual override so network event control works naturally like legacy.
+        let control = crate::service::control(&paths);
+        if first_observed {
+            first_observed = false;
+            if control["mode"].as_str() != Some("auto") {
+                continue;
+            }
+        } else if control["mode"].as_str() != Some("auto") {
+            let _ = crate::service::write_control(
+                &paths,
+                "auto",
+                if running_now { "running" } else { "stopped" },
+            );
+        }
+
+        if running_now && should_stop(&state, &settings, running_now) {
             let _ = crate::task::interrupt_all(&paths);
             match crate::service::stop(&paths) {
                 Ok(_) => {
-                    let _ = crate::util::atomic_write(&paths.event_stop, b"disconnect\n", 0o600);
+                    let _ = crate::util::atomic_write(&paths.event_stop, b"network\n", 0o600);
                     let _ = crate::service::write_control(&paths, "auto", "stopped");
                     retry.reset();
                     let _ = crate::util::remove_file_if_exists(&paths.event_state);
@@ -599,7 +637,7 @@ pub fn control_loop(paths: crate::paths::Paths) {
                     retry.save(&paths);
                 }
             }
-        } else if !running && should_start(&state, &settings, paths.event_stop.is_file()) {
+        } else if !running_now && should_start(&state, &settings, paths.event_stop.is_file()) {
             match crate::service::start(&paths) {
                 Ok(_) => {
                     let _ = crate::util::remove_file_if_exists(&paths.event_stop);
@@ -713,7 +751,7 @@ default dev dummy0 table 1003";
     }
 
     #[test]
-    fn auto_start_requires_event_stop_marker_and_wifi() {
+    fn auto_start_and_stop_align_with_legacy_ctr_utils() {
         let wifi = NetworkState {
             transport: Transport::Wifi,
             iface: Some("wlan0".to_string()),
@@ -724,15 +762,40 @@ default dev dummy0 table 1003";
         };
         let settings = json!({
             "enable_network_service_control": "true",
-            "use_module_on_wifi": "true"
+            "use_module_on_wifi": "true",
+            "use_module_on_wifi_disconnect": "false"
         });
+        // Starts on allowed Wi-Fi even without prior event_stop marker.
+        assert!(should_start(&wifi, &settings, false));
         assert!(should_start(&wifi, &settings, true));
-        assert!(!should_start(&wifi, &settings, false));
-        let cellular = NetworkState {
-            transport: Transport::Cellular,
-            ..wifi.clone()
-        };
+        assert!(!should_stop(&wifi, &settings, true));
+
+        // Disconnecting Wi-Fi -> cellular:
+        // use_module_on_wifi_disconnect="false" => STOP.
+        let cellular = current_state("default via 10.0.0.1 dev rmnet_data0", "");
+        assert_eq!(cellular.validated, Some(true));
+        assert!(should_stop(&cellular, &settings, true));
         assert!(!should_start(&cellular, &settings, true));
+
+        // use_module_on_wifi_disconnect="true" => KEEP/START (legacy semantics!).
+        let keep_on_cell = json!({
+            "enable_network_service_control": "true",
+            "use_module_on_wifi": "true",
+            "use_module_on_wifi_disconnect": "true"
+        });
+        assert!(!should_stop(&cellular, &keep_on_cell, true));
+        assert!(should_start(&cellular, &keep_on_cell, false));
+
+        // Blacklisted Wi-Fi SSID stops running service.
+        let blacklisted_wifi = json!({
+            "enable_network_service_control": "true",
+            "use_module_on_wifi": "true",
+            "use_ssid_matching": "true",
+            "use_wifi_list_mode": "blacklist",
+            "wifi_ssids_list": ["Home"]
+        });
+        assert!(should_stop(&wifi, &blacklisted_wifi, true));
+        assert!(!should_start(&wifi, &blacklisted_wifi, true));
     }
 
     #[test]
@@ -785,7 +848,7 @@ default dev dummy0 table 1003";
         };
         let settings = json!({
             "enable_network_service_control": "true",
-            "use_module_on_wifi_disconnect": "true"
+            "use_module_on_wifi_disconnect": "false"
         });
         assert!(should_stop(&state, &settings, true));
         assert!(!should_stop(&state, &settings, false));

@@ -145,6 +145,8 @@ pub fn run(paths: Paths, socket: PathBuf) -> Result<()> {
     thread::spawn(move || scheduler_loop(scheduler_paths));
     let event_paths = paths.clone();
     thread::spawn(move || events::control_loop(event_paths));
+    let disable_paths = paths.clone();
+    thread::spawn(move || module_disable_loop(disable_paths));
     while !SHUTDOWN.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _address)) => {
@@ -176,6 +178,17 @@ fn boot_autostart(paths: Paths) {
         return;
     }
     thread::sleep(std::time::Duration::from_secs(1));
+    // Honor Root manager module disable flag (legacy start.sh / box.inotify).
+    if paths.module_disable.exists() {
+        if service::status(&paths)
+            .ok()
+            .and_then(|status| status["running"].as_bool())
+            .unwrap_or(false)
+        {
+            let _ = service::stop(&paths);
+        }
+        return;
+    }
     let Ok(store) = SettingsStore::open(paths.clone()) else {
         return;
     };
@@ -211,51 +224,118 @@ fn boot_autostart(paths: Paths) {
     }
 }
 
+/// Native replacement for legacy `box.inotify`:
+/// Watches `/data/adb/modules/box_for_root/disable`. Creating it immediately stops
+/// the core & cleans up rules; removing it restores the service if it was disabled-stopped.
+fn module_disable_loop(paths: Paths) {
+    let mut was_disabled = paths.module_disable.exists();
+    let mut stopped_by_disable = false;
+    loop {
+        thread::sleep(std::time::Duration::from_secs(2));
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            return;
+        }
+        let disabled = paths.module_disable.exists();
+        if disabled && !was_disabled {
+            let running = service::status(&paths)
+                .ok()
+                .and_then(|s| s["running"].as_bool())
+                .unwrap_or(false);
+            if running {
+                let _ = service::stop(&paths);
+                stopped_by_disable = true;
+            }
+            was_disabled = true;
+        } else if !disabled && was_disabled {
+            was_disabled = false;
+            if stopped_by_disable {
+                let _ = service::start(&paths);
+                stopped_by_disable = false;
+            }
+        }
+    }
+}
+
 fn scheduler_loop(paths: Paths) {
+    let mut custom_last_runs: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
     loop {
         thread::sleep(std::time::Duration::from_secs(30));
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            return;
+        }
+        if paths.module_disable.exists() {
+            continue;
+        }
         let Ok(store) = SettingsStore::open(paths.clone()) else {
             continue;
         };
         let Ok(settings) = store.load() else {
             continue;
         };
-        let Ok(scheduler) = schedule::Scheduler::from_settings(&Value::Object(settings)) else {
-            continue;
-        };
-        if !scheduler.enabled || scheduler.tasks.is_empty() {
-            continue;
-        }
-        let Ok(state) = schedule::state(&paths) else {
+        let settings_value = Value::Object(settings);
+        let Ok(scheduler) = schedule::Scheduler::from_settings(&settings_value) else {
             continue;
         };
         let now = schedule::now_seconds();
-        if !schedule::is_due(&scheduler, &state, now, 3600) {
-            continue;
-        }
-        if task::running_count(&paths).unwrap_or(0) > 0 {
-            continue;
-        }
-        let mut last_kind = None;
-        for kind in &scheduler.tasks {
-            if task::running_count(&paths).unwrap_or(0) > 0 {
-                break;
+
+        if scheduler.enabled && !scheduler.tasks.is_empty() {
+            if let Ok(state) = schedule::state(&paths) {
+                match schedule::check_due(&scheduler, &state, now, 3600) {
+                    schedule::DueCheck::AdvanceBaseline => {
+                        // Advance baseline so first enable doesn't fire immediately and
+                        // sleeping > 1h never permanently stalls the scheduler.
+                        let _ = schedule::mark_run(
+                            &paths,
+                            state.last_task.as_deref().unwrap_or("baseline"),
+                            now,
+                        );
+                    }
+                    schedule::DueCheck::Due => {
+                        if task::running_count(&paths).unwrap_or(0) == 0 {
+                            let mut last_kind = None;
+                            for kind in &scheduler.tasks {
+                                if task::running_count(&paths).unwrap_or(0) > 0 {
+                                    break;
+                                }
+                                if task::start(
+                                    &paths,
+                                    task::StartParams {
+                                        kind: kind.clone(),
+                                        arg: None,
+                                        wait: true,
+                                    },
+                                )
+                                .is_ok()
+                                {
+                                    last_kind = Some(kind.clone());
+                                }
+                            }
+                            let _ = schedule::mark_run(
+                                &paths,
+                                last_kind.as_deref().unwrap_or("skipped"),
+                                now,
+                            );
+                        }
+                    }
+                    schedule::DueCheck::NotDue => {}
+                }
             }
-            if task::start(
-                &paths,
-                task::StartParams {
-                    kind: kind.clone(),
-                    arg: None,
-                    wait: true,
-                },
-            )
-            .is_ok()
-            {
-                last_kind = Some(kind.clone());
-            }
         }
-        if let Some(kind) = last_kind {
-            let _ = schedule::mark_run(&paths, &kind, now);
+
+        // Also execute legacy `box/crontab.cfg` entries when `run_crontab=true`.
+        if scheduler.enabled {
+            for entry in schedule::load_crontab_entries(&paths) {
+                let last = *custom_last_runs.entry(entry.id.clone()).or_insert(now);
+                if let Some(next) = entry.cron.next_after(last) {
+                    if next <= now {
+                        if now.saturating_sub(next) <= 3600 {
+                            schedule::run_crontab_entry(&paths, &entry);
+                        }
+                        custom_last_runs.insert(entry.id.clone(), now);
+                    }
+                }
+            }
         }
     }
 }
@@ -493,8 +573,24 @@ fn dispatch(store: &Arc<Mutex<SettingsStore>>, request: &Request) -> Result<(Val
         }
         "core.apply" => {
             let params = parse_params::<core::ApplyParams>(request)?;
+            let requested_fpm = params
+                .structured
+                .as_ref()
+                .and_then(|s| s.find_process_mode.clone());
             let paths = paths_for(store)?;
             let data = core::apply(&paths, params)?;
+            // Keep settings.json `find_process_mode` in sync when changed via core.apply
+            // so core.get never reads back a stale value.
+            if let Some(fpm) = requested_fpm {
+                if matches!(fpm.as_str(), "always" | "strict" | "off") {
+                    let mut store = lock_store(store)?;
+                    let _ = store.set(crate::settings::SetParams {
+                        key: "find_process_mode".to_string(),
+                        value: fpm,
+                        if_revision: None,
+                    });
+                }
+            }
             let revision = bump_revision(store)?;
             Ok((data, Some(revision)))
         }
@@ -665,17 +761,18 @@ fn dispatch(store: &Arc<Mutex<SettingsStore>>, request: &Request) -> Result<(Val
         }
         "rule_profile.apply" => {
             let params = parse_params::<rule_profile::UseParams>(request)?;
-            let data = {
-                let store = lock_store(store)?;
-                rule_profile::apply(store.paths(), params)?
-            };
+            let paths = paths_for(store)?;
+            let mut policy = download_policy(store)?;
+            policy.user_agent = "mihomo".to_string();
+            let data = rule_profile::apply_with_policy(&paths, params, Some(&policy))?;
             let revision = bump_revision(store)?;
             Ok((data, Some(revision)))
         }
         "rule_profile.fetch" => {
             let params = parse_params::<rule_profile::FetchParams>(request)?;
             let paths = paths_for(store)?;
-            let policy = download_policy(store)?;
+            let mut policy = download_policy(store)?;
+            policy.user_agent = "mihomo".to_string();
             let data = rule_profile::fetch(&paths, params, &policy)?;
             let revision = bump_revision(store)?;
             Ok((data, Some(revision)))
@@ -683,7 +780,9 @@ fn dispatch(store: &Arc<Mutex<SettingsStore>>, request: &Request) -> Result<(Val
         "rule_profile.use" => {
             let params = parse_params::<rule_profile::UseParams>(request)?;
             let paths = paths_for(store)?;
-            let data = rule_profile::use_pending(&paths, params)?;
+            let mut policy = download_policy(store)?;
+            policy.user_agent = "mihomo".to_string();
+            let data = rule_profile::use_pending_with_policy(&paths, params, Some(&policy))?;
             let revision = bump_revision(store)?;
             Ok((data, Some(revision)))
         }
@@ -835,6 +934,25 @@ fn dispatch(store: &Arc<Mutex<SettingsStore>>, request: &Request) -> Result<(Val
             let revision = lock_store(store)?.revision();
             Ok((data, Some(revision)))
         }
+        "config.check" => {
+            ensure_empty_params(request)?;
+            let paths = paths_for(store)?;
+            let data = service::check_config(&paths)?;
+            let revision = lock_store(store)?.revision();
+            Ok((data, Some(revision)))
+        }
+        "network.bond0" => {
+            ensure_empty_params(request)?;
+            let data = network::apply_bond(0)?;
+            let revision = lock_store(store)?.revision();
+            Ok((data, Some(revision)))
+        }
+        "network.bond1" => {
+            ensure_empty_params(request)?;
+            let data = network::apply_bond(1)?;
+            let revision = lock_store(store)?.revision();
+            Ok((data, Some(revision)))
+        }
         "status.get" => {
             ensure_empty_params(request)?;
             let store = lock_store(store)?;
@@ -853,10 +971,8 @@ fn dispatch(store: &Arc<Mutex<SettingsStore>>, request: &Request) -> Result<(Val
                 }
             };
             let capabilities = network::cached_capabilities(store.paths());
-            let network_plan = capabilities.and_then(|capabilities| {
-                settings.as_ref().ok().and_then(|settings| {
-                    network::plan(&Value::Object(settings.clone()), capabilities).ok()
-                })
+            let network_plan = capabilities.and_then(|_| {
+                service::load_network_plan(store.paths()).ok().flatten()
             });
             let schedule = settings.as_ref().ok().and_then(|settings| {
                 schedule::status(

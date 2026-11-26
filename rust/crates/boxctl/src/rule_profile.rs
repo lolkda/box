@@ -90,7 +90,8 @@ pub fn get(paths: &Paths) -> Result<Value> {
             "counts": zero_counts().json()
         }));
     };
-    let item = item(paths, &id, true)?;
+    let is_active = active_id(paths).as_deref() == Some(id.as_str());
+    let item = item(paths, &id, is_active)?;
     Ok(json!({
         "supported": true,
         "configured": true,
@@ -211,21 +212,46 @@ pub fn fetch(paths: &Paths, params: FetchParams, policy: &Policy) -> Result<Valu
             return Err(error);
         }
     };
-    let map = match yaml::read_map(&temp) {
+    let mut map = match yaml::read_map(&temp) {
         Ok(map) => map,
         Err(error) => {
             let _ = util::remove_file_if_exists(&temp);
             return Err(error);
         }
     };
+    // Legacy box.tool:2274 requires all three top-level keys to exist in a rule profile template.
+    for required_key in ["proxy-groups", "rule-providers", "rules"] {
+        if !map.contains_key(YamlValue::String(required_key.to_string())) {
+            let _ = util::remove_file_if_exists(&temp);
+            return Err(BoxError::validation(format!(
+                "rule profile template is missing required section: {required_key}"
+            )));
+        }
+    }
+    let groups = section_json(&map, "proxy-groups", json!([]))?;
+    let mut providers = section_json(&map, "rule-providers", json!({}))?;
+    // Merge DNS-referenced rule-providers from existing config into pending snapshot so
+    // preview counts and validation match what will be applied (legacy box.tool:3219-3298).
+    preserve_dns_providers_in_json(paths, &mut providers);
+    let rules = section_json(&map, "rules", json!([]))?;
     let data = json!({
-        "proxy-groups": section_json(&map, "proxy-groups", json!([]))?,
-        "rule-providers": section_json(&map, "rule-providers", json!({}))?,
-        "rules": section_json(&map, "rules", json!([]))?
+        "proxy-groups": groups,
+        "rule-providers": providers,
+        "rules": rules
     });
     if let Err(error) = config::validate_sections(&data) {
         let _ = util::remove_file_if_exists(&temp);
         return Err(error);
+    }
+    // Persist merged rule-providers into pending.yaml so counts and apply stay consistent.
+    if let Ok(providers_yaml) = serde_yaml::to_value(&data["rule-providers"]) {
+        map.insert(
+            YamlValue::String("rule-providers".to_string()),
+            providers_yaml,
+        );
+        if let Ok(serialized) = serde_yaml::to_string(&YamlValue::Mapping(map.clone())) {
+            let _ = util::atomic_write(&temp, serialized.as_bytes(), ENTRY_MODE);
+        }
     }
     std::fs::rename(&temp, &pending).map_err(|error| {
         let _ = util::remove_file_if_exists(&temp);
@@ -261,13 +287,10 @@ pub fn set(paths: &Paths, params: SetUrlParams) -> Result<Value> {
     validate_url(&params.url)?;
     let existing = ids(paths)?;
     if existing.is_empty() {
-        add(
-            paths,
-            AddParams {
-                name: params.name.unwrap_or_else(|| "规则模板".to_string()),
-                url: params.url,
-            },
-        )?;
+        let name = params.name.unwrap_or_else(|| "默认规则".to_string());
+        validate_name(&name)?;
+        write_entry(paths, "default", "name", &name)?;
+        write_entry(paths, "default", "url", &params.url)?;
         return get(paths);
     }
     let id = active_id(paths)
@@ -294,11 +317,29 @@ pub fn clear(paths: &Paths) -> Result<Value> {
     Ok(json!({"cleared": true}))
 }
 
-pub fn apply(paths: &Paths, params: UseParams) -> Result<Value> {
-    use_pending(paths, params)
+pub fn apply_with_policy(
+    paths: &Paths,
+    params: UseParams,
+    policy: Option<&Policy>,
+) -> Result<Value> {
+    use_pending_with_policy(paths, params, policy)
 }
 
+#[allow(dead_code)]
+pub fn apply(paths: &Paths, params: UseParams) -> Result<Value> {
+    use_pending_with_policy(paths, params, None)
+}
+
+#[allow(dead_code)]
 pub fn use_pending(paths: &Paths, params: UseParams) -> Result<Value> {
+    use_pending_with_policy(paths, params, None)
+}
+
+pub fn use_pending_with_policy(
+    paths: &Paths,
+    params: UseParams,
+    policy: Option<&Policy>,
+) -> Result<Value> {
     ensure_layout(paths)?;
     let id = params
         .id
@@ -309,17 +350,62 @@ pub fn use_pending(paths: &Paths, params: UseParams) -> Result<Value> {
     }
     let pending = entry_path(paths, &id, "pending.yaml");
     if !pending.is_file() {
-        return Err(BoxError::new(
-            ErrorCode::NotFound,
-            "rule profile has no pending YAML; fetch is not available in this build",
-        ));
+        if let Some(policy) = policy {
+            fetch(paths, FetchParams { id: Some(id.clone()) }, policy)?;
+        } else {
+            return Err(BoxError::new(
+                ErrorCode::NotFound,
+                "rule profile has no pending YAML; fetch it first",
+            ));
+        }
     }
     let map = yaml::read_map(&pending)?;
     let groups = section_json(&map, "proxy-groups", json!([]))?;
     let mut providers = section_json(&map, "rule-providers", json!({}))?;
-    // Rule templates often replace rule-providers wholesale while the existing
-    // DNS section still references a provider such as `cn_domain`. Preserve
-    // providers that the template does not redefine.
+    // Preserve DNS-referenced rule-providers from existing config that the template does not redefine.
+    preserve_dns_providers_in_json(paths, &mut providers);
+    let rules = section_json(&map, "rules", json!([]))?;
+    let data = json!({
+        "proxy-groups": groups,
+        "rule-providers": providers,
+        "rules": rules
+    });
+    let changed = config::replace_sections(paths, &data)?;
+    config::sync_ruleset_prefix_from_settings(paths)?;
+    let counts = Counts {
+        groups: data["proxy-groups"].as_array().map_or(0, Vec::len),
+        providers: data["rule-providers"].as_object().map_or(0, serde_json::Map::len),
+        rules: data["rules"].as_array().map_or(0, Vec::len),
+    };
+    let now = util::format_unix_utc(util::now_ms() / 1000);
+    write_entry(paths, &id, "applied_at", &now)?;
+    write_entry(paths, &id, "counts", &counts.json_string())?;
+    util::atomic_write(
+        &paths.rule_profile_active,
+        format!("{id}\n").as_bytes(),
+        ENTRY_MODE,
+    )?;
+    let _ = util::remove_file_if_exists(&pending);
+    let name = read_entry(paths, &id, "name").unwrap_or_else(|| id.clone());
+    // Honor legacy `--reload` semantics: hot-reload ONLY if core is running; when stopped,
+    // return `ok: true, reloaded: false` without starting the core!
+    let reloaded = if params.reload {
+        crate::service::reload_if_running(paths)
+            .map_err(|error| error.with_detail("rule profile applied but core reload failed"))?
+    } else {
+        false
+    };
+    Ok(json!({
+        "id": id,
+        "name": name,
+        "changed": changed["changed"],
+        "reloaded": reloaded,
+        "updated_at": now,
+        "counts": counts.json()
+    }))
+}
+
+fn preserve_dns_providers_in_json(paths: &Paths, providers: &mut Value) {
     if let Ok(current) = config::get(paths) {
         if let (Some(target), Some(existing)) = (
             providers.as_object_mut(),
@@ -333,37 +419,6 @@ pub fn use_pending(paths: &Paths, params: UseParams) -> Result<Value> {
             }
         }
     }
-    let rules = section_json(&map, "rules", json!([]))?;
-    let data = json!({
-        "proxy-groups": groups,
-        "rule-providers": providers,
-        "rules": rules
-    });
-    let changed = config::replace_sections(paths, &data)?;
-    config::sync_ruleset_prefix_from_settings(paths)?;
-    let counts = counts_from_map(&map);
-    let now = util::format_unix_utc(util::now_ms() / 1000);
-    write_entry(paths, &id, "applied_at", &now)?;
-    write_entry(paths, &id, "counts", &counts.json_string())?;
-    util::atomic_write(
-        &paths.rule_profile_active,
-        format!("{id}\n").as_bytes(),
-        ENTRY_MODE,
-    )?;
-    let _ = util::remove_file_if_exists(&pending);
-    let name = read_entry(paths, &id, "name").unwrap_or_else(|| id.clone());
-    if params.reload {
-        crate::service::restart(paths)
-            .map_err(|error| error.with_detail("rule profile applied but core restart failed"))?;
-    }
-    Ok(json!({
-        "id": id,
-        "name": name,
-        "changed": changed["changed"],
-        "reloaded": params.reload,
-        "updated_at": now,
-        "counts": counts.json()
-    }))
 }
 
 fn dns_referenced_providers(paths: &Paths) -> std::collections::BTreeSet<String> {
@@ -448,7 +503,49 @@ fn item(paths: &Paths, id: &str, active: bool) -> Result<Value> {
 }
 
 fn ensure_layout(paths: &Paths) -> Result<()> {
-    util::ensure_dir(&paths.rule_profiles_dir, true)
+    util::ensure_dir(&paths.rule_profiles_dir, true)?;
+    // Legacy single-file rule-profile migration (`mihomo/rule-profile.url` -> `rule-profiles/default.*`).
+    let legacy_url = paths.home.join("mihomo").join("rule-profile.url");
+    if legacy_url.is_file() && ids(paths).map(|v| v.is_empty()).unwrap_or(false) {
+        if let Ok(url_text) = fs::read_to_string(&legacy_url) {
+            let trimmed = url_text.trim();
+            if !trimmed.is_empty() {
+                let _ = util::atomic_write(
+                    &entry_path(paths, "default", "name"),
+                    "默认规则\n".as_bytes(),
+                    ENTRY_MODE,
+                );
+                let _ = util::atomic_write(
+                    &entry_path(paths, "default", "url"),
+                    format!("{trimmed}\n").as_bytes(),
+                    ENTRY_MODE,
+                );
+                let legacy_pending = paths
+                    .home
+                    .join("run")
+                    .join("state")
+                    .join("rule-profile.pending.yaml");
+                if legacy_pending.is_file() {
+                    let _ = fs::rename(&legacy_pending, entry_path(paths, "default", "pending.yaml"));
+                }
+                let legacy_updated = paths
+                    .home
+                    .join("run")
+                    .join("state")
+                    .join("rule-profile.updated_at");
+                if legacy_updated.is_file() {
+                    let _ = fs::rename(&legacy_updated, entry_path(paths, "default", "applied_at"));
+                }
+                let _ = util::atomic_write(
+                    &paths.rule_profile_active,
+                    b"default\n",
+                    ENTRY_MODE,
+                );
+                let _ = util::remove_file_if_exists(&legacy_url);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn ids(paths: &Paths) -> Result<Vec<String>> {

@@ -36,15 +36,28 @@ pub fn update(paths: &Paths, policy: &Policy) -> Result<Value> {
             return Err(error);
         }
     };
+    let geoip_bak = paths.geoip_file.with_extension("mmdb.bak");
+    let had_geoip = paths.geoip_file.is_file();
+    if had_geoip {
+        let _ = std::fs::copy(&paths.geoip_file, &geoip_bak);
+    }
     std::fs::rename(&geoip_tmp, &paths.geoip_file)
         .map_err(|error| BoxError::from(error).with_detail("cannot publish Country.mmdb"))?;
-    std::fs::rename(&geosite_tmp, &paths.geosite_file).map_err(|error| {
-        let _ = util::remove_file_if_exists(&paths.geoip_file);
-        BoxError::from(error).with_detail("cannot publish GeoSite.dat")
-    })?;
+    if let Err(error) = std::fs::rename(&geosite_tmp, &paths.geosite_file) {
+        if had_geoip && geoip_bak.is_file() {
+            let _ = std::fs::rename(&geoip_bak, &paths.geoip_file);
+        } else {
+            let _ = util::remove_file_if_exists(&paths.geoip_file);
+        }
+        let _ = util::remove_file_if_exists(&geosite_tmp);
+        return Err(BoxError::from(error).with_detail("cannot publish GeoSite.dat"));
+    }
+    let _ = util::remove_file_if_exists(&geoip_bak);
+    let reloaded = crate::service::reload_if_running(paths).unwrap_or(false);
     Ok(json!({
         "geoip": {"bytes": geoip.bytes, "sha256": geoip.sha256},
-        "geosite": {"bytes": geosite.bytes, "sha256": geosite.sha256}
+        "geosite": {"bytes": geosite.bytes, "sha256": geosite.sha256},
+        "reloaded": reloaded
     }))
 }
 

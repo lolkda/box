@@ -63,6 +63,9 @@ pub fn run(raw: Vec<String>) -> i32 {
         "reset" => run_reset(&args),
         "status" => run_status(&args),
         "doctor" => run_doctor(&args),
+        "check" => run_check(&args),
+        "bond0" => run_bond(&args, 0),
+        "bond1" => run_bond(&args, 1),
         "version" => run_version(&args),
         "" => {
             let error = BoxError::usage(
@@ -849,6 +852,36 @@ fn run_service(args: &Args) -> i32 {
     let method = format!("service.{action}");
     match send_request(&socket, &method, json!({}), args.timeout) {
         Ok(response) => finish(response, args.json),
+        Err(error) => print_error(&error, args.json),
+    }
+}
+
+fn run_check(args: &Args) -> i32 {
+    let socket = socket_path(args);
+    match send_request(&socket, "config.check", json!({}), args.timeout) {
+        Ok(response) => finish(response, args.json),
+        Err(error) if error.code == ErrorCode::ManagerUnavailable => {
+            let paths = Paths::resolve(args.root.clone());
+            match crate::service::check_config(&paths) {
+                Ok(data) => finish(Response::success(data, "local", 0, None), args.json),
+                Err(err) => print_error(&err, args.json),
+            }
+        }
+        Err(error) => print_error(&error, args.json),
+    }
+}
+
+fn run_bond(args: &Args, profile: u8) -> i32 {
+    let socket = socket_path(args);
+    let method = format!("network.bond{profile}");
+    match send_request(&socket, &method, json!({}), args.timeout) {
+        Ok(response) => finish(response, args.json),
+        Err(error) if error.code == ErrorCode::ManagerUnavailable => {
+            match crate::network::apply_bond(profile) {
+                Ok(data) => finish(Response::success(data, "local", 0, None), args.json),
+                Err(err) => print_error(&err, args.json),
+            }
+        }
         Err(error) => print_error(&error, args.json),
     }
 }

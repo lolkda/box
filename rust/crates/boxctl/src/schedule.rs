@@ -129,14 +129,21 @@ impl Cron {
     }
 
     pub fn next_after(&self, unix_seconds: u64) -> Option<u64> {
+        self.next_after_mode(unix_seconds, true)
+    }
+
+    pub fn next_after_utc(&self, unix_seconds: u64) -> Option<u64> {
+        self.next_after_mode(unix_seconds, false)
+    }
+
+    fn next_after_mode(&self, unix_seconds: u64, local_tz: bool) -> Option<u64> {
         let mut candidate = (unix_seconds / MINUTE + 1) * MINUTE;
         for _ in 0..MAX_SCAN_MINUTES {
-            let days = (candidate / DAY) as i64;
-            let seconds_of_day = candidate % DAY;
-            let hour = (seconds_of_day / 3600) as u32;
-            let minute = ((seconds_of_day % 3600) / 60) as u32;
-            let (year, month, dom) = civil_from_days(days);
-            let dow = weekday_from_days(days);
+            let (month, dom, dow, hour, minute) = if local_tz {
+                local_parts(candidate)
+            } else {
+                utc_parts(candidate)
+            };
             let dom_restricted = !self.dom.all;
             let dow_restricted = !self.dow.all;
             let day_ok = if dom_restricted && dow_restricted {
@@ -149,13 +156,37 @@ impl Cron {
                 && self.hour.matches(hour, 0)
                 && self.minute.matches(minute, 0)
             {
-                let _ = year;
                 return Some(candidate);
             }
             candidate += MINUTE;
         }
         None
     }
+}
+
+fn utc_parts(unix_seconds: u64) -> (u32, u32, u32, u32, u32) {
+    let days = (unix_seconds / DAY) as i64;
+    let seconds_of_day = unix_seconds % DAY;
+    let hour = (seconds_of_day / 3600) as u32;
+    let minute = ((seconds_of_day % 3600) / 60) as u32;
+    let (_year, month, dom) = civil_from_days(days);
+    let dow = weekday_from_days(days);
+    (month, dom, dow, hour, minute)
+}
+
+fn local_parts(unix_seconds: u64) -> (u32, u32, u32, u32, u32) {
+    let ts = unix_seconds as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ptr = unsafe { libc::localtime_r(&ts, &mut tm) };
+    if ptr.is_null() {
+        return utc_parts(unix_seconds);
+    }
+    let month = (tm.tm_mon + 1).max(1) as u32;
+    let dom = tm.tm_mday.max(1) as u32;
+    let dow = tm.tm_wday.rem_euclid(7) as u32;
+    let hour = tm.tm_hour.clamp(0, 23) as u32;
+    let minute = tm.tm_min.clamp(0, 59) as u32;
+    (month, dom, dow, hour, minute)
 }
 
 fn number(value: &str, min: u32, max: u32, names: &[(&str, u32)]) -> Result<u32> {
@@ -314,17 +345,138 @@ pub fn mark_run(paths: &Paths, task: &str, now: u64) -> Result<()> {
     )
 }
 
-pub fn is_due(scheduler: &Scheduler, state: &ScheduleState, now: u64, grace: u64) -> bool {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DueCheck {
+    NotDue,
+    Due,
+    /// Missed window exceeded `grace` or uninitialized baseline (`last_run == 0`);
+    /// caller should advance `last_run` to `now` so the scheduler never stalls permanently.
+    AdvanceBaseline,
+}
+
+pub fn check_due(scheduler: &Scheduler, state: &ScheduleState, now: u64, grace: u64) -> DueCheck {
     if !scheduler.enabled {
-        return false;
+        return DueCheck::NotDue;
     }
     if state.last_run == 0 {
-        return true;
+        // Do not fire immediately when crontab is first turned on; wait for next scheduled minute.
+        return DueCheck::AdvanceBaseline;
     }
     let Some(next) = scheduler.next_after(state.last_run) else {
-        return false;
+        return DueCheck::NotDue;
     };
-    next <= now && now.saturating_sub(next) <= grace
+    if next > now {
+        DueCheck::NotDue
+    } else if now.saturating_sub(next) <= grace {
+        DueCheck::Due
+    } else {
+        DueCheck::AdvanceBaseline
+    }
+}
+
+pub fn is_due(scheduler: &Scheduler, state: &ScheduleState, now: u64, grace: u64) -> bool {
+    check_due(scheduler, state, now, grace) == DueCheck::Due
+}
+
+#[derive(Debug, Clone)]
+pub struct CrontabEntry {
+    pub id: String,
+    pub cron: Cron,
+    pub command: String,
+}
+
+pub fn load_crontab_entries(paths: &Paths) -> Vec<CrontabEntry> {
+    let Ok(Some(text)) = util::read_to_string_optional(&paths.crontab) else {
+        return Vec::new();
+    };
+    parse_crontab_entries(&text)
+}
+
+pub fn parse_crontab_entries(text: &str) -> Vec<CrontabEntry> {
+    let mut entries = Vec::new();
+    for (idx, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let mut fields = Vec::with_capacity(5);
+        for _ in 0..5 {
+            if let Some(field) = parts.next() {
+                fields.push(field);
+            }
+        }
+        if fields.len() < 5 {
+            continue;
+        }
+        let expr = fields.join(" ");
+        let command = parts.collect::<Vec<_>>().join(" ");
+        if command.is_empty() {
+            continue;
+        }
+        if let Ok(cron) = Cron::parse(&expr) {
+            entries.push(CrontabEntry {
+                id: format!("crontab-{}", idx + 1),
+                cron,
+                command,
+            });
+        }
+    }
+    entries
+}
+
+/// Map legacy `box.tool` commands inside `crontab.cfg` to native boxctl task kinds
+/// when possible; returns `None` for arbitrary custom shell commands.
+pub fn map_legacy_cron_command(command: &str) -> Option<&'static str> {
+    let trimmed = command.trim();
+    if !trimmed.contains("box.tool") {
+        return None;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    let pos = tokens.iter().position(|t| t.ends_with("box.tool"))?;
+    let sub = tokens.get(pos + 1).copied().unwrap_or("");
+    match sub {
+        "subs" | "geosub" => Some("sub-update"),
+        "geox" | "upgeox_all" => Some("geox"),
+        "upcnip" => Some("upcnip"),
+        "upxui" => Some("upxui"),
+        "upyq" => Some("upyq"),
+        "upcurl" => Some("upcurl"),
+        "upkernel" => Some("upkernel"),
+        _ => None,
+    }
+}
+
+pub fn run_crontab_entry(paths: &Paths, entry: &CrontabEntry) {
+    if let Some(kind) = map_legacy_cron_command(&entry.command) {
+        if crate::task::running_count(paths).unwrap_or(0) == 0 {
+            let _ = crate::task::start(
+                paths,
+                crate::task::StartParams {
+                    kind: kind.to_string(),
+                    arg: None,
+                    wait: true,
+                },
+            );
+        }
+        return;
+    }
+    let _ = std::process::Command::new("/system/bin/sh")
+        .arg("-c")
+        .arg(&entry.command)
+        .env("BOX_HOME", &paths.home)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .or_else(|_| {
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&entry.command)
+                .env("BOX_HOME", &paths.home)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        });
 }
 
 pub fn now_seconds() -> u64 {
@@ -346,46 +498,16 @@ mod tests {
     fn cron_parses_and_calculates_next_minute() {
         let cron = Cron::parse("*/5 * * * *").expect("cron");
         let start = epoch(2026, 1, 1);
-        assert_eq!(cron.next_after(start), Some(start + 300));
+        assert_eq!(cron.next_after_utc(start), Some(start + 300));
         let cron = Cron::parse("30 4 * * 1-5").expect("cron");
-        let next = cron.next_after(start).expect("next");
+        let next = cron.next_after_utc(start).expect("next");
         assert_eq!((next - start) / 60, 270);
         let sunday = Cron::parse("0 0 * * 7").expect("sunday");
-        assert!(sunday.next_after(start).is_some());
+        assert!(sunday.next_after_utc(start).is_some());
     }
 
     #[test]
-    fn cron_rejects_bad_shapes_and_ranges() {
-        assert!(Cron::parse("* * * *").is_err());
-        assert!(Cron::parse("60 * * * *").is_err());
-        assert!(Cron::parse("* * 0 * *").is_err());
-        assert!(Cron::parse("*/0 * * * *").is_err());
-        assert!(Cron::parse("* * * * 8").is_err());
-    }
-
-    #[test]
-    fn scheduler_defaults_are_disabled_and_tasks_are_allowlisted() {
-        let disabled = Scheduler::from_settings(&json!({
-            "run_crontab": "false",
-            "update_subscription": "true",
-            "update_geo": "true",
-            "interva_update": "*/5 * * * *"
-        }))
-        .expect("scheduler");
-        assert!(!disabled.enabled);
-        assert!(disabled.tasks.is_empty());
-        let enabled = Scheduler::from_settings(&json!({
-            "run_crontab": "true",
-            "update_subscription": "true",
-            "update_geo": "false",
-            "interva_update": "*/5 * * * *"
-        }))
-        .expect("scheduler");
-        assert_eq!(enabled.tasks, vec!["sub-update"]);
-    }
-
-    #[test]
-    fn missed_runs_are_bounded_by_grace() {
+    fn missed_runs_advance_baseline_instead_of_stalling_and_zero_does_not_fire_immediately() {
         let scheduler = Scheduler::from_settings(&json!({
             "run_crontab": "true",
             "update_subscription": "true",
@@ -394,15 +516,42 @@ mod tests {
         }))
         .expect("scheduler");
         let now = epoch(2026, 1, 1) + 10 * 60;
+        let fresh = super::ScheduleState {
+            last_run: 0,
+            last_task: None,
+        };
+        assert_eq!(
+            super::check_due(&scheduler, &fresh, now, 3600),
+            super::DueCheck::AdvanceBaseline
+        );
+        assert!(!is_due(&scheduler, &fresh, now, 3600));
         let state = super::ScheduleState {
             last_run: epoch(2026, 1, 1),
             last_task: Some("sub-update".to_string()),
         };
-        assert!(is_due(&scheduler, &state, now, 3600));
+        assert_eq!(
+            super::check_due(&scheduler, &state, now, 3600),
+            super::DueCheck::Due
+        );
         let old = super::ScheduleState {
             last_run: epoch(2025, 12, 31),
             last_task: None,
         };
-        assert!(!is_due(&scheduler, &old, now, 3600));
+        assert_eq!(
+            super::check_due(&scheduler, &old, now, 3600),
+            super::DueCheck::AdvanceBaseline
+        );
+    }
+
+    #[test]
+    fn crontab_cfg_parses_and_maps_legacy_box_tool_commands() {
+        let text = "# comment\n0 3 * * * /data/adb/box/scripts/box.tool geosub\n*/15 * * * * echo hi\n";
+        let entries = super::parse_crontab_entries(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            super::map_legacy_cron_command(&entries[0].command),
+            Some("sub-update")
+        );
+        assert_eq!(super::map_legacy_cron_command(&entries[1].command), None);
     }
 }

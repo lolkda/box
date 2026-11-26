@@ -109,7 +109,6 @@ function SettingsFieldRow({
   register,
   error,
   tokenSet,
-  tokenPreview,
   onPickPackages,
 }: {
   field: SettingField;
@@ -117,7 +116,6 @@ function SettingsFieldRow({
   register: ReturnType<typeof useForm<SettingsFormValues>>["register"];
   error?: string;
   tokenSet?: boolean;
-  tokenPreview?: string;
   onPickPackages?: () => void;
 }) {
   const [showToken, setShowToken] = useState(false);
@@ -211,7 +209,7 @@ function SettingsFieldRow({
                     id="setting-githubtoken"
                     type={showToken ? "text" : "password"}
                     value={controlled.value}
-                    placeholder={tokenSet ? `已设置（${tokenPreview}），留空保持不变` : "未设置"}
+                    placeholder={tokenSet ? "已设置，留空保持不变" : "未设置"}
                     autoCapitalize="none"
                     autoCorrect="off"
                     spellCheck={false}
@@ -271,7 +269,6 @@ export function SettingsPage() {
   const [restarting, setRestarting] = useState(false);
   const [packagePickerFor, setPackagePickerFor] = useState<string | null>(null);
   const [tokenSet, setTokenSet] = useState(false);
-  const [tokenPreview, setTokenPreview] = useState("");
 
   const form = useForm<SettingsFormValues>({
     resolver: zodResolver(settingsSchema),
@@ -286,7 +283,6 @@ export function SettingsPage() {
     if (!settingsQuery.data) return;
     reset(buildValues(settingsQuery.data));
     setTokenSet(settingsQuery.data.sensitive.githubtoken.set);
-    setTokenPreview(settingsQuery.data.sensitive.githubtoken.preview);
   }, [settingsQuery.data, reset]);
 
   useEffect(() => {
@@ -379,7 +375,6 @@ export function SettingsPage() {
                       register={register}
                       error={errorFor(settingsErrors, field.key) || errorFor(arrayErrors, field.key)}
                       tokenSet={tokenSetValue}
-                      tokenPreview={tokenPreview}
                       onPickPackages={() => setPackagePickerFor(field.key)}
                     />
                   ))}

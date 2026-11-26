@@ -28,9 +28,15 @@ pub fn yq_url() -> Result<String> {
 }
 
 pub fn mihomo_asset_url(tag: &str) -> Result<String> {
-    let arch = match std::env::consts::ARCH {
-        "aarch64" => "arm64-v8",
-        "x86_64" => "amd64",
+    mihomo_asset_url_channel(tag, true)
+}
+
+pub fn mihomo_asset_url_channel(tag: &str, stable: bool) -> Result<String> {
+    let (platform, arch) = match std::env::consts::ARCH {
+        "aarch64" => ("android", "arm64-v8"),
+        "arm" => ("linux", "armv7"),
+        "x86" => ("linux", "386"),
+        "x86_64" => ("linux", "amd64"),
         other => {
             return Err(BoxError::manager_unavailable(format!(
                 "unsupported architecture for mihomo: {other}"
@@ -38,12 +44,21 @@ pub fn mihomo_asset_url(tag: &str) -> Result<String> {
         }
     };
     let tag = tag.trim();
-    if !tag.starts_with('v') || tag.len() < 2 {
+    if tag.is_empty() {
         return Err(BoxError::validation("mihomo release tag is invalid"));
     }
-    Ok(format!(
-        "https://github.com/MetaCubeX/mihomo/releases/download/{tag}/mihomo-android-{arch}-{tag}.gz"
-    ))
+    if stable {
+        if !tag.starts_with('v') || tag.len() < 2 {
+            return Err(BoxError::validation("mihomo release tag is invalid"));
+        }
+        Ok(format!(
+            "https://github.com/MetaCubeX/mihomo/releases/download/{tag}/mihomo-{platform}-{arch}-{tag}.gz"
+        ))
+    } else {
+        Ok(format!(
+            "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-{platform}-{arch}-{tag}.gz"
+        ))
+    }
 }
 
 fn release_tag_from_page(html: &str) -> Option<String> {
@@ -331,11 +346,31 @@ pub fn update_mihomo_smart(paths: &Paths, policy: &Policy) -> Result<Value> {
     );
     let mut result = install_gz_core(paths, &url, policy)?;
     result["tag"] = Value::String(tag);
+    let restarted = restart_if_running(paths);
+    result["restarted"] = Value::Bool(restarted);
     let _ = util::remove_file_if_exists(&page);
     Ok(result)
 }
 
+fn restart_if_running(paths: &Paths) -> bool {
+    let running = crate::service::status(paths)
+        .ok()
+        .and_then(|s| s["running"].as_bool())
+        .unwrap_or(false);
+    if running {
+        crate::service::restart(paths).is_ok()
+    } else {
+        false
+    }
+}
+
 pub fn update_mihomo(paths: &Paths, policy: &Policy) -> Result<Value> {
+    let stable = crate::settings::SettingsStore::open(paths.clone())
+        .ok()
+        .and_then(|store| store.load().ok())
+        .and_then(|s| s.get("mihomo_stable").and_then(Value::as_str).map(str::to_string))
+        .map(|v| v == "enable")
+        .unwrap_or(true);
     util::ensure_dir(&paths.run_dir, true)?;
     let api = paths.run_dir.join("mihomo-release.json");
     let archive = paths.run_dir.join("mihomo-download.gz");
@@ -344,43 +379,68 @@ pub fn update_mihomo(paths: &Paths, policy: &Policy) -> Result<Value> {
     let _ = util::remove_file_if_exists(&archive);
     let _ = util::remove_file_if_exists(&temp_bin);
 
-    let api_result = download::download_to_file(
-        &api,
-        "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest",
-        policy,
-        None,
-    );
     let mut api_bytes = 0;
-    let tag = match api_result {
-        Ok(report) => {
-            api_bytes = report.bytes;
-            let text = std::fs::read_to_string(&api).map_err(|error| {
-                BoxError::from(error).with_detail("cannot read mihomo release metadata")
-            })?;
-            let metadata: Value = serde_json::from_str(&text).map_err(|_| {
-                BoxError::new(
-                    crate::error::ErrorCode::Content,
-                    "invalid mihomo release metadata",
-                )
-            })?;
-            metadata
-                .get("tag_name")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| {
+    let tag = if stable {
+        let api_result = download::download_to_file(
+            &api,
+            "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest",
+            policy,
+            None,
+        );
+        match api_result {
+            Ok(report) => {
+                api_bytes = report.bytes;
+                let text = std::fs::read_to_string(&api).map_err(|error| {
+                    BoxError::from(error).with_detail("cannot read mihomo release metadata")
+                })?;
+                let metadata: Value = serde_json::from_str(&text).map_err(|_| {
                     BoxError::new(
                         crate::error::ErrorCode::Content,
-                        "mihomo tag_name is missing",
+                        "invalid mihomo release metadata",
                     )
-                })?
+                })?;
+                metadata
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        BoxError::new(
+                            crate::error::ErrorCode::Content,
+                            "mihomo tag_name is missing",
+                        )
+                    })?
+            }
+            Err(_) => latest_page_tag(
+                paths,
+                "https://github.com/MetaCubeX/mihomo/releases/latest",
+                policy,
+            )?,
         }
-        Err(_) => latest_page_tag(
-            paths,
-            "https://github.com/MetaCubeX/mihomo/releases/latest",
+    } else {
+        // Alpha channel: read version string from Prerelease-Alpha version.txt (legacy box.tool:3856-3865).
+        let ver_file = paths.run_dir.join("mihomo-alpha-version.txt");
+        let _ = util::remove_file_if_exists(&ver_file);
+        let report = download::download_to_file(
+            &ver_file,
+            "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt",
             policy,
-        )?,
+            None,
+        )?;
+        api_bytes = report.bytes;
+        let version = fs::read_to_string(&ver_file)
+            .map_err(|error| BoxError::from(error).with_detail("cannot read mihomo alpha version"))?
+            .trim()
+            .to_string();
+        let _ = util::remove_file_if_exists(&ver_file);
+        if version.is_empty() {
+            return Err(BoxError::new(
+                crate::error::ErrorCode::Content,
+                "mihomo alpha version.txt is empty",
+            ));
+        }
+        version
     };
-    let url = mihomo_asset_url(&tag)?;
+    let url = mihomo_asset_url_channel(&tag, stable)?;
     let archive_report = download::download_to_file(&archive, &url, policy, None)?;
 
     let mut child = Command::new("gzip")
@@ -417,8 +477,11 @@ pub fn update_mihomo(paths: &Paths, policy: &Policy) -> Result<Value> {
         .map_err(|error| BoxError::from(error).with_detail("cannot publish mihomo"))?;
     let _ = util::remove_file_if_exists(&api);
     let _ = util::remove_file_if_exists(&archive);
+    let restarted = restart_if_running(paths);
     Ok(json!({
         "tag": tag,
+        "channel": if stable { "stable" } else { "alpha" },
+        "restarted": restarted,
         "path": paths.core_bin.display().to_string(),
         "archive_bytes": archive_report.bytes,
         "archive_sha256": archive_report.sha256,
@@ -511,7 +574,9 @@ pub fn update_xui(paths: &Paths, policy: &Policy) -> Result<Value> {
         if !stage.join("index.html").is_file() {
             return Err(BoxError::validation("dashboard staging has no index.html"));
         }
-        let target = xui_target(paths)?;
+        // Always deploy built-in/updated zashboard to `<home>/mihomo/dashboard` to match
+        // `update_external_ui` setting `external-ui: ./dashboard` (legacy module-dashboard.test.sh).
+        let target = paths.home.join("mihomo").join("dashboard");
         if let Some(parent) = target.parent() {
             util::ensure_dir(parent, true)?;
         }
@@ -697,8 +762,10 @@ mod tests {
         assert!(url.contains("/releases/download/v1.2.3/"));
         assert!(
             url.ends_with("/mihomo-android-arm64-v8-v1.2.3.gz")
-                || url.ends_with("/mihomo-android-amd64-v1.2.3.gz")
+                || url.ends_with("/mihomo-linux-amd64-v1.2.3.gz")
         );
+        let alpha = super::mihomo_asset_url_channel("alpha-1234", false).expect("alpha");
+        assert!(alpha.contains("/releases/download/Prerelease-Alpha/"));
         assert!(super::mihomo_asset_url("alpha").is_err());
     }
 

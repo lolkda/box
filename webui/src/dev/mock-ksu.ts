@@ -556,7 +556,7 @@ function handle(args: string[]): unknown {
         return envelope({
           ...state.settings,
           ...state.arrays,
-          sensitive: { githubtoken: { set: state.tokenSet, preview: state.tokenPreview } },
+          sensitive: { githubtoken: { set: state.tokenSet } },
         } satisfies SettingsData);
       }
       if (action === "apply") {
