@@ -247,7 +247,6 @@ export function NetworkRulesPage() {
   const [previewing, setPreviewing] = useState(false);
   const [applying, setApplying] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const [confirmResetAll, setConfirmResetAll] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const data = query.data;
@@ -404,10 +403,10 @@ export function NetworkRulesPage() {
     }
   };
 
-  const reset = async (all: boolean) => {
+  const reset = async () => {
     setResetting(true);
     try {
-      const result = await api.resetNetworkRules(all);
+      const result = await api.resetNetworkRules();
       setRules(result.rules);
       setTombstones(result.tombstones);
       setBaseRevision(result.revision);
@@ -415,13 +414,12 @@ export function NetworkRulesPage() {
       setPreview(null);
       if (typeof window !== "undefined") window.localStorage.removeItem(DRAFT_KEY);
       setDraftConflict(false);
-      toast({ title: all ? "已清空全部规则" : "已恢复默认规则", tone: "success" });
+      toast({ title: "已恢复默认规则", tone: "success" });
       await queryClient.invalidateQueries({ queryKey: queryKeys.networkRules });
     } catch (error) {
-      toast({ title: all ? "清空失败" : "恢复默认失败", description: getErrorMessage(error), tone: "error" });
+      toast({ title: "恢复默认失败", description: getErrorMessage(error), tone: "error" });
     } finally {
       setResetting(false);
-      setConfirmResetAll(false);
     }
   };
 
@@ -511,19 +509,10 @@ export function NetworkRulesPage() {
           variant="secondary"
           size="md"
           className="h-10 px-3 text-xs"
-          onClick={() => void reset(false)}
+          onClick={() => void reset()}
           loading={resetting}
         >
           <RotateCcw size={15} /> 恢复默认
-        </Button>
-        <Button
-          variant="ghost"
-          size="md"
-          className="h-10 px-3 text-xs"
-          onClick={() => setConfirmResetAll(true)}
-          disabled={resetting}
-        >
-          清空全部
         </Button>
       </StickyActionBar>
 
@@ -778,15 +767,6 @@ export function NetworkRulesPage() {
         onConfirm={remove}
       />
 
-      <ConfirmDialog
-        open={confirmResetAll}
-        onOpenChange={setConfirmResetAll}
-        title="清空全部规则"
-        description="这会删除自定义规则和默认规则；只读系统保护仍然生效。之后可以使用“恢复默认”重新播种默认规则。"
-        confirmLabel="清空全部"
-        destructive
-        onConfirm={() => void reset(true)}
-      />
     </div>
   );
 }

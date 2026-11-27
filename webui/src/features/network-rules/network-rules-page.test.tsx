@@ -67,6 +67,8 @@ describe("NetworkRulesPage", () => {
     expect(screen.getByText("只读")).toBeInTheDocument();
     const actionBar = screen.getByRole("region", { name: "网络规则操作栏" });
     expect(within(actionBar).getByRole("button", { name: "预览变更" })).toBeDisabled();
+    expect(within(actionBar).queryByRole("button", { name: "清空全部" })).not.toBeInTheDocument();
+    expect(screen.queryByText("清空全部规则")).not.toBeInTheDocument();
   });
 
   it("keeps an edited draft locally before applying", async () => {

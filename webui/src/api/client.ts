@@ -329,8 +329,8 @@ export const api = {
   applyNetworkRules: (payload: { base_revision: number; rules: NetworkRule[]; tombstones: string[] }) =>
     runJsonWithFile<NetworkRulesApplyResult>(["network-rules", "apply"], payload),
 
-  resetNetworkRules: (all = false) =>
-    runJson<NetworkRulesApplyResult>(["network-rules", "reset", ...(all ? ["all"] : []), "--json"]),
+  resetNetworkRules: () =>
+    runJson<NetworkRulesApplyResult>(["network-rules", "reset", "--json"]),
 
   coreConfig: () => runJson<CoreConfigData>(["core", "get", "--json"]),
 
