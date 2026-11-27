@@ -62,6 +62,14 @@ mkdir -p "${DASHBOARD_STAGE}"
 cp -a "${DASHBOARD_SOURCE}/." "${DASHBOARD_STAGE}/"
 
 ZIP_NAME="box-${VERSION}.zip"
+if [ ! -x "${ROOT_DIR}/box/bin/boxctl" ]; then
+  if [ -x "${ROOT_DIR}/rust/package.sh" ]; then
+    "${ROOT_DIR}/rust/package.sh"
+  else
+    echo "构建失败：缺少可执行文件 box/bin/boxctl" >&2
+    exit 1
+  fi
+fi
 rm -f "${ZIP_NAME}"
 zip -r -o -X -ll "${ZIP_NAME}" ./ \
   -x '.git' \
@@ -87,6 +95,10 @@ zip -r -o -X -ll "${ZIP_NAME}" ./ \
 )
 unzip -l "${ZIP_NAME}" | grep -q 'box/mihomo/dashboard/index.html' || {
   echo "构建失败：模块包中缺少 zashboard/index.html" >&2
+  exit 1
+}
+unzip -l "${ZIP_NAME}" | grep -q 'box/bin/boxctl' || {
+  echo "构建失败：模块包中缺少 box/bin/boxctl" >&2
   exit 1
 }
 

@@ -27,6 +27,7 @@ pub fn yq_url() -> Result<String> {
     ))
 }
 
+#[cfg(test)]
 pub fn mihomo_asset_url(tag: &str) -> Result<String> {
     mihomo_asset_url_channel(tag, true)
 }
@@ -606,6 +607,7 @@ pub fn update_xui(paths: &Paths, policy: &Policy) -> Result<Value> {
     result
 }
 
+#[cfg(test)]
 fn xui_target(paths: &Paths) -> Result<PathBuf> {
     let text = fs::read_to_string(&paths.config).unwrap_or_default();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap_or(serde_yaml::Value::Null);

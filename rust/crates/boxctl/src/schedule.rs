@@ -132,6 +132,7 @@ impl Cron {
         self.next_after_mode(unix_seconds, true)
     }
 
+    #[cfg(test)]
     pub fn next_after_utc(&self, unix_seconds: u64) -> Option<u64> {
         self.next_after_mode(unix_seconds, false)
     }

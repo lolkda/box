@@ -380,6 +380,7 @@ pub fn should_stop(state: &NetworkState, settings: &Value, running: bool) -> boo
     running && decide(state, settings) == Decision::Stop
 }
 
+#[cfg(test)]
 pub fn allowed_mac(state: &NetworkState, settings: &Value) -> bool {
     let macs = settings
         .get("macs_list")

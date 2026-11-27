@@ -911,10 +911,12 @@ fn has_kernel_match(proc_path: &str, name: &str) -> bool {
     }
 }
 
+#[cfg(test)]
 pub fn plan(settings: &Value, caps: Capabilities) -> Result<Plan> {
     plan_with_dns(settings, caps, None)
 }
 
+#[cfg(test)]
 pub fn plan_with_dns(settings: &Value, caps: Capabilities, dns_port: Option<u16>) -> Result<Plan> {
     plan_with_dns_and_rules(settings, caps, dns_port, None)
 }
