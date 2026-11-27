@@ -72,4 +72,5 @@ describe("SettingsPage", () => {
     expect(within(actionBar).getByRole("button", { name: "撤销" })).toBeDisabled();
     expect(networkMode).toHaveValue("tproxy");
   });
+
 });

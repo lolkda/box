@@ -12,6 +12,7 @@ export function ConfirmDialog({
   cancelLabel = "取消",
   destructive = false,
   loading = false,
+  manualConfirm = false,
   onConfirm,
   children,
 }: {
@@ -23,6 +24,7 @@ export function ConfirmDialog({
   cancelLabel?: string;
   destructive?: boolean;
   loading?: boolean;
+  manualConfirm?: boolean;
   onConfirm: () => void;
   children?: ReactNode;
 }) {
@@ -49,11 +51,17 @@ export function ConfirmDialog({
                 {cancelLabel}
               </Button>
             </AlertDialog.Cancel>
-            <AlertDialog.Action asChild>
+            {manualConfirm ? (
               <Button variant={destructive ? "danger" : "primary"} loading={loading} onClick={onConfirm}>
                 {confirmLabel}
               </Button>
-            </AlertDialog.Action>
+            ) : (
+              <AlertDialog.Action asChild>
+                <Button variant={destructive ? "danger" : "primary"} loading={loading} onClick={onConfirm}>
+                  {confirmLabel}
+                </Button>
+              </AlertDialog.Action>
+            )}
           </div>
         </AlertDialog.Content>
       </AlertDialog.Portal>

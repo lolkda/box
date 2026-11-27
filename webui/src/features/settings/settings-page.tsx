@@ -438,6 +438,7 @@ export function SettingsPage() {
         description="离开设置页会丢失当前修改。"
         confirmLabel="放弃修改"
         destructive
+        manualConfirm
         onConfirm={() => blocker.proceed?.()}
       />
     </div>
