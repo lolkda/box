@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { CoreConfigPage } from "./core-config-page";
 import { ToastProvider } from "../../components/ui/toast";
@@ -59,6 +59,8 @@ describe("CoreConfigPage", () => {
     expect(await screen.findByText("安全运行层")).toBeInTheDocument();
     expect(screen.getByText("外部控制地址")).toBeInTheDocument();
     expect(screen.getByText("高级 YAML")).toBeInTheDocument();
+    const actionBar = screen.getByRole("region", { name: "核心配置操作栏" });
+    expect(within(actionBar).getByRole("button", { name: /保存核心配置/ })).toBeDisabled();
   });
 
   it("shows the prepared find-process-mode as read-only", async () => {

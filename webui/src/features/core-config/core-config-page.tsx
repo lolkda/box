@@ -4,6 +4,7 @@ import { Code2, RefreshCw, Save, ShieldAlert, SlidersHorizontal } from "lucide-r
 import { api } from "../../api/client";
 import { queryKeys, useCoreConfigQuery, useStatusQuery, useTaskStart } from "../../api/queries";
 import type { MihomoStructuredConfig } from "../../api/types";
+import { StickyActionBar } from "../../components/layout/sticky-action-bar";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardBody, CardHeader } from "../../components/ui/card";
@@ -120,7 +121,7 @@ export function CoreConfigPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-8">
       <PageTitle
         title={title}
         description={coreQuery.data.file}
@@ -229,14 +230,33 @@ export function CoreConfigPage() {
         </Card>
       )}
 
-      <div className="flex justify-end gap-2">
-        <Button variant="secondary" onClick={() => { if (original) { setForm({ ...original.structured }); setRaw(original.raw); } }} disabled={!dirty || saving}>
-          撤销
-        </Button>
-        <Button variant="primary" onClick={() => void save()} loading={saving} disabled={!canSave} icon={<Save size={15} />}>
+      <StickyActionBar
+        label="核心配置操作栏"
+        status={dirty ? "有未保存的核心配置修改" : "核心配置已同步"}
+      >
+        {dirty ? (
+          <Button
+            variant="secondary"
+            size="md"
+            className="h-10 flex-1 px-3 text-xs sm:flex-none"
+            onClick={() => { if (original) { setForm({ ...original.structured }); setRaw(original.raw); } }}
+            disabled={saving}
+          >
+            撤销
+          </Button>
+        ) : null}
+        <Button
+          variant="primary"
+          size="md"
+          className={cn("h-10 px-3 text-xs", dirty ? "flex-1 sm:flex-none" : "w-full sm:w-auto")}
+          onClick={() => void save()}
+          loading={saving}
+          disabled={!canSave}
+          icon={<Save size={15} />}
+        >
           保存核心配置
         </Button>
-      </div>
+      </StickyActionBar>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppsNetworkPage } from "./apps-network-page";
 import { ToastProvider } from "../../components/ui/toast";
@@ -45,5 +45,7 @@ describe("AppsNetworkPage", () => {
     expect(await screen.findByText("com.example.app")).toBeInTheDocument();
     expect(screen.getByText("应用包清单")).toBeInTheDocument();
     expect(screen.getByText("网络接口")).toBeInTheDocument();
+    const actionBar = screen.getByRole("region", { name: "应用与网络操作栏" });
+    expect(within(actionBar).getByRole("button", { name: /保存清单/ })).toBeDisabled();
   });
 });

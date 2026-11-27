@@ -4,6 +4,7 @@ import { Network, PackageSearch, Plus, Save, ShieldCheck, Trash2 } from "lucide-
 import { api } from "../../api/client";
 import { queryKeys, useAppListsQuery } from "../../api/queries";
 import type { PackageEntry } from "../../api/types";
+import { StickyActionBar } from "../../components/layout/sticky-action-bar";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardBody, CardHeader } from "../../components/ui/card";
@@ -91,7 +92,7 @@ export function AppsNetworkPage() {
   if (listsQuery.error) return <ErrorState error={listsQuery.error} onRetry={() => void listsQuery.refetch()} />;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-8">
       <PageTitle
         title="应用与网络"
         description="管理 proxy 黑白名单的应用、GID 与网络接口清单"
@@ -175,23 +176,38 @@ export function AppsNetworkPage() {
         </Card>
       ) : null}
 
-      <div className="flex justify-end gap-2">
+      <StickyActionBar
+        label="应用与网络操作栏"
+        status={dirty ? "有未保存的清单修改" : "清单已同步"}
+      >
+        {dirty ? (
+          <Button
+            variant="secondary"
+            size="md"
+            className="h-10 flex-1 px-3 text-xs sm:flex-none"
+            disabled={saving}
+            onClick={() => {
+              if (!original) return;
+              setPackageEntries(original.package.map((entry) => ({ ...entry })));
+              setGid([...original.gid]);
+              setInterfaces({ allow: [...original.interfaces.allow], ignore: [...original.interfaces.ignore] });
+            }}
+          >
+            撤销
+          </Button>
+        ) : null}
         <Button
-          variant="secondary"
-          disabled={!dirty || saving}
-          onClick={() => {
-            if (!original) return;
-            setPackageEntries(original.package.map((entry) => ({ ...entry })));
-            setGid([...original.gid]);
-            setInterfaces({ allow: [...original.interfaces.allow], ignore: [...original.interfaces.ignore] });
-          }}
+          variant="primary"
+          size="md"
+          className={cn("h-10 px-3 text-xs", dirty ? "flex-1 sm:flex-none" : "w-full sm:w-auto")}
+          onClick={() => void save()}
+          loading={saving}
+          disabled={!dirty}
+          icon={<Save size={15} />}
         >
-          撤销
-        </Button>
-        <Button variant="primary" onClick={() => void save()} loading={saving} disabled={!dirty} icon={<Save size={15} />}>
           保存清单
         </Button>
-      </div>
+      </StickyActionBar>
 
       <PackagePicker
         open={pickerOpen}

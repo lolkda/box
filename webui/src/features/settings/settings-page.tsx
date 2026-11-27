@@ -9,6 +9,7 @@ import { api } from "../../api/client";
 import { queryKeys, useSettingsQuery } from "../../api/queries";
 import { Accordion, AccordionItem } from "../../components/ui/accordion";
 import { Badge } from "../../components/ui/badge";
+import { StickyActionBar } from "../../components/layout/sticky-action-bar";
 import { Button } from "../../components/ui/button";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
 import { ErrorState } from "../../components/ui/error-state";
@@ -101,6 +102,12 @@ function errorFor(errors: Record<string, unknown> | undefined, key: string): str
   const value = errors?.[key];
   if (value && typeof value === "object" && "message" in value) return String((value as { message?: unknown }).message);
   return undefined;
+}
+
+function hasDirtyField(value: unknown): boolean {
+  if (value === true) return true;
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value).some(hasDirtyField);
 }
 
 function SettingsFieldRow({
@@ -276,7 +283,8 @@ export function SettingsPage() {
     mode: "onBlur",
   });
   const { control, register, handleSubmit, reset, formState, setValue, getValues, watch } = form;
-  const dirty = formState.isDirty;
+  // reset() can leave formState.isDirty stale when an onBlur validation is in flight.
+  const dirty = hasDirtyField(formState.dirtyFields);
   const blocker = useBlocker(dirty || saving);
 
   useEffect(() => {
@@ -338,7 +346,7 @@ export function SettingsPage() {
   const tokenSetValue = tokenDirty ? Boolean(getValues("token")) : tokenSet;
 
   return (
-    <div className={cn("space-y-4", dirty && "pb-20")}>
+    <div className="space-y-4 pb-8">
       <PageTitle
         title="设置"
         description="全部可编辑设置项；保存后写入 settings.json"
@@ -383,26 +391,33 @@ export function SettingsPage() {
             ))}
           </Accordion>
 
-          <div className="rounded-2xl border border-border bg-surface p-4 text-[11px] leading-5 text-fg-muted">
-            <p className="font-medium text-fg">内部路径与常量</p>
-            <p className="mt-1">box_dir、内部路径、config 路径、bin_list 等内部键不在页面开放，避免误改导致模块无法启动。</p>
-          </div>
-
-          {dirty ? (
-            <div className="fixed inset-x-0 bottom-[calc(4.25rem+var(--safe-bottom))] z-30 border-t border-border bg-surface/95 px-4 py-3 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] backdrop-blur-xl">
-              <div className="mx-auto flex max-w-3xl items-center justify-between gap-3">
-                <p className="text-xs text-fg-muted">有未保存的设置修改</p>
-                <div className="flex gap-2">
-                  <Button variant="ghost" size="sm" icon={<RotateCcw size={14} />} onClick={() => { reset(); }}>
-                    撤销
-                  </Button>
-                  <Button variant="primary" size="sm" type="submit" loading={saving} icon={<Save size={14} />}>
-                    保存更改
-                  </Button>
-                </div>
-              </div>
-            </div>
-          ) : null}
+          <StickyActionBar
+            label="设置操作栏"
+            status={dirty ? "有未保存的设置修改" : "设置已同步"}
+          >
+            {dirty ? (
+              <Button
+                variant="secondary"
+                size="md"
+                className="h-10 flex-1 px-3 text-xs sm:flex-none"
+                icon={<RotateCcw size={14} />}
+                onClick={() => reset()}
+              >
+                撤销
+              </Button>
+            ) : null}
+            <Button
+              variant="primary"
+              size="md"
+              className={cn("h-10 px-3 text-xs", dirty ? "flex-1 sm:flex-none" : "w-full sm:w-auto")}
+              type="submit"
+              loading={saving}
+              disabled={!dirty}
+              icon={<Save size={14} />}
+            >
+              保存更改
+            </Button>
+          </StickyActionBar>
         </form>
       )}
 

@@ -1,4 +1,13 @@
-import type { ConfigData, RuleProfileCounts, SettingsData, SubscriptionDetail, TaskInfo } from "../api/types";
+import type {
+  AppListsData,
+  ConfigData,
+  CoreConfigData,
+  NetworkRulesData,
+  RuleProfileCounts,
+  SettingsData,
+  SubscriptionDetail,
+  TaskInfo,
+} from "../api/types";
 
 interface MockRuleProfile {
   id: string;
@@ -19,6 +28,9 @@ interface MockState {
   subscriptions: SubscriptionDetail[];
   config: ConfigData;
   configExists: boolean;
+  coreConfig: CoreConfigData;
+  appLists: AppListsData;
+  networkRules: NetworkRulesData;
   settings: Record<string, string>;
   arrays: Record<string, string[]>;
   tokenSet: boolean;
@@ -201,6 +213,76 @@ const state: MockState = {
       counts: { groups: 8, rule_providers: 12, rules: 18 },
     },
   ],
+  coreConfig: {
+    core: "mihomo",
+    file: "/data/adb/box/mihomo/config.yaml",
+    structured: {
+      mode: "rule",
+      "log-level": "info",
+      "allow-lan": true,
+      "external-controller": "0.0.0.0:9090",
+      "external-ui": "./dashboard",
+      "profile.store-selected": true,
+      "profile.store-fake-ip": true,
+      "unified-delay": false,
+      "tcp-concurrent": true,
+      "find-process-mode": "off",
+    },
+    raw: "mode: rule\nlog-level: info\nallow-lan: true\nexternal-controller: 0.0.0.0:9090\nexternal-ui: ./dashboard\n",
+  },
+  appLists: {
+    package: [
+      { uid: "0", package: "com.android.settings" },
+      { uid: "10", package: "com.example.proxy" },
+    ],
+    gid: ["1000", "3005"],
+    interfaces: { allow: ["wlan+", "ap+"], ignore: ["wlan0"] },
+    files: {
+      package: "/data/adb/box/package.list.cfg",
+      gid: "/data/adb/box/gid.list.cfg",
+      interfaces: "/data/adb/box/ap.list.cfg",
+    },
+  },
+  networkRules: {
+    schema_version: 1,
+    revision: 4,
+    defaults_version: "2026.11",
+    rules: [
+      {
+        id: "lan-bypass",
+        name: "局域网旁路",
+        enabled: true,
+        action: "bypass",
+        scopes: ["local", "forward"],
+        modes: ["tun", "tproxy", "redirect", "mixed", "enhance"],
+        family: "ipv4",
+        protocol: "any",
+        match: {
+          dst_cidrs: ["192.168.0.0/16"],
+          src_cidrs: [],
+          dst_ports: [],
+          src_ports: [],
+          src_ifaces: [],
+          dst_ifaces: [],
+          uids: [],
+          gids: [],
+          dst_types: [],
+        },
+        origin: "user",
+      },
+    ],
+    tombstones: [],
+    system: [
+      {
+        id: "system-core",
+        name: "核心旁路",
+        description: "精确放行核心进程，防止代理环路",
+        scopes: ["local"],
+        readOnly: true,
+      },
+    ],
+    warnings: [],
+  },
   ...buildSettings(),
   logs: [
     "2026-11-23 07:40:12 [Info]: Box 服务已启动",
@@ -580,6 +662,43 @@ function handle(args: string[]): unknown {
           return failure("E_VALIDATION", "设置 JSON 无法解析");
         }
       }
+      break;
+    }
+    case "core": {
+      if (action === "get") return envelope(state.coreConfig);
+      if (action === "apply") {
+        const path = rest[0];
+        const content = path ? tempFiles.get(path) : undefined;
+        if (!content) return failure("E_IO", "未找到临时核心配置文件");
+        try {
+          const payload = JSON.parse(content) as { structured?: CoreConfigData["structured"]; raw?: string };
+          if (payload.structured) state.coreConfig = { ...state.coreConfig, structured: payload.structured };
+          if (typeof payload.raw === "string") state.coreConfig = { ...state.coreConfig, raw: payload.raw };
+          return envelope({ changed: ["config.yaml"], mode: payload.raw ? "raw" : "structured" });
+        } catch {
+          return failure("E_VALIDATION", "核心配置 JSON 无法解析");
+        }
+      }
+      break;
+    }
+    case "lists": {
+      if (action === "get") return envelope(state.appLists);
+      if (action === "apply") {
+        const path = rest[0];
+        const content = path ? tempFiles.get(path) : undefined;
+        if (!content) return failure("E_IO", "未找到临时清单文件");
+        try {
+          const payload = JSON.parse(content) as AppListsData;
+          state.appLists = { ...state.appLists, ...payload };
+          return envelope({ changed: ["package.list.cfg", "gid.list.cfg", "ap.list.cfg"] });
+        } catch {
+          return failure("E_VALIDATION", "清单 JSON 无法解析");
+        }
+      }
+      break;
+    }
+    case "network-rules": {
+      if (action === "get") return envelope(state.networkRules);
       break;
     }
     case "logs": {

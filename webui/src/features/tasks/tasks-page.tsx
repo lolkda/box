@@ -122,6 +122,10 @@ export function TasksPage() {
           </>
         }
       />
+      <div className="flex items-start gap-2 rounded-2xl border border-border bg-surface px-4 py-3 text-[11px] leading-5 text-fg-muted">
+        <Activity size={15} className="mt-0.5 shrink-0" />
+        <span>同一时间只运行一个变更任务；内核替换阶段不可取消。页面刷新或重新打开后可继续查看进度。</span>
+      </div>
       {tasksQuery.isLoading ? (
         <PageSkeleton />
       ) : tasksQuery.error ? (
@@ -139,10 +143,6 @@ export function TasksPage() {
           ))}
         </div>
       )}
-      <div className="flex items-start gap-2 rounded-2xl border border-border bg-surface px-4 py-3 text-[11px] leading-5 text-fg-muted">
-        <Activity size={15} className="mt-0.5 shrink-0" />
-        <span>同一时间只运行一个变更任务；内核替换阶段不可取消。页面刷新或重新打开后可继续查看进度。</span>
-      </div>
 
       <TaskDetailSheet task={selected} onClose={() => setSelected(null)} />
 
