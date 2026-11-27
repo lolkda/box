@@ -1,7 +1,7 @@
-# boxctl (Rust M2)
+# boxctl
 
-This directory contains the Rust control-plane migration work for the design in
-`docs/specs/rust-script-migration.md`. It is **not** installed by the module build yet.
+This directory contains the Rust `boxctl` daemon and CLI control plane packaged
+into `box/bin/boxctl`.
 
 ## Scope
 

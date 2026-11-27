@@ -79,7 +79,6 @@ zip -r -o -X -ll "${ZIP_NAME}" ./ \
   -x 'update.json' \
   -x 'build.sh' \
   -x '.github/*' \
-  -x 'docs/*' \
   -x 'test/*' \
   -x 'tools/*' \
   -x 'webui/*' \

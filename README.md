@@ -64,7 +64,7 @@ su -c "/data/adb/box/bin/boxctl sub update"
 - 任务中心：订阅/内核等后台任务由 shell 托管，关闭页面后可恢复查看
 - 危险操作：删除配置、清空日志、重置订阅、更新核心（均需二次确认）
 
-`boxctl --json` 统一返回 v2 包络；旧 `box.tool` 已封存，不再作为公开入口。规格见 [module-webui-refactor.md](docs/specs/module-webui-refactor.md) 与 [module-webui-config-expansion.md](docs/specs/module-webui-config-expansion.md)。
+`boxctl --json` 统一返回 v2 包络。
 
 源码在 `webui/`，构建：
 
@@ -72,13 +72,13 @@ su -c "/data/adb/box/bin/boxctl sub update"
 cd webui && npm install && npm run build
 ```
 
-构建产物输出到 `webroot/`，模块打包时直接包含该目录。模块包同时内置 zashboard（构建时获取最新 `dist-no-fonts`），安装/升级后 mihomo 的 `/ui` 固定由 zashboard 提供；`boxctl task start xui` 或核心配置页的「更新面板」可手动更新。规格见 [module-dashboard-zashboard.md](docs/specs/module-dashboard-zashboard.md)。
+构建产物输出到 `webroot/`，模块打包时直接包含该目录。模块包同时内置 zashboard（构建时获取最新 `dist-no-fonts`），安装/升级后 mihomo 的 `/ui` 固定由 zashboard 提供；`boxctl task start xui` 或核心配置页的「更新面板」可手动更新。
 
-设置数据层使用 `settings.json` + `settings.schema.json`，运行时由 `boxctl` 管理 `settings.json`；旧 `settings.ini` 不兼容并会在升级时重置。规格见 [module-settings-json.md](docs/specs/module-settings-json.md)。
+设置数据层使用 `settings.json` + `settings.schema.json`，运行时由 `boxctl` 管理 `settings.json`；旧 `settings.ini` 不兼容并会在升级时重置。
 
-2.0.0 起只保留 mihomo：升级会删除旧 `sing-box/` 配置目录和 `bin/sing-box`，旧 settings 中的 sing-box 字段会自动清理；规格见 [module-mihomo-only.md](docs/specs/module-mihomo-only.md)。
+2.0.0 起只保留 mihomo：升级会删除旧 `sing-box/` 配置目录和 `bin/sing-box`，旧 settings 中的 sing-box 字段会自动清理。
 
-订阅支持普通 provider 和完整配置聚合自动拆分；订阅只管理节点，策略组和规则仍由 `config.yaml` 管理。规格见 [module-subscription-auto-provider.md](docs/specs/module-subscription-auto-provider.md)。
+订阅支持普通 provider 和完整配置聚合自动拆分；订阅只管理节点，策略组和规则仍由 `config.yaml` 管理。
 
 ## 文档与社区
 
