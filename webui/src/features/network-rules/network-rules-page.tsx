@@ -494,7 +494,16 @@ export function NetworkRulesPage() {
         </div>
       )}
 
-      <StickyActionBar label="网络规则操作栏" actionsClassName="justify-start sm:ml-0">
+      <StickyActionBar label="网络规则操作栏">
+        <Button
+          variant="secondary"
+          size="md"
+          className="h-10 px-3 text-xs"
+          onClick={() => void reset()}
+          loading={resetting}
+        >
+          <RotateCcw size={15} /> 恢复默认
+        </Button>
         <Button
           variant="primary"
           size="md"
@@ -504,15 +513,6 @@ export function NetworkRulesPage() {
           disabled={!dirty || conflict}
         >
           预览变更
-        </Button>
-        <Button
-          variant="secondary"
-          size="md"
-          className="h-10 px-3 text-xs"
-          onClick={() => void reset()}
-          loading={resetting}
-        >
-          <RotateCcw size={15} /> 恢复默认
         </Button>
       </StickyActionBar>
 
