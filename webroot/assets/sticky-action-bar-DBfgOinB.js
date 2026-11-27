@@ -1,6 +1,0 @@
-import{c as n,j as e,e as t}from"./index-C5m_Y3OE.js";/**
- * @license lucide-react v0.468.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */const i=n("Save",[["path",{d:"M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",key:"1c8476"}],["path",{d:"M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7",key:"1ydtos"}],["path",{d:"M7 3v4a1 1 0 0 0 1 1h7",key:"t51u73"}]]);function c({label:s,status:a,children:r,className:o}){return e.jsx("div",{className:t("pointer-events-none fixed inset-x-0 bottom-[calc(4.25rem+var(--safe-bottom))] z-30 px-4 pb-2",o),role:"region","aria-label":s,children:e.jsxs("div",{className:"pointer-events-auto mx-auto flex max-w-3xl items-center justify-between gap-3 rounded-2xl border border-border bg-surface/95 p-2 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] backdrop-blur-xl",children:[a?e.jsx("p",{className:"sr-only sm:not-sr-only sm:block sm:min-w-0 sm:truncate sm:text-xs sm:text-fg-muted","aria-live":"polite",children:a}):null,e.jsx("div",{className:t("flex w-full items-center justify-end gap-2 sm:w-auto",!a&&"sm:ml-auto"),children:r})]})})}export{c as S,i as a};

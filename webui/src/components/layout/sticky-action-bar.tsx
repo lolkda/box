@@ -6,11 +6,13 @@ export function StickyActionBar({
   status,
   children,
   className,
+  actionsClassName,
 }: {
   label: string;
   status?: ReactNode;
   children: ReactNode;
   className?: string;
+  actionsClassName?: string;
 }) {
   return (
     <div
@@ -24,7 +26,7 @@ export function StickyActionBar({
             {status}
           </p>
         ) : null}
-        <div className={cn("flex w-full items-center justify-end gap-2 sm:w-auto", !status && "sm:ml-auto")}>
+        <div className={cn("flex w-full items-center justify-end gap-2 sm:w-auto", !status && "sm:ml-auto", actionsClassName)}>
           {children}
         </div>
       </div>

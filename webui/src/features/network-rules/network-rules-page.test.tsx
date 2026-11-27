@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { NetworkRulesPage } from "./network-rules-page";
@@ -65,6 +65,8 @@ describe("NetworkRulesPage", () => {
     expect(await screen.findByText("核心旁路")).toBeInTheDocument();
     expect(screen.getByText("IPv4 私网")).toBeInTheDocument();
     expect(screen.getByText("只读")).toBeInTheDocument();
+    const actionBar = screen.getByRole("region", { name: "网络规则操作栏" });
+    expect(within(actionBar).getByRole("button", { name: "预览变更" })).toBeDisabled();
   });
 
   it("keeps an edited draft locally before applying", async () => {
@@ -78,6 +80,7 @@ describe("NetworkRulesPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存到草稿" }));
     expect(await screen.findByText("测试草稿")).toBeInTheDocument();
     expect(screen.getByText("有未应用修改")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "预览变更" })).toBeEnabled();
     expect(window.localStorage.getItem("box.network-rules.draft.v1")).toContain("203.0.113.0/24");
   });
 

@@ -25,6 +25,7 @@ import type {
   NetworkRulesPreview,
   NetworkSystemRule,
 } from "../../api/types";
+import { StickyActionBar } from "../../components/layout/sticky-action-bar";
 import { ActionsMenu } from "../../components/ui/actions-menu";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -432,7 +433,7 @@ export function NetworkRulesPage() {
   const conflict = draftConflict || serverRevision !== data.revision;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-8">
       <PageTitle
         title="网络规则"
         description="本机、转发/TUN、DNS 与过滤规则；系统保护只读"
@@ -495,22 +496,36 @@ export function NetworkRulesPage() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2">
+      <StickyActionBar label="网络规则操作栏" actionsClassName="justify-start sm:ml-0">
         <Button
           variant="primary"
+          size="md"
+          className="h-10 px-3 text-xs"
           onClick={() => void openPreview()}
           loading={previewing}
           disabled={!dirty || conflict}
         >
           预览变更
         </Button>
-        <Button variant="secondary" onClick={() => void reset(false)} loading={resetting}>
+        <Button
+          variant="secondary"
+          size="md"
+          className="h-10 px-3 text-xs"
+          onClick={() => void reset(false)}
+          loading={resetting}
+        >
           <RotateCcw size={15} /> 恢复默认
         </Button>
-        <Button variant="ghost" onClick={() => setConfirmResetAll(true)} disabled={resetting}>
+        <Button
+          variant="ghost"
+          size="md"
+          className="h-10 px-3 text-xs"
+          onClick={() => setConfirmResetAll(true)}
+          disabled={resetting}
+        >
           清空全部
         </Button>
-      </div>
+      </StickyActionBar>
 
       {preview ? (
         <Card>
