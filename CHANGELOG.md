@@ -1,3 +1,8 @@
+#### Changelog 2.1.1 - 28-11-2026
+- 设置、核心配置、应用与网络页面改为常驻悬浮保存栏，清理底部多余留白
+- 移除设置页“内部路径与常量”说明
+- 任务中心操作提醒移至页面顶部
+
 #### Changelog 2.1.0 - 27-11-2026
 - 运行时全面迁移至单二进制 Rust boxctl 守护进程与 CLI，移除旧 shell 运行时和 eBPF 支持
 - 恢复 mihomo root:net_admin (0:3005) 进程身份、RLIMIT_NOFILE、taskset_cpu 与 cgroup_memcg/blkio 资源调优
