@@ -498,7 +498,7 @@ export function NetworkRulesPage() {
         <Button
           variant="secondary"
           size="md"
-          className="h-10 px-3 text-xs"
+          className="h-10 flex-1 px-3 text-xs sm:flex-none"
           onClick={() => void reset()}
           loading={resetting}
         >
@@ -507,7 +507,7 @@ export function NetworkRulesPage() {
         <Button
           variant="primary"
           size="md"
-          className="h-10 px-3 text-xs"
+          className="h-10 flex-1 px-3 text-xs sm:flex-none"
           onClick={() => void openPreview()}
           loading={previewing}
           disabled={!dirty || conflict}
