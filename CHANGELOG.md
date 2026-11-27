@@ -1,3 +1,10 @@
+#### Changelog 2.0.1 - 24-11-2026
+- 修复 User-Agent 选择器交互
+- 预设改为原生下拉，选择预设不再弹出输入法
+- 只有选择“自定义”后才显示并聚焦输入框
+- 订阅级新增显式“跟随全局”选项
+- 移除 datalist，修复 Android WebView 叠层问题
+
 #### Changelog 2.0.0 - 24-11-2026
 - BREAKING: 完全移除 sing-box，仅保留 mihomo
 - 升级时删除旧 sing-box 配置目录与二进制
