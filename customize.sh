@@ -138,7 +138,7 @@ set_perm /data/adb/box/bin/boxctl 0 0 0755
 set_perm ${service_dir}/box_service.sh 0 0 0755
 set_perm $MODPATH/uninstall.sh 0 0 0755
 chmod ugo+x ${service_dir}/box_service.sh $MODPATH/uninstall.sh
-# 旧 shell 已封存到仓库 legacy/，升级时清理设备上的活动副本。
+# 旧 shell 运行时已移除，升级时清理设备上的旧副本。
 rm -rf /data/adb/box/scripts /data/adb/box/settings.base.sh /data/adb/box/run/settings.runtime.sh
 
 KEY_LISTENER_PID=""

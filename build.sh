@@ -84,7 +84,6 @@ zip -r -o -X -ll "${ZIP_NAME}" ./ \
   -x 'tools/*' \
   -x 'webui/*' \
   -x 'rust/*' \
-  -x 'legacy/*' \
   -x 'artifacts/*' \
   -x '*.zip' \
   -x 'LICENSE' \
