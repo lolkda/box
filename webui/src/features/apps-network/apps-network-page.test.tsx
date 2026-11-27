@@ -46,6 +46,7 @@ describe("AppsNetworkPage", () => {
     expect(screen.getByText("应用包清单")).toBeInTheDocument();
     expect(screen.getByText("网络接口")).toBeInTheDocument();
     const actionBar = screen.getByRole("region", { name: "应用与网络操作栏" });
+    expect(within(actionBar).getByRole("button", { name: "撤销" })).toBeDisabled();
     expect(within(actionBar).getByRole("button", { name: /保存清单/ })).toBeDisabled();
   });
 });

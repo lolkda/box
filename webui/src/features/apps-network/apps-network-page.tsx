@@ -180,26 +180,24 @@ export function AppsNetworkPage() {
         label="应用与网络操作栏"
         status={dirty ? "有未保存的清单修改" : "清单已同步"}
       >
-        {dirty ? (
-          <Button
-            variant="secondary"
-            size="md"
-            className="h-10 flex-1 px-3 text-xs sm:flex-none"
-            disabled={saving}
-            onClick={() => {
-              if (!original) return;
-              setPackageEntries(original.package.map((entry) => ({ ...entry })));
-              setGid([...original.gid]);
-              setInterfaces({ allow: [...original.interfaces.allow], ignore: [...original.interfaces.ignore] });
-            }}
-          >
-            撤销
-          </Button>
-        ) : null}
+        <Button
+          variant="secondary"
+          size="md"
+          className="h-10 flex-1 px-3 text-xs sm:flex-none"
+          disabled={!dirty || saving}
+          onClick={() => {
+            if (!original) return;
+            setPackageEntries(original.package.map((entry) => ({ ...entry })));
+            setGid([...original.gid]);
+            setInterfaces({ allow: [...original.interfaces.allow], ignore: [...original.interfaces.ignore] });
+          }}
+        >
+          撤销
+        </Button>
         <Button
           variant="primary"
           size="md"
-          className={cn("h-10 px-3 text-xs", dirty ? "flex-1 sm:flex-none" : "w-full sm:w-auto")}
+          className="h-10 flex-1 px-3 text-xs sm:flex-none"
           onClick={() => void save()}
           loading={saving}
           disabled={!dirty}

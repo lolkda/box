@@ -234,21 +234,19 @@ export function CoreConfigPage() {
         label="核心配置操作栏"
         status={dirty ? "有未保存的核心配置修改" : "核心配置已同步"}
       >
-        {dirty ? (
-          <Button
-            variant="secondary"
-            size="md"
-            className="h-10 flex-1 px-3 text-xs sm:flex-none"
-            onClick={() => { if (original) { setForm({ ...original.structured }); setRaw(original.raw); } }}
-            disabled={saving}
-          >
-            撤销
-          </Button>
-        ) : null}
+        <Button
+          variant="secondary"
+          size="md"
+          className="h-10 flex-1 px-3 text-xs sm:flex-none"
+          onClick={() => { if (original) { setForm({ ...original.structured }); setRaw(original.raw); } }}
+          disabled={!dirty || saving}
+        >
+          撤销
+        </Button>
         <Button
           variant="primary"
           size="md"
-          className={cn("h-10 px-3 text-xs", dirty ? "flex-1 sm:flex-none" : "w-full sm:w-auto")}
+          className="h-10 flex-1 px-3 text-xs sm:flex-none"
           onClick={() => void save()}
           loading={saving}
           disabled={!canSave}

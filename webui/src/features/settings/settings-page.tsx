@@ -24,7 +24,7 @@ import { TagInput } from "../../components/ui/tag-input";
 import { UserAgentSelect } from "../../components/ui/user-agent-select";
 import { useToast } from "../../components/ui/toast";
 import { allSettingsFields, settingsGroups, type SettingField } from "../../lib/settings";
-import { cn, getErrorMessage } from "../../lib/utils";
+import { getErrorMessage } from "../../lib/utils";
 
 interface SettingsFormValues {
   settings: Record<string, string>;
@@ -395,21 +395,20 @@ export function SettingsPage() {
             label="设置操作栏"
             status={dirty ? "有未保存的设置修改" : "设置已同步"}
           >
-            {dirty ? (
-              <Button
-                variant="secondary"
-                size="md"
-                className="h-10 flex-1 px-3 text-xs sm:flex-none"
-                icon={<RotateCcw size={14} />}
-                onClick={() => reset()}
-              >
-                撤销
-              </Button>
-            ) : null}
+            <Button
+              variant="secondary"
+              size="md"
+              className="h-10 flex-1 px-3 text-xs sm:flex-none"
+              icon={<RotateCcw size={14} />}
+              onClick={() => reset()}
+              disabled={!dirty || saving}
+            >
+              撤销
+            </Button>
             <Button
               variant="primary"
               size="md"
-              className={cn("h-10 px-3 text-xs", dirty ? "flex-1 sm:flex-none" : "w-full sm:w-auto")}
+              className="h-10 flex-1 px-3 text-xs sm:flex-none"
               type="submit"
               loading={saving}
               disabled={!dirty}

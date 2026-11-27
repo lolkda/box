@@ -60,6 +60,7 @@ describe("CoreConfigPage", () => {
     expect(screen.getByText("外部控制地址")).toBeInTheDocument();
     expect(screen.getByText("高级 YAML")).toBeInTheDocument();
     const actionBar = screen.getByRole("region", { name: "核心配置操作栏" });
+    expect(within(actionBar).getByRole("button", { name: "撤销" })).toBeDisabled();
     expect(within(actionBar).getByRole("button", { name: /保存核心配置/ })).toBeDisabled();
   });
 

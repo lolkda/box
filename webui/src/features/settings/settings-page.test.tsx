@@ -43,13 +43,13 @@ function renderPage() {
 }
 
 describe("SettingsPage", () => {
-  it("removes the internal path note and keeps the action bar mounted when clean", async () => {
+  it("removes the internal path note and shows both actions when clean", async () => {
     renderPage();
 
     const actionBar = await screen.findByRole("region", { name: "设置操作栏" });
     expect(screen.queryByText("内部路径与常量")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /恢复运行值/ })).not.toBeInTheDocument();
-    expect(within(actionBar).queryByRole("button", { name: "撤销" })).not.toBeInTheDocument();
+    expect(within(actionBar).getByRole("button", { name: "撤销" })).toBeDisabled();
     expect(within(actionBar).getByRole("button", { name: /保存更改/ })).toBeDisabled();
   });
 
@@ -69,7 +69,7 @@ describe("SettingsPage", () => {
 
     await user.click(undo);
     await waitFor(() => expect(save).toBeDisabled());
-    expect(within(actionBar).queryByRole("button", { name: "撤销" })).not.toBeInTheDocument();
+    expect(within(actionBar).getByRole("button", { name: "撤销" })).toBeDisabled();
     expect(networkMode).toHaveValue("tproxy");
   });
 });
