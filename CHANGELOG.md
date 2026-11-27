@@ -1,3 +1,10 @@
+#### Changelog 2.1.0 - 27-11-2026
+- 运行时全面迁移至单二进制 Rust boxctl 守护进程与 CLI，移除旧 shell 运行时和 eBPF 支持
+- 恢复 mihomo root:net_admin (0:3005) 进程身份、RLIMIT_NOFILE、taskset_cpu 与 cgroup_memcg/blkio 资源调优
+- 重写透明代理与网络规则：修复纯 mangle TPROXY 双栈、enhance/redirect/mixed/tun 模式、DNS 优先序、自定义网络规则与本地 IP 动态绕过
+- 原生迁移模块 disable 监控、网络事件自控、本地时区定时调度与 crontab.cfg，支持 payload 热重载与 gid=3005 直连回退下载
+- 修复订阅聚合、规则模板、工具/GeoX 更新与升级数据恢复，默认 find_process_mode 改为 off 并同步更新 WebUI
+
 #### Changelog 2.0.1 - 24-11-2026
 - 修复 User-Agent 选择器交互
 - 预设改为原生下拉，选择预设不再弹出输入法
