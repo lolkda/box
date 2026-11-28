@@ -4,7 +4,6 @@
   --color-bg: #f6f7f9;
   --color-surface: #ffffff;
   --color-surface-muted: #eef1f5;
-  --color-surface-raised: #ffffff;
   --color-fg: #101418;
   --color-fg-muted: #667085;
   --color-fg-subtle: #98a2b3;
@@ -30,7 +29,6 @@
     --color-bg: #0b0f14;
     --color-surface: #141a21;
     --color-surface-muted: #1b232c;
-    --color-surface-raised: #182028;
     --color-fg: #f3f6f9;
     --color-fg-muted: #98a2b3;
     --color-fg-subtle: #667085;
@@ -151,14 +149,6 @@ button:disabled {
 
 .animate-box-slide {
   animation: box-slide-up 180ms ease-out;
-}
-
-.pb-safe {
-  padding-bottom: calc(1rem + var(--safe-bottom));
-}
-
-.pt-safe {
-  padding-top: var(--safe-top);
 }
 
 @media (prefers-reduced-motion: reduce) {

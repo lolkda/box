@@ -26,7 +26,7 @@ import type {
   TaskLogsData,
 } from "./types";
 
-export const TOOL = "/data/adb/box/bin/boxctl";
+const TOOL = "/data/adb/box/bin/boxctl";
 
 let tempCounter = 0;
 
@@ -189,7 +189,7 @@ export function parseEnvelope<T>(stdout: string, errno: number, stderr: string):
   throw new ApiError(payload?.code || "E_UNKNOWN", payload?.message || "操作失败", payload?.detail || "");
 }
 
-export async function runJson<T>(args: string[], timeoutMs = 0): Promise<T> {
+async function runJson<T>(args: string[], timeoutMs = 0): Promise<T> {
   const command = `${TOOL} ${args.map(shellQuote).join(" ")}`;
   const result = await execCommand(command, timeoutMs);
   return parseEnvelope<T>(result.stdout, result.errno, result.stderr);
@@ -205,7 +205,7 @@ function toBase64(text: string): string {
   return btoa(binary);
 }
 
-export async function runJsonWithFile<T>(args: string[], payload: unknown): Promise<T> {
+async function runJsonWithFile<T>(args: string[], payload: unknown): Promise<T> {
   const path = `/data/local/tmp/box-ui-${Date.now()}-${tempCounter++}.json`;
   const encoded = toBase64(JSON.stringify(payload));
   await execCommand(`printf '%s' '${encoded}' | base64 -d > ${shellQuote(path)}`);
@@ -356,7 +356,7 @@ interface KsuPackageHost {
   getPackagesInfo?: PackageBridgeMethod;
 }
 
-export type PackageBridgeKind = "pm" | "legacy";
+type PackageBridgeKind = "pm" | "legacy";
 
 export interface ResolvedPackageBridge {
   kind: PackageBridgeKind;
@@ -364,12 +364,12 @@ export interface ResolvedPackageBridge {
   getPackagesInfo: PackageBridgeMethod;
 }
 
-export type PackageBridgeErrorCode =
+type PackageBridgeErrorCode =
   | "PACKAGE_BRIDGE_UNAVAILABLE"
   | "PACKAGE_BRIDGE_ERROR"
   | "PACKAGE_BRIDGE_BAD_RESPONSE";
 
-export class PackageBridgeError extends Error {
+class PackageBridgeError extends Error {
   readonly code: PackageBridgeErrorCode;
 
   constructor(code: PackageBridgeErrorCode, message: string) {

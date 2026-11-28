@@ -3,7 +3,7 @@ import { Input } from "./input";
 import { Select } from "./select";
 import { userAgentPresets } from "../../lib/user-agent";
 
-export const USER_AGENT_CUSTOM_VALUE = "__custom__";
+const USER_AGENT_CUSTOM_VALUE = "__custom__";
 
 interface UserAgentSelectProps {
   id: string;

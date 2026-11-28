@@ -1783,7 +1783,7 @@ fn cleanup_old_candidates(paths: &Paths, keep: usize) {
     if dirs.len() <= keep {
         return;
     }
-    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.sort_by_key(|a| std::cmp::Reverse(a.0));
     for (_, path) in dirs.into_iter().skip(keep) {
         let _ = fs::remove_dir_all(path);
     }

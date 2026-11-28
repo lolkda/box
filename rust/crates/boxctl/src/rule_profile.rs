@@ -325,12 +325,7 @@ pub fn apply_with_policy(
     use_pending_with_policy(paths, params, policy)
 }
 
-#[allow(dead_code)]
-pub fn apply(paths: &Paths, params: UseParams) -> Result<Value> {
-    use_pending_with_policy(paths, params, None)
-}
-
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn use_pending(paths: &Paths, params: UseParams) -> Result<Value> {
     use_pending_with_policy(paths, params, None)
 }

@@ -47,7 +47,6 @@ impl NetworkState {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct EventTracker {
     stability: Duration,
@@ -56,7 +55,6 @@ pub struct EventTracker {
     emitted: Option<NetworkState>,
 }
 
-#[allow(dead_code)]
 impl EventTracker {
     pub fn new(stability: Duration) -> Self {
         Self {

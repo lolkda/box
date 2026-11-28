@@ -149,7 +149,7 @@ export function useTaskStart() {
   );
 }
 
-export function useInvalidateOperationalQueries() {
+function useInvalidateOperationalQueries() {
   const queryClient = useQueryClient();
   return useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.status });

@@ -28,19 +28,6 @@ export function formatDateTime(value: string): string {
   }).format(date);
 }
 
-export function formatClock(value: string): string {
-  if (!value) return "";
-  const normalized = value.includes("T") ? value : value.replace(" ", "T");
-  const date = new Date(normalized);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
-}
-
 export function taskStateMeta(state: TaskState): { label: string; tone: "neutral" | "success" | "warning" | "danger" | "info" } {
   switch (state) {
     case "running":

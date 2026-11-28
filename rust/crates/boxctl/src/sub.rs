@@ -276,7 +276,7 @@ pub fn set(paths: &Paths, params: SetParams, global_ua: &str) -> Result<Value> {
         let is_aggregate = manifest_count(paths, &new_name).unwrap_or(0) > 0;
         if !is_aggregate {
             if params.old_name != new_name {
-                let _ = remove_provider_defs(paths, &[params.old_name.clone()]);
+                let _ = remove_provider_defs(paths, std::slice::from_ref(&params.old_name));
             }
             let _ = sync_proxy_providers(
                 paths,

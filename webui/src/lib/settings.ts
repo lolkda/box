@@ -1,6 +1,6 @@
-export type SettingFieldKind = "switch" | "select" | "user-agent" | "text" | "number" | "password" | "array" | "package-array";
+type SettingFieldKind = "switch" | "select" | "user-agent" | "text" | "number" | "password" | "array" | "package-array";
 
-export interface SettingOption {
+interface SettingOption {
   value: string;
   label: string;
 }

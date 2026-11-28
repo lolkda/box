@@ -1,6 +1,6 @@
 import type { ProxyGroup, RuleProvider } from "../api/types";
 
-export type RuleMode = "structured" | "raw";
+type RuleMode = "structured" | "raw";
 
 export interface RuleDraft {
   mode: RuleMode;
@@ -87,11 +87,6 @@ export function validateRuleDraft(
     return `规则集不存在: ${draft.value}`;
   }
   return null;
-}
-
-export function ruleTargets(rule: string): string[] {
-  const draft = parseRule(rule);
-  return draft.mode === "structured" && draft.target ? [draft.target] : [];
 }
 
 export function ruleUsesProvider(rule: string, providerName: string): boolean {

@@ -2,13 +2,13 @@ export type ApiEnvelope<T> =
   | { ok: true; data: T; meta?: { version?: number } }
   | { ok: false; error: ApiErrorPayload; meta?: { version?: number } };
 
-export interface ApiErrorPayload {
+interface ApiErrorPayload {
   code: string;
   message: string;
   detail?: string;
 }
 
-export interface ControlState {
+interface ControlState {
   mode: "manual" | "auto" | string;
   desired: "running" | "stopped" | string;
 }
@@ -70,7 +70,7 @@ export interface ConfigData {
   rules: string[];
 }
 
-export interface SettingsSensitive {
+interface SettingsSensitive {
   githubtoken: {
     set: boolean;
   };
@@ -264,7 +264,7 @@ export interface NetworkRulesData {
   warnings: string[];
 }
 
-export interface NetworkRuleDiff {
+interface NetworkRuleDiff {
   added: number;
   updated: number;
   removed: number;

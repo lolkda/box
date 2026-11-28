@@ -1,2 +1,5 @@
 webui/node_modules/
 artifacts/
+
+box-*.zip
+box/bin/boxctl

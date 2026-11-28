@@ -175,12 +175,10 @@ fn is_builtin_chain(table: &str, chain: &str) -> bool {
     }
 }
 
-#[allow(dead_code)]
 pub trait Runner {
     fn run(&mut self, command: &str, args: &[String]) -> Result<()>;
 }
 
-#[allow(dead_code)]
 pub struct SystemRunner;
 
 impl Runner for SystemRunner {
@@ -738,7 +736,6 @@ fn already_absent(error: &BoxError) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-#[allow(dead_code)]
 fn rollback_rules<'a>(rules: impl Iterator<Item = &'a Rule>) -> Vec<Rule> {
     let mut result = Vec::new();
     for rule in rules {

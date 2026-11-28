@@ -1,6 +1,0 @@
-import{c as l,o as i,j as e,h as n,B as c}from"./index-BVoxVqHW.js";import{T as d}from"./triangle-alert-Ces7hMRb.js";/**
- * @license lucide-react v0.468.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */const o=l("RefreshCw",[["path",{d:"M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",key:"v9h5vc"}],["path",{d:"M21 3v5h-5",key:"1q7to0"}],["path",{d:"M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16",key:"3uifl3"}],["path",{d:"M8 16H3v5",key:"1cv678"}]]);function h({error:s,onRetry:a,title:r="加载失败"}){const t=i(s);return e.jsxs("div",{className:"rounded-2xl border border-danger/20 bg-danger-soft/60 p-4",role:"alert",children:[e.jsxs("div",{className:"flex items-start gap-3",children:[e.jsx(d,{size:18,className:"mt-0.5 shrink-0 text-danger"}),e.jsxs("div",{className:"min-w-0 flex-1",children:[e.jsx("p",{className:"text-sm font-semibold text-danger",children:r}),e.jsx("p",{className:"mt-1 text-xs leading-5 text-fg",children:n(s)}),t?e.jsx("pre",{className:"mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all text-[11px] text-fg-muted",children:t}):null]})]}),a?e.jsx(c,{size:"sm",variant:"secondary",className:"mt-3",onClick:a,icon:e.jsx(o,{size:14}),children:"重试"}):null]})}export{h as E,o as R};
